@@ -34,7 +34,7 @@ func TestAccountSupportsOpenAIInboundProtocol(t *testing.T) {
 		Platform: PlatformOpenAI,
 		Type:     AccountTypeOAuth,
 		Extra: map[string]any{
-			"codex_cli_only":       true,
+			"codex_cli_only":        true,
 			"openai_responses_only": true,
 		},
 	}
