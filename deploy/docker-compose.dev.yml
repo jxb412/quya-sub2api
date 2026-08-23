@@ -24,7 +24,9 @@ services:
     volumes:
       - ./data:/app/data:Z
     environment:
-      - AUTO_SETUP=true
+      - SETUP_ENABLED=${SETUP_ENABLED:-false}
+      - AUTO_SETUP=${AUTO_SETUP:-false}
+      - DATABASE_INITIALIZATION_ENABLED=${DATABASE_INITIALIZATION_ENABLED:-false}
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8080
       - SERVER_MODE=debug

@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/ent"
@@ -64,23 +65,27 @@ func InitEnt(cfg *config.Config) (*ent.Client, *sql.DB, error) {
 	}
 	applyDBPoolSettings(drv.DB(), cfg)
 
-	// 确保数据库 schema 已准备就绪。
-	// SQL 迁移文件是 schema 的权威来源（source of truth）。
-	// 这种方式比 Ent 的自动迁移更可控，支持复杂的迁移场景。
 	migrationCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	if err := applyMigrationsFS(migrationCtx, drv.DB(), migrations.FS); err != nil {
-		_ = drv.Close() // 迁移失败时关闭驱动，避免资源泄露
-		return nil, nil, err
+	if cfg.Database.InitializationEnabled {
+		// SQL 迁移文件是 schema 的权威来源，只有显式开启数据库初始化时执行。
+		if err := applyMigrationsFS(migrationCtx, drv.DB(), migrations.FS); err != nil {
+			_ = drv.Close() // 迁移失败时关闭驱动，避免资源泄露
+			return nil, nil, err
+		}
+	} else {
+		slog.Warn("database initialization disabled; skipping startup migrations and bootstrap writes")
 	}
 
 	// 创建 Ent 客户端，绑定到已配置的数据库驱动。
 	client := ent.NewClient(ent.Driver(drv))
 
-	// 启动阶段：从配置或数据库中确保系统密钥可用。
-	if err := ensureBootstrapSecrets(migrationCtx, client, cfg); err != nil {
-		_ = client.Close()
-		return nil, nil, err
+	// 启动阶段的密钥补写属于数据库初始化的一部分，按开关执行。
+	if cfg.Database.InitializationEnabled {
+		if err := ensureBootstrapSecrets(migrationCtx, client, cfg); err != nil {
+			_ = client.Close()
+			return nil, nil, err
+		}
 	}
 
 	// 在密钥补齐后执行完整配置校验，避免空 jwt.secret 导致服务运行时失败。
@@ -92,7 +97,7 @@ func InitEnt(cfg *config.Config) (*ent.Client, *sql.DB, error) {
 	// SIMPLE 模式：启动时补齐各平台默认分组。
 	// - anthropic/openai/gemini: 确保存在 <platform>-default
 	// - antigravity: 仅要求存在 >=2 个未软删除分组（用于 claude/gemini 混合调度场景）
-	if cfg.RunMode == config.RunModeSimple {
+	if cfg.Database.InitializationEnabled && cfg.RunMode == config.RunModeSimple {
 		seedCtx, seedCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer seedCancel()
 		if err := ensureSimpleModeDefaultGroups(seedCtx, client); err != nil {

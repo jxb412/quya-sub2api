@@ -169,6 +169,26 @@ func TestNeedsSetupFallsBackToFileDetectionWhenSkipSetupIsDisabled(t *testing.T)
 	}
 }
 
+func TestSetupAndDatabaseInitializationAreOptIn(t *testing.T) {
+	t.Setenv("SETUP_ENABLED", "")
+	t.Setenv("DATABASE_INITIALIZATION_ENABLED", "")
+	if SetupEnabled() {
+		t.Fatal("SetupEnabled() = true by default")
+	}
+	if DatabaseInitializationEnabled() {
+		t.Fatal("DatabaseInitializationEnabled() = true by default")
+	}
+
+	t.Setenv("SETUP_ENABLED", "yes")
+	t.Setenv("DATABASE_INITIALIZATION_ENABLED", "1")
+	if !SetupEnabled() {
+		t.Fatal("SetupEnabled() = false for explicit yes")
+	}
+	if !DatabaseInitializationEnabled() {
+		t.Fatal("DatabaseInitializationEnabled() = false for explicit 1")
+	}
+}
+
 func TestSetupMigrationTimeout(t *testing.T) {
 	t.Run("uses default timeout when unset", func(t *testing.T) {
 		cfg := &SetupConfig{}

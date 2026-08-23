@@ -157,6 +157,27 @@ func skipSetupEnabled() bool {
 	}
 }
 
+// SetupEnabled controls whether the first-run wizard or automatic installer
+// may run. Production deployments keep this disabled by default.
+func SetupEnabled() bool {
+	return envFlagEnabled("SETUP_ENABLED")
+}
+
+// DatabaseInitializationEnabled controls whether an explicit installation may
+// create the schema. It is intentionally separate from SetupEnabled.
+func DatabaseInitializationEnabled() bool {
+	return envFlagEnabled("DATABASE_INITIALIZATION_ENABLED")
+}
+
+func envFlagEnabled(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true", "1", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
 // NeedsSetup checks if the system needs initial setup
 // Uses multiple checks to prevent attackers from forcing re-setup by deleting config
 func NeedsSetup() bool {
@@ -352,6 +373,9 @@ func createInstallLock() error {
 }
 
 func initializeDatabase(cfg *SetupConfig) error {
+	if !DatabaseInitializationEnabled() {
+		return fmt.Errorf("database initialization is disabled; set DATABASE_INITIALIZATION_ENABLED=true for an explicit installation")
+	}
 	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Database.Host, cfg.Database.Port, cfg.Database.User,
@@ -540,8 +564,7 @@ func generateSecret(length int) (string, error) {
 
 // AutoSetupEnabled checks if auto setup is enabled via environment variable
 func AutoSetupEnabled() bool {
-	val := os.Getenv("AUTO_SETUP")
-	return val == "true" || val == "1" || val == "yes"
+	return envFlagEnabled("AUTO_SETUP")
 }
 
 // getEnvOrDefault gets environment variable or returns default value
@@ -565,6 +588,12 @@ func getEnvIntOrDefault(key string, defaultValue int) int {
 // AutoSetupFromEnv performs automatic setup using environment variables
 // This is designed for Docker deployment where all config is passed via env vars
 func AutoSetupFromEnv() error {
+	if !SetupEnabled() {
+		return fmt.Errorf("setup is disabled; set SETUP_ENABLED=true for an explicit installation")
+	}
+	if !DatabaseInitializationEnabled() {
+		return fmt.Errorf("database initialization is disabled; set DATABASE_INITIALIZATION_ENABLED=true for an explicit installation")
+	}
 	logger.LegacyPrintf("setup", "%s", "Auto setup enabled, configuring from environment variables...")
 	logger.LegacyPrintf("setup", "Data directory: %s", GetDataDir())
 

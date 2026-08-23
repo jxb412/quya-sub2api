@@ -68,6 +68,9 @@ func main() {
 
 	// CLI setup mode
 	if *setupMode {
+		if !setup.SetupEnabled() {
+			log.Fatal("setup is disabled; set SETUP_ENABLED=true for an explicit installation")
+		}
 		if err := setup.RunCLI(); err != nil {
 			log.Fatalf("Setup failed: %v", err)
 		}
@@ -76,6 +79,9 @@ func main() {
 
 	// Check if setup is needed
 	if setup.NeedsSetup() {
+		if !setup.SetupEnabled() {
+			log.Fatal("first-run setup is disabled; set SETUP_ENABLED=true for an explicit installation")
+		}
 		// Check if auto-setup is enabled (for Docker deployment)
 		if setup.AutoSetupEnabled() {
 			log.Println("Auto setup mode enabled...")
