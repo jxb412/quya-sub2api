@@ -54,8 +54,8 @@ export default {
     rollbackSourceHint: '源码构建不支持在线回退',
     deployScript: '脚本部署',
     deployDocker: 'Docker',
-    dockerEditCompose: '修改 docker-compose.yml 中的镜像版本',
-    dockerRecreate: '重新创建容器'
+    dockerEditCompose: '拉取个人仓库的固定版本镜像',
+    dockerRecreate: '仅重建 Sub2API 应用容器'
   },
 
   // Recharge / Subscription Page

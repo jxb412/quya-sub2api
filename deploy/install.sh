@@ -2,7 +2,7 @@
 #
 # Sub2API Installation Script
 # Sub2API 安装脚本
-# Usage: curl -sSL https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/jxb412/quya-sub2api/main/deploy/install.sh | bash
 #
 
 set -e
@@ -31,7 +31,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Configuration
-GITHUB_REPO="Wei-Shaw/sub2api"
+GITHUB_REPO="jxb412/quya-sub2api"
 INSTALL_DIR="/opt/sub2api"
 SERVICE_NAME="sub2api"
 SERVICE_USER="sub2api"
@@ -627,7 +627,7 @@ download_and_extract() {
     trap "rm -rf $TEMP_DIR" EXIT
 
     # Download archive
-    if ! curl -sL "$download_url" -o "$TEMP_DIR/$archive_name"; then
+    if ! curl -fsSL "$download_url" -o "$TEMP_DIR/$archive_name"; then
         print_error "$(msg 'download_failed')"
         exit 1
     fi
@@ -718,7 +718,7 @@ install_service() {
     cat > /etc/systemd/system/sub2api.service << EOF
 [Unit]
 Description=Sub2API - AI API Gateway Platform
-Documentation=https://github.com/Wei-Shaw/sub2api
+Documentation=https://github.com/jxb412/quya-sub2api
 After=network.target postgresql.service redis.service
 Wants=postgresql.service redis.service
 
@@ -745,6 +745,9 @@ ReadWritePaths=/opt/sub2api
 Environment=GIN_MODE=release
 Environment=SERVER_HOST=${SERVER_HOST}
 Environment=SERVER_PORT=${SERVER_PORT}
+Environment=SETUP_ENABLED=true
+Environment=AUTO_SETUP=false
+Environment=DATABASE_INITIALIZATION_ENABLED=true
 
 [Install]
 WantedBy=multi-user.target

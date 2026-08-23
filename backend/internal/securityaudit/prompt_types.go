@@ -67,21 +67,21 @@ const (
 )
 
 type Request struct {
-	RequestID  string
-	UserID     int64
-	Username   string
-	UserEmail  string
-	APIKeyID   int64
-	APIKeyName string
-	GroupID    *int64
-	GroupName  string
+	RequestID       string
+	UserID          int64
+	Username        string
+	UserEmail       string
+	APIKeyID        int64
+	APIKeyName      string
+	GroupID         *int64
+	GroupName       string
 	AccountPlanType string
-	Provider   string
-	Endpoint   string
-	Protocol   string
-	Model      string
-	Body       []byte
-	Stage      string
+	Provider        string
+	Endpoint        string
+	Protocol        string
+	Model           string
+	Body            []byte
+	Stage           string
 }
 
 func (r Request) Clone() Request {
@@ -148,14 +148,14 @@ type PromptDecision struct {
 }
 
 type LegacyDecision struct {
-	Allowed    bool   `json:"allowed"`
-	Blocked    bool   `json:"blocked"`
-	Flagged    bool   `json:"flagged"`
-	Message    string `json:"message"`
-	StatusCode int    `json:"status_code"`
-	ErrorCode  string `json:"error_code"`
-	Action     string `json:"action"`
-	AccountPlanTypePending bool `json:"-"`
+	Allowed                bool   `json:"allowed"`
+	Blocked                bool   `json:"blocked"`
+	Flagged                bool   `json:"flagged"`
+	Message                string `json:"message"`
+	StatusCode             int    `json:"status_code"`
+	ErrorCode              string `json:"error_code"`
+	Action                 string `json:"action"`
+	AccountPlanTypePending bool   `json:"-"`
 }
 
 type Decision struct {
