@@ -14,6 +14,26 @@ import (
 // 未命中官方/黑名单/缺指纹/版本无法识别都沿用这句（避免向伪装客户端泄露门控细节）。
 const CodexOfficialClientsOnlyMessage = "This account only allows Codex official clients"
 
+// OpenAICodexClientRestrictionReason is a request-local policy rejection. It
+// must not be treated as an upstream account health failure: another account
+// in the same group may accept the client.
+const OpenAICodexClientRestrictionReason GatewayFailureReason = "codex_cli_only_restriction"
+
+const openAICodexRestrictionFailoverContextKey = "sub2api.openai.codex_restriction_failover"
+
+// EnableOpenAICodexRestrictionFailover asks the OpenAI gateway handlers to
+// retry another account when an account-level codex_cli_only check rejects the
+// current client. Direct service callers keep the historical 403 response.
+func EnableOpenAICodexRestrictionFailover(c *gin.Context) {
+	if c != nil {
+		c.Set(openAICodexRestrictionFailoverContextKey, true)
+	}
+}
+
+func openAICodexRestrictionFailoverEnabled(c *gin.Context) bool {
+	return c != nil && c.GetBool(openAICodexRestrictionFailoverContextKey)
+}
+
 const (
 	// CodexClientRestrictionReasonDisabled 表示账号未开启 codex_cli_only。
 	CodexClientRestrictionReasonDisabled = "codex_cli_only_disabled"

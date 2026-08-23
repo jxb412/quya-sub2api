@@ -755,6 +755,47 @@
               </div>
             </div>
 
+            <div class="space-y-3 rounded-lg border border-gray-100 p-4 dark:border-dark-700">
+              <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.accountPlanScope') }}</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.accountPlanScopeHint') }}</p>
+                </div>
+                <span class="inline-flex w-fit rounded-md bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300">
+                  {{ accountPlanScopeSummary }}
+                </span>
+              </div>
+              <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <button
+                  v-for="option in accountPlanTypeOptions"
+                  :key="option.value"
+                  type="button"
+                  class="flex items-center justify-between rounded-lg border p-3 text-left transition-colors"
+                  :class="isAccountPlanTypeSelected(option.value)
+                    ? 'border-primary-300 bg-primary-50 text-primary-900 dark:border-primary-700 dark:bg-primary-900/20 dark:text-primary-100'
+                    : 'border-gray-100 hover:bg-gray-50 dark:border-dark-700 dark:hover:bg-dark-700/60'"
+                  @click="toggleAccountPlanType(option.value)"
+                >
+                  <span class="text-sm font-semibold uppercase">{{ option.label }}</span>
+                  <span
+                    class="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border"
+                    :class="isAccountPlanTypeSelected(option.value)
+                      ? 'border-primary-500 bg-primary-500 text-white'
+                      : 'border-gray-300 text-transparent dark:border-dark-500'"
+                  >
+                    <Icon name="check" size="xs" :stroke-width="2" />
+                  </span>
+                </button>
+              </div>
+              <button
+                type="button"
+                class="text-xs font-medium text-primary-600 hover:text-primary-700 dark:text-primary-300 dark:hover:text-primary-200"
+                @click="clearAccountPlanTypes"
+              >
+                {{ t('admin.riskControl.accountPlanScopeAll') }}
+              </button>
+            </div>
+
             <div class="space-y-4 rounded-lg border border-gray-100 p-4 dark:border-dark-700">
               <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -1242,6 +1283,7 @@ const configForm = reactive({
   sample_rate: 100,
   all_groups: true,
   group_ids: [] as number[],
+  account_plan_types: [] as string[],
   record_non_hits: false,
   worker_count: 4,
   queue_size: 32768,
@@ -1411,6 +1453,18 @@ const groupFilterOptions = computed<SelectOption[]>(() => [
 ])
 
 const selectedGroupCount = computed(() => String(configForm.group_ids.length))
+
+const accountPlanTypeOptions = computed(() => [
+  { value: 'pro', label: t('admin.riskControl.accountPlanTypePro') },
+  { value: 'plus', label: t('admin.riskControl.accountPlanTypePlus') },
+  { value: 'team', label: t('admin.riskControl.accountPlanTypeTeam') },
+  { value: 'free', label: t('admin.riskControl.accountPlanTypeFree') },
+])
+
+const accountPlanScopeSummary = computed(() => {
+  if (configForm.account_plan_types.length === 0) return t('admin.riskControl.accountPlanScopeAll')
+  return t('admin.riskControl.accountPlanScopeSelected', { count: configForm.account_plan_types.length })
+})
 
 const modelFilterModelCount = computed(() => configForm.model_filter_models.length)
 
@@ -1720,6 +1774,9 @@ function applyConfig(config: ContentModerationConfig) {
   configForm.sample_rate = config.sample_rate ?? 100
   configForm.all_groups = config.all_groups
   configForm.group_ids = Array.isArray(config.group_ids) ? [...config.group_ids] : []
+  configForm.account_plan_types = Array.isArray(config.account_plan_types)
+    ? normalizeAccountPlanTypes(config.account_plan_types)
+    : []
   configForm.record_non_hits = config.record_non_hits
   configForm.worker_count = config.worker_count || 4
   configForm.queue_size = config.queue_size || 32768
@@ -1805,6 +1862,7 @@ async function saveConfig() {
       sample_rate: Number(configForm.sample_rate) || 0,
       all_groups: configForm.all_groups,
       group_ids: configForm.all_groups ? [] : [...configForm.group_ids],
+      account_plan_types: normalizeAccountPlanTypes(configForm.account_plan_types),
       record_non_hits: configForm.record_non_hits,
       clear_api_key: configForm.clear_api_key,
       worker_count: Number(configForm.worker_count) || 4,
@@ -2110,6 +2168,29 @@ function toggleGroup(groupID: number) {
   } else {
     configForm.group_ids.push(groupID)
   }
+}
+
+function normalizeAccountPlanTypes(types: unknown): string[] {
+  if (!Array.isArray(types)) return []
+  const allowed = new Set(['pro', 'plus', 'team', 'free'])
+  return Array.from(new Set(types.map((item) => String(item ?? '').trim().toLowerCase()).filter((item) => allowed.has(item))))
+}
+
+function isAccountPlanTypeSelected(planType: string): boolean {
+  return configForm.account_plan_types.includes(planType)
+}
+
+function toggleAccountPlanType(planType: string) {
+  const index = configForm.account_plan_types.indexOf(planType)
+  if (index >= 0) {
+    configForm.account_plan_types.splice(index, 1)
+  } else {
+    configForm.account_plan_types.push(planType)
+  }
+}
+
+function clearAccountPlanTypes() {
+  configForm.account_plan_types = []
 }
 
 function isGroupSelected(groupID: number): boolean {

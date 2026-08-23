@@ -973,6 +973,50 @@
         </div>
       </div>
 
+      <!-- OpenAI OAuth: Responses endpoint only -->
+      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <label
+            id="bulk-edit-openai-responses-only-label"
+            class="input-label mb-0"
+            for="bulk-edit-openai-responses-only-enabled"
+          >
+            {{ t('admin.accounts.openai.responsesOnly') }}
+          </label>
+          <input
+            v-model="enableOpenAIResponsesOnly"
+            id="bulk-edit-openai-responses-only-enabled"
+            type="checkbox"
+            aria-controls="bulk-edit-openai-responses-only"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <div
+          id="bulk-edit-openai-responses-only"
+          :class="!enableOpenAIResponsesOnly && 'pointer-events-none opacity-50'"
+        >
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.openai.responsesOnlyDesc') }}
+          </p>
+          <button
+            id="bulk-edit-openai-responses-only-toggle"
+            type="button"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              openAIResponsesOnlyEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+            @click="openAIResponsesOnlyEnabled = !openAIResponsesOnlyEnabled"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                openAIResponsesOnlyEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -1705,6 +1749,8 @@ const openaiAPIKeyResponsesWebSocketV2Mode = ref<OpenAIWSMode>(OPENAI_WS_MODE_OF
 const upstreamBillingAutoProbeMode = ref<'enabled' | 'disabled'>('enabled')
 const codexCLIOnlyEnabled = ref(false)
 const codexCLIOnlyAppServerEnabled = ref(false)
+const enableOpenAIResponsesOnly = ref(false)
+const openAIResponsesOnlyEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const enableCodexFingerprintMode = ref(false)
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
@@ -2076,6 +2122,15 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.codex_cli_only = codexCLIOnlyEnabled.value
   }
 
+  if (enableOpenAIResponsesOnly.value) {
+    const extra = ensureExtra()
+    if (openAIResponsesOnlyEnabled.value) {
+      extra.openai_responses_only = true
+    } else {
+      delete extra.openai_responses_only
+    }
+  }
+
   // 子开关从属于 codex_cli_only：仅当同一次批量编辑也把父开关设为开启时才写入，
   // 与 Create/Edit 语义对齐，避免在父开关关闭的账号上写入无意义的孤立字段。
   if (
@@ -2394,6 +2449,8 @@ watch(
       upstreamBillingAutoProbeMode.value = 'enabled'
       codexCLIOnlyEnabled.value = false
       codexCLIOnlyAppServerEnabled.value = false
+      enableOpenAIResponsesOnly.value = false
+      openAIResponsesOnlyEnabled.value = false
       openAICompactMode.value = 'auto'
       openAICompactModelMappings.value = []
       rpmLimitEnabled.value = false

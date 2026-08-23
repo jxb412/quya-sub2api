@@ -75,6 +75,7 @@ type Request struct {
 	APIKeyName string
 	GroupID    *int64
 	GroupName  string
+	AccountPlanType string
 	Provider   string
 	Endpoint   string
 	Protocol   string
@@ -154,6 +155,7 @@ type LegacyDecision struct {
 	StatusCode int    `json:"status_code"`
 	ErrorCode  string `json:"error_code"`
 	Action     string `json:"action"`
+	AccountPlanTypePending bool `json:"-"`
 }
 
 type Decision struct {

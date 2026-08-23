@@ -1766,6 +1766,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
+	if !openAIInboundAccountAllowed(ctx, account) {
+		return false, "inbound_protocol_or_client_restricted"
+	}
 	if req.RequirePrivacySet && !account.IsPrivacySet() {
 		return false, "privacy_not_set"
 	}
@@ -2287,7 +2290,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				if selection == nil || selection.Account == nil {
 					return selection, decision, nil
 				}
-				if accountSupportsOpenAICapabilities(selection.Account, requiredCapability, requiredImageCapability) {
+				if openAIInboundAccountAllowed(ctx, selection.Account) && accountSupportsOpenAICapabilities(selection.Account, requiredCapability, requiredImageCapability) {
 					return selection, decision, nil
 				}
 				if selection.ReleaseFunc != nil {
@@ -2313,6 +2316,7 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 				return selection, decision, nil
 			}
 			if s.isOpenAIAccountTransportCompatible(selection.Account, requiredTransport) &&
+				openAIInboundAccountAllowed(ctx, selection.Account) &&
 				accountSupportsOpenAICapabilities(selection.Account, requiredCapability, requiredImageCapability) {
 				return selection, decision, nil
 			}

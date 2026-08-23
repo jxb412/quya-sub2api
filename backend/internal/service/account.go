@@ -1317,6 +1317,21 @@ func (a *Account) IsOpenAIChatGPTSubscription() bool {
 	}
 }
 
+// GetAccountPlanType returns the upstream subscription/entitlement type used
+// for account-scoped policies (for example: pro, plus, team, free).
+// The value is normalized to lower case so policy matching is stable even
+// when upstream responses use inconsistent casing or whitespace.
+func (a *Account) GetAccountPlanType() string {
+	if a == nil {
+		return ""
+	}
+	planType := strings.TrimSpace(a.GetCredential("plan_type"))
+	if planType == "" {
+		planType = strings.TrimSpace(a.GetExtraString("plan_type"))
+	}
+	return strings.ToLower(planType)
+}
+
 func (a *Account) IsOpenAIPersonalAccessToken() bool {
 	if !a.IsOpenAIOAuth() {
 		return false

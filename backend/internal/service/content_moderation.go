@@ -151,6 +151,7 @@ type ContentModerationConfig struct {
 	SampleRate           int                          `json:"sample_rate"`
 	AllGroups            bool                         `json:"all_groups"`
 	GroupIDs             []int64                      `json:"group_ids"`
+	AccountPlanTypes     []string                     `json:"account_plan_types"`
 	RecordNonHits        bool                         `json:"record_non_hits"`
 	Thresholds           map[string]float64           `json:"thresholds"`
 	WorkerCount          int                          `json:"worker_count"`
@@ -189,6 +190,7 @@ type ContentModerationConfigView struct {
 	SampleRate                     int                             `json:"sample_rate"`
 	AllGroups                      bool                            `json:"all_groups"`
 	GroupIDs                       []int64                         `json:"group_ids"`
+	AccountPlanTypes               []string                        `json:"account_plan_types"`
 	RecordNonHits                  bool                            `json:"record_non_hits"`
 	Thresholds                     map[string]float64              `json:"thresholds"`
 	WorkerCount                    int                             `json:"worker_count"`
@@ -281,6 +283,7 @@ type UpdateContentModerationConfigInput struct {
 	SampleRate                     *int                          `json:"sample_rate"`
 	AllGroups                      *bool                         `json:"all_groups"`
 	GroupIDs                       *[]int64                      `json:"group_ids"`
+	AccountPlanTypes               *[]string                     `json:"account_plan_types"`
 	RecordNonHits                  *bool                         `json:"record_non_hits"`
 	Thresholds                     *map[string]float64           `json:"thresholds"`
 	WorkerCount                    *int                          `json:"worker_count"`
@@ -314,11 +317,28 @@ type ContentModerationCheckInput struct {
 	APIKeyName string
 	GroupID    *int64
 	GroupName  string
+	AccountPlanType string
 	Endpoint   string
 	Provider   string
 	Model      string
 	Protocol   string
 	Body       []byte
+}
+
+type contentModerationAccountPlanTypeContextKey struct{}
+
+// WithContentModerationAccountPlanType carries the selected upstream account's
+// plan type from the scheduler back into the security-audit request builder.
+func WithContentModerationAccountPlanType(ctx context.Context, planType string) context.Context {
+	return context.WithValue(ctx, contentModerationAccountPlanTypeContextKey{}, strings.ToLower(strings.TrimSpace(planType)))
+}
+
+func ContentModerationAccountPlanTypeFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(contentModerationAccountPlanTypeContextKey{}).(string)
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 type ContentModerationInput struct {
@@ -383,6 +403,9 @@ type ContentModerationDecision struct {
 	HighestScore    float64            `json:"highest_score"`
 	CategoryScores  map[string]float64 `json:"category_scores"`
 	Action          string             `json:"action"`
+	// AccountPlanTypePending is set when the pre-selection check needs the
+	// selected upstream account before it can evaluate the configured scope.
+	AccountPlanTypePending bool `json:"-"`
 }
 
 type ContentModerationLog struct {
@@ -611,6 +634,20 @@ func (s *ContentModerationService) GetConfig(ctx context.Context) (*ContentModer
 	return s.configView(cfg), nil
 }
 
+// AccountPlanTypeInScope reports whether an already selected upstream account
+// is eligible for the configured account-plan scope. Empty scope means all
+// plans; an empty plan type does not match a non-empty scope.
+func (s *ContentModerationService) AccountPlanTypeInScope(ctx context.Context, planType string) bool {
+	if s == nil || s.settingRepo == nil {
+		return true
+	}
+	snapshot, err := s.loadRuntimeSnapshot(ctx)
+	if err != nil || snapshot == nil || snapshot.config == nil {
+		return true
+	}
+	return snapshot.config.includesAccountPlanType(planType)
+}
+
 func (s *ContentModerationService) UpdateConfig(ctx context.Context, input UpdateContentModerationConfigInput) (*ContentModerationConfigView, error) {
 	cfg, err := s.loadConfig(ctx)
 	if err != nil {
@@ -692,6 +729,9 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	}
 	if input.GroupIDs != nil {
 		cfg.GroupIDs = normalizeInt64IDs(*input.GroupIDs)
+	}
+	if input.AccountPlanTypes != nil {
+		cfg.AccountPlanTypes = normalizeContentModerationAccountPlanTypes(*input.AccountPlanTypes)
 	}
 	if input.RecordNonHits != nil {
 		cfg.RecordNonHits = *input.RecordNonHits
@@ -845,6 +885,8 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	cfg := runtimeSnapshot.config
 	inGroupScope := cfg.includesGroup(input.GroupID)
 	inModelScope := cfg.includesModel(input.Model)
+	inAccountPlanScope := cfg.includesAccountPlanType(input.AccountPlanType)
+	accountPlanTypePending := len(cfg.AccountPlanTypes) > 0 && strings.TrimSpace(input.AccountPlanType) == ""
 	slog.Info("content_moderation.config_loaded",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
@@ -862,6 +904,10 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		"model_filter_type", cfg.ModelFilter.Type,
 		"configured_models", cfg.ModelFilter.Models,
 		"in_model_scope", inModelScope,
+		"configured_account_plan_types", cfg.AccountPlanTypes,
+		"account_plan_type", input.AccountPlanType,
+		"in_account_plan_scope", inAccountPlanScope,
+		"account_plan_type_pending", accountPlanTypePending,
 		"sample_rate", cfg.SampleRate,
 		"api_key_count", len(cfg.apiKeys()),
 		"pre_hash_check_enabled", cfg.PreHashCheckEnabled,
@@ -907,6 +953,27 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"model", input.Model,
 			"model_filter_type", cfg.ModelFilter.Type,
 			"configured_models", cfg.ModelFilter.Models)
+		return allow, nil
+	}
+	if !inAccountPlanScope {
+		allow.AccountPlanTypePending = true
+		slog.Info("content_moderation.skip_account_plan_type_out_of_scope",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"group_id", contentModerationLogGroupID(input.GroupID),
+			"account_plan_type", input.AccountPlanType,
+			"configured_account_plan_types", cfg.AccountPlanTypes,
+		)
+		return allow, nil
+	}
+	if accountPlanTypePending {
+		allow.AccountPlanTypePending = true
+		slog.Info("content_moderation.defer_account_plan_type_scope",
+			"user_id", input.UserID,
+			"api_key_id", input.APIKeyID,
+			"group_id", contentModerationLogGroupID(input.GroupID),
+			"configured_account_plan_types", cfg.AccountPlanTypes,
+		)
 		return allow, nil
 	}
 	content := ExtractContentModerationInput(input.Protocol, input.Body)
@@ -2106,6 +2173,7 @@ func defaultContentModerationConfig() *ContentModerationConfig {
 			Type:   ContentModerationModelFilterAll,
 			Models: []string{},
 		},
+		AccountPlanTypes: []string{},
 		CyberPolicyExcludeFromBanCount: false,
 	}
 }
@@ -2118,6 +2186,7 @@ func cloneContentModerationConfig(cfg *ContentModerationConfig) *ContentModerati
 	clone.ProxyID = cloneInt64Ptr(cfg.ProxyID)
 	clone.APIKeys = append([]string(nil), cfg.APIKeys...)
 	clone.GroupIDs = append([]int64(nil), cfg.GroupIDs...)
+	clone.AccountPlanTypes = append([]string(nil), cfg.AccountPlanTypes...)
 	clone.BlockedKeywords = append([]string(nil), cfg.BlockedKeywords...)
 	clone.Thresholds = cloneFloatMap(cfg.Thresholds)
 	clone.ModelFilter = ContentModerationModelFilter{
@@ -2204,6 +2273,7 @@ func (cfg *ContentModerationConfig) normalize() {
 		cfg.NonHitRetentionDays = maxContentModerationNonHitRetentionDays
 	}
 	cfg.GroupIDs = normalizeInt64IDs(cfg.GroupIDs)
+	cfg.AccountPlanTypes = normalizeContentModerationAccountPlanTypes(cfg.AccountPlanTypes)
 	cfg.Thresholds = mergeContentModerationThresholds(ContentModerationDefaultThresholds(), cfg.Thresholds)
 	cfg.BlockedKeywords = normalizeBlockedKeywords(cfg.BlockedKeywords)
 	cfg.KeywordBlockingMode = normalizeKeywordBlockingMode(cfg.KeywordBlockingMode)
@@ -2238,6 +2308,22 @@ func (cfg *ContentModerationConfig) includesModel(model string) bool {
 	default:
 		return true
 	}
+}
+
+func (cfg *ContentModerationConfig) includesAccountPlanType(planType string) bool {
+	if cfg == nil || len(cfg.AccountPlanTypes) == 0 {
+		return true
+	}
+	planType = strings.ToLower(strings.TrimSpace(planType))
+	if planType == "" {
+		return false
+	}
+	for _, candidate := range cfg.AccountPlanTypes {
+		if strings.EqualFold(strings.TrimSpace(candidate), planType) {
+			return true
+		}
+	}
+	return false
 }
 
 func contentModerationLogGroupID(groupID *int64) int64 {
@@ -2421,6 +2507,7 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 		SampleRate:                     cfg.SampleRate,
 		AllGroups:                      cfg.AllGroups,
 		GroupIDs:                       append([]int64(nil), cfg.GroupIDs...),
+		AccountPlanTypes:               append([]string(nil), cfg.AccountPlanTypes...),
 		RecordNonHits:                  cfg.RecordNonHits,
 		Thresholds:                     cloneFloatMap(cfg.Thresholds),
 		WorkerCount:                    cfg.WorkerCount,
@@ -2835,6 +2922,26 @@ func normalizeContentModerationModelNames(models []string) []string {
 	return out
 }
 
+func normalizeContentModerationAccountPlanTypes(types []string) []string {
+	if len(types) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(types))
+	seen := make(map[string]struct{}, len(types))
+	for _, raw := range types {
+		planType := strings.ToLower(strings.TrimSpace(raw))
+		if planType == "" {
+			continue
+		}
+		if _, exists := seen[planType]; exists {
+			continue
+		}
+		seen[planType] = struct{}{}
+		out = append(out, planType)
+	}
+	return out
+}
+
 func contentModerationModelListContains(models []string, model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
@@ -2976,6 +3083,7 @@ type CyberPolicyRecordInput struct {
 	APIKeyName      string
 	GroupID         *int64
 	GroupName       string
+	AccountPlanType string
 	Endpoint        string
 	Model           string
 	UpstreamMessage string
@@ -3002,7 +3110,7 @@ func (s *ContentModerationService) RecordCyberPolicyEvent(ctx context.Context, i
 		return
 	}
 	cfg := runtimeSnapshot.config
-	if !cfg.includesGroup(in.GroupID) || !cfg.includesModel(in.Model) {
+	if !cfg.includesGroup(in.GroupID) || !cfg.includesModel(in.Model) || !cfg.includesAccountPlanType(in.AccountPlanType) {
 		return
 	}
 	var userID *int64
