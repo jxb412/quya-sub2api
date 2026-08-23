@@ -64,11 +64,25 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	if _, err := s.prepareCodexAccountIdentitySource(ctx, c, account); err != nil {
 		return nil, err
 	}
+	if inboundErr := openAIInboundProtocolFailover(c, account); inboundErr != nil {
+		return nil, inboundErr
+	}
 
 	restrictionResult := s.detectCodexClientRestriction(c, account, body)
 	logCodexCLIOnlyDetection(ctx, c, account, getAPIKeyIDFromContext(c), restrictionResult, body)
 	if restrictionResult.Enabled && !restrictionResult.Matched {
 		MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonLocalPolicyDenied)
+		if openAICodexRestrictionFailoverEnabled(c) {
+			return nil, &UpstreamFailoverError{
+				StatusCode:             http.StatusForbidden,
+				Scope:                  GatewayFailureScopeRequest,
+				Reason:                 OpenAICodexClientRestrictionReason,
+				RequestScopedTransient: true,
+				NextAccountAction:      NextAccountRetry,
+				ClientStatusCode:       http.StatusForbidden,
+				ClientMessage:          "No account in this group accepts the current client",
+			}
+		}
 		c.JSON(http.StatusForbidden, gin.H{
 			"error": gin.H{
 				"type":    "forbidden_error",

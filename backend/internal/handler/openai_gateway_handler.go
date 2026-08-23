@@ -45,6 +45,35 @@ type OpenAIGatewayHandler struct {
 	cfg                        *config.Config
 }
 
+// bindOpenAIInboundRequestPolicy installs the request-level candidate filter
+// before account selection. The small per-request cache avoids re-running the
+// Codex detector for every restricted account while preserving account-specific
+// app-server/whitelist decisions.
+func (h *OpenAIGatewayHandler) bindOpenAIInboundRequestPolicy(c *gin.Context, protocol service.OpenAIInboundProtocol, body []byte) {
+	if h == nil || h.gatewayService == nil || c == nil || c.Request == nil {
+		return
+	}
+	allowedCache := make(map[int64]bool)
+	var allowedCacheMu sync.Mutex
+	filter := service.OpenAIInboundRequestFilter(func(account *service.Account) bool {
+		if account == nil || !account.IsCodexCLIOnlyEnabled() {
+			return true
+		}
+		allowedCacheMu.Lock()
+		if allowed, ok := allowedCache[account.ID]; ok {
+			allowedCacheMu.Unlock()
+			return allowed
+		}
+		allowedCacheMu.Unlock()
+		allowed := h.gatewayService.IsOpenAICodexClientAllowedForAccount(c, account, body)
+		allowedCacheMu.Lock()
+		allowedCache[account.ID] = allowed
+		allowedCacheMu.Unlock()
+		return allowed
+	})
+	c.Request = c.Request.WithContext(service.WithOpenAIInboundRequestPolicy(c.Request.Context(), protocol, filter))
+}
+
 type openAIWSTurnChannelMappingSnapshot struct {
 	turn    int
 	mapping service.ChannelMappingResult
@@ -436,6 +465,8 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
+	service.EnableOpenAICodexRestrictionFailover(c)
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, body)
 
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); decision != nil && !decision.AllowNextStage {
 		h.openAISecurityAuditError(c, decision)
@@ -622,6 +653,22 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		bindContentModerationAccountPlanType(c, account)
+		if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); securityAuditAccountPlanPending(decision) {
+			failedAccountIDs[account.ID] = struct{}{}
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			continue
+		} else if decision != nil && !decision.AllowNextStage {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+				selection.ReleaseFunc = nil
+			}
+			h.openAISecurityAuditError(c, decision)
+			return
+		}
 		if previousResponseID != "" && requestPlatform == service.PlatformOpenAI && !account.IsOpenAIApiKey() {
 			// The public Responses HTTP API supports previous_response_id on API-key
 			// accounts. OAuth/SetupToken upstreams do not, so keep searching instead
@@ -1092,6 +1139,8 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
+	service.EnableOpenAICodexRestrictionFailover(c)
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolMessages, body)
 
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolAnthropicMessages, reqModel, body); decision != nil && !decision.AllowNextStage {
 		h.anthropicSecurityAuditError(c, decision)
@@ -1460,6 +1509,18 @@ func (h *OpenAIGatewayHandler) anthropicStreamingAwareError(c *gin.Context, stat
 func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, failoverErr *service.UpstreamFailoverError, streamStarted bool) {
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
+	}
+	if failoverErr != nil && (failoverErr.Reason == service.OpenAICodexClientRestrictionReason || failoverErr.Reason == service.OpenAIInboundProtocolRestrictionReason) {
+		message := strings.TrimSpace(failoverErr.ClientMessage)
+		if message == "" {
+			message = "No account in this group accepts the current client"
+		}
+		status := failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = http.StatusForbidden
+		}
+		h.anthropicStreamingAwareError(c, status, "permission_error", message, streamStarted)
+		return
 	}
 	if failoverErr != nil && failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -1903,6 +1964,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	)
 	setOpsRequestContext(c, reqModel, true)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeWSV2))
+	service.EnableOpenAICodexRestrictionFailover(c)
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, firstMessage)
+	ctx = c.Request.Context()
 
 	if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, firstMessage, "first_turn"); decision != nil && !decision.AllowNextStage {
 		writeSecurityAuditWSError(ctx, wsConn, decision)
@@ -2802,6 +2866,18 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", message, streamStarted)
 		return
 	}
+	if failoverErr.Reason == service.OpenAICodexClientRestrictionReason || failoverErr.Reason == service.OpenAIInboundProtocolRestrictionReason {
+		message := strings.TrimSpace(failoverErr.ClientMessage)
+		if message == "" {
+			message = "No account in this group accepts the current client"
+		}
+		status := failoverErr.ClientStatusCode
+		if status <= 0 {
+			status = http.StatusForbidden
+		}
+		h.handleStreamingAwareError(c, status, "forbidden_error", message, streamStarted)
+		return
+	}
 	copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
 	if failoverErr.IsCredentialFailure() {
 		status, message := credentialFailoverClientResponse(failoverErr)
@@ -3647,6 +3723,12 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 				APIKeyName:      apiKeyName,
 				GroupID:         groupID,
 				GroupName:       groupName,
+				AccountPlanType: func() string {
+					if account == nil {
+						return ""
+					}
+					return account.GetAccountPlanType()
+				}(),
 				Endpoint:        inboundEndpoint,
 				Model:           model,
 				UpstreamMessage: mark.Message,

@@ -400,6 +400,13 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 		}
 		return "not_schedulable"
 	}
+	// Public protocol/client restrictions are request-scoped and must be applied
+	// before sticky or load-aware scoring. This keeps incompatible accounts out
+	// of the candidate pool instead of selecting them and discovering the policy
+	// only during forwarding.
+	if !openAIInboundAccountAllowed(ctx, account) {
+		return false
+	}
 	if account.IsOpenAI() {
 		if paused, reason := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {
 			// Debug level: this fires per-candidate on the scheduling hot path, so Info

@@ -354,6 +354,20 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 			account := selection.Account
+			bindContentModerationAccountPlanType(c, account)
+			if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolGemini, reqModel, body); securityAuditAccountPlanPending(decision) {
+				fs.FailedAccountIDs[account.ID] = struct{}{}
+				if selection.Acquired && selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				continue
+			} else if decision != nil && !decision.AllowNextStage {
+				if selection.Acquired && selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				googleSecurityAuditError(c, decision)
+				return
+			}
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
 			// 检查请求拦截（预热请求、SUGGESTION MODE等）
@@ -667,6 +681,20 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 			account := selection.Account
+			bindContentModerationAccountPlanType(c, account)
+			if decision := h.checkSecurityAudit(c, reqLog, currentAPIKey, subject, service.ContentModerationProtocolAnthropicMessages, reqModel, body); securityAuditAccountPlanPending(decision) {
+				fs.FailedAccountIDs[account.ID] = struct{}{}
+				if selection.Acquired && selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				continue
+			} else if decision != nil && !decision.AllowNextStage {
+				if selection.Acquired && selection.ReleaseFunc != nil {
+					selection.ReleaseFunc()
+				}
+				h.anthropicSecurityAuditError(c, decision)
+				return
+			}
 			setOpsSelectedAccount(c, account.ID, account.Platform)
 
 			// [DEBUG-STICKY] 打印账号选择结果
