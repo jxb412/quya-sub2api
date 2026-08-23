@@ -318,6 +318,16 @@ docker compose logs -f sub2api
 - Creates data directories (uses local directories for easy backup/migration)
 - Displays generated credentials for your reference
 
+The custom distribution does not run the first-run installer or startup
+database initialization by default. For a brand-new deployment, set the
+following in `.env` before starting:
+
+```dotenv
+SETUP_ENABLED=true
+AUTO_SETUP=true
+DATABASE_INITIALIZATION_ENABLED=true
+```
+
 #### Manual Deployment
 
 If you prefer manual setup:
@@ -410,6 +420,11 @@ docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
 docker compose -f docker-compose.local.yml pull
 docker compose -f docker-compose.local.yml up -d
 ```
+
+Startup database initialization is disabled by default. If the release notes
+contain database migrations, temporarily set
+`DATABASE_INITIALIZATION_ENABLED=true` for the upgrade, then set it back to
+`false` after the service is healthy.
 
 #### Easy Migration (Local Directory Version)
 

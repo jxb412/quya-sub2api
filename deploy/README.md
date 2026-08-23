@@ -86,6 +86,16 @@ docker compose -f docker-compose.local.yml logs sub2api | grep "admin password"
 # http://localhost:8080
 ```
 
+This custom distribution keeps first-run setup and startup database
+initialization disabled by default. For a brand-new installation, explicitly
+enable all three variables in `.env` before starting:
+
+```dotenv
+SETUP_ENABLED=true
+AUTO_SETUP=true
+DATABASE_INITIALIZATION_ENABLED=true
+```
+
 ### Method 2: Manual Deployment
 
 If you prefer manual control:
@@ -130,7 +140,8 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 ### How Auto-Setup Works
 
-When using Docker Compose with `AUTO_SETUP=true`:
+Auto-setup is opt-in. It runs only when `SETUP_ENABLED=true` and
+`AUTO_SETUP=true`:
 
 1. On first run, the system automatically:
    - Connects to PostgreSQL and Redis
@@ -139,14 +150,22 @@ When using Docker Compose with `AUTO_SETUP=true`:
    - Creates admin account (password auto-generated if not provided)
    - Writes config.yaml
 
-2. No manual Setup Wizard needed - just configure `.env` and start
+2. `DATABASE_INITIALIZATION_ENABLED=true` is also required so the installer
+   can create the schema.
 
-3. If `ADMIN_PASSWORD` is not set, check logs for the generated password:
+3. No manual Setup Wizard needed - just configure `.env` and start
+
+4. If `ADMIN_PASSWORD` is not set, check logs for the generated password:
    ```bash
    docker compose logs sub2api | grep "admin password"
    ```
 
 ### Database Migration Notes (PostgreSQL)
+
+For the custom production distribution, startup migrations and bootstrap writes
+are disabled by default with `DATABASE_INITIALIZATION_ENABLED=false`. Enable
+that variable explicitly before upgrading to a release that contains database
+migrations, then disable it again after the migration has completed.
 
 - Migrations are applied in lexicographic order (e.g. `001_...sql`, `002_...sql`).
 - `schema_migrations` tracks applied migrations (filename + checksum).

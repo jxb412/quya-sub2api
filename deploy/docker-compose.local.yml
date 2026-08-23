@@ -43,9 +43,11 @@ services:
       # - ./config.yaml:/app/data/config.yaml
     environment:
       # =======================================================================
-      # Auto Setup (REQUIRED for Docker deployment)
+      # Setup is opt-in for the custom production distribution.
       # =======================================================================
-      - AUTO_SETUP=true
+      - SETUP_ENABLED=${SETUP_ENABLED:-false}
+      - AUTO_SETUP=${AUTO_SETUP:-false}
+      - DATABASE_INITIALIZATION_ENABLED=${DATABASE_INITIALIZATION_ENABLED:-false}
 
       # =======================================================================
       # Server Configuration
