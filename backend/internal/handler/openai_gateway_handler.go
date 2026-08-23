@@ -3716,13 +3716,13 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 		defer cancel()
 		if cmSvc != nil {
 			cmSvc.RecordCyberPolicyEvent(ctx, service.CyberPolicyRecordInput{
-				RequestID:       requestID,
-				UserID:          userID,
-				UserEmail:       userEmail,
-				APIKeyID:        apiKeyID,
-				APIKeyName:      apiKeyName,
-				GroupID:         groupID,
-				GroupName:       groupName,
+				RequestID:  requestID,
+				UserID:     userID,
+				UserEmail:  userEmail,
+				APIKeyID:   apiKeyID,
+				APIKeyName: apiKeyName,
+				GroupID:    groupID,
+				GroupName:  groupName,
 				AccountPlanType: func() string {
 					if account == nil {
 						return ""

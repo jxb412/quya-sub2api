@@ -12,7 +12,7 @@
 
 services:
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ghcr.io/jxb412/sub2api:${SUB2API_VERSION:-latest}
     container_name: sub2api
     restart: unless-stopped
     security_opt:

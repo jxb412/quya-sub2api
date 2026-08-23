@@ -1,223 +1,173 @@
-# Sub2API 项目交接索引（中文）
+# Quya Sub2API 项目交接与运维说明
 
-> 这份文档用于新的 Codex/Claude 对话快速接手项目。它记录本地路径、远程仓库、重要目录、当前改动和下一步注意事项。
->
-> 最后整理：2026-08-23（Asia/Shanghai）
+本文档是 `jxb412/quya-sub2api` 的项目交接入口，只记录本项目的目录、自定义
+改动、注意事项、更新方式和部署方式。其他代理项目、支付前端、检查副本和临时
+会话内容不属于本项目，不在这里记录。
 
-## 1. 新对话直接使用的上下文
+## 仓库信息
 
-```text
-当前项目：D:\btc\st\quya-sub2api
-工作区：D:\btc\st
-当前分支：main
-origin：https://github.com/jxb412/quya-sub2api.git
-upstream：https://github.com/Wei-Shaw/sub2api.git
-
-这是基于 Wei-Shaw/sub2api 的个人维护版本。不要执行 git reset --hard、git checkout --、删除数据目录或随意重启线上服务。
-当前工作区存在未提交的用户改动；处理任务前先执行 git status 和 git diff，保留这些改动。
-```
-
-## 2. 仓库与本地地址
-
-| 项目 | 地址 |
+| 项目 | 地址或说明 |
 |---|---|
-| 本地项目根目录 | `D:\btc\st\quya-sub2api` |
-| 工作区根目录 | `D:\btc\st` |
-| 个人远程仓库（origin） | <https://github.com/jxb412/quya-sub2api> |
-| 官方上游仓库（upstream） | <https://github.com/Wei-Shaw/sub2api> |
-| 当前分支 | `main` |
-| 当前基线提交 | `f5b7c1c`（`chore: initialize from upstream Sub2API main`） |
+| 本地目录 | `D:\btc\st\quya-sub2api` |
+| 个人仓库 | `https://github.com/jxb412/quya-sub2api` |
+| 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
+| 默认分支 | `main` |
+| 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
 
-父目录中的相关项目（不是当前 Sub2API 源码）:
+`origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
+不能直接把上游分支覆盖到个人 `main`。
 
-- `D:\btc\st\ipv6-lease-proxy`：IPv6 租约代理项目。
-- `D:\btc\st\bd`：支付前端/接口补丁和测试资料。
-- `D:\btc\st\sub2api_latest_inspect_20260815`：上游版本检查副本。
-- `D:\btc\st\sub2api_gpt56_inspect_20260816`：GPT-5.6 版本检查副本。
-
-## 3. 项目结构速览
+## 项目结构
 
 ```text
 quya-sub2api/
-├─ backend/
-│  ├─ cmd/server/              Go 服务入口（main.go、wire_gen.go）
-│  ├─ internal/handler/        HTTP/API 路由和请求处理
-│  ├─ internal/service/        核心业务、调度、转发、计费、账号逻辑
-│  ├─ internal/repository/     数据访问层
-│  ├─ internal/pkg/            OpenAI/Anthropic/Gemini 等协议工具包
-│  ├─ ent/schema/              Ent 数据模型定义
-│  ├─ ent/                     Ent 生成代码（不要手工改生成文件）
-│  ├─ migrations/              PostgreSQL 正向迁移
-│  ├─ resources/model-pricing/ 模型价格和上下文窗口数据
-│  └─ go.mod                   Go 版本和后端依赖
-├─ frontend/
-│  ├─ src/api/                 前端 API 封装
-│  ├─ src/components/          Vue 组件
-│  ├─ src/views/               页面视图
-│  ├─ src/stores/              Pinia 状态
-│  ├─ src/router/              路由
-│  ├─ src/i18n/                中英文国际化
-│  ├─ package.json             前端脚本和依赖
-│  └─ pnpm-lock.yaml           前端锁文件（使用 pnpm）
-├─ deploy/
-│  ├─ docker-compose*.yml      Docker 部署组合
-│  ├─ Dockerfile                镜像构建
-│  ├─ config.example.yaml      配置模板
-│  ├─ .env.example              环境变量模板
-│  ├─ README.md                 部署、升级、迁移说明
-│  ├─ EDGE_SECURITY.md          CDN/反向代理可信边界
-│  └─ docker-entrypoint.sh      容器入口
-├─ docs/                       功能文档；本文件是交接入口
-├─ openspec/                   设计提案、规格和变更冻结资料
-├─ skills/                     项目专用技能和管理员 CLI 说明
-├─ DEV_GUIDE.md                本地开发、测试和常见坑
-├─ README_CN.md                中文项目总说明
-└─ Makefile                    常用构建、测试、代码生成命令
+├─ backend/       Go 网关、处理器、服务、数据访问和数据库迁移
+├─ frontend/      Vue 3 管理后台和用户页面
+├─ deploy/        Docker/systemd 部署、配置和环境模板
+├─ docs/          功能、支付、API、运维和安全文档
+├─ openspec/      项目设计提案和变更记录
+├─ README_CN.md   中文项目入口
+├─ DEV_GUIDE.md   开发与同步指南
+└─ Makefile       常用命令
 ```
 
-## 4. 首先阅读的文档
+## 当前自定义功能
 
-1. [README_CN.md](../README_CN.md)：项目功能和基础部署说明。
-2. [DEV_GUIDE.md](../DEV_GUIDE.md)：本地环境、Go/pnpm、测试命令和 Windows 常见问题。
-3. [deploy/README.md](../deploy/README.md)：Docker/二进制部署、升级、迁移和故障排查。
-4. [deploy/DOCKER.md](../deploy/DOCKER.md)：Docker 镜像和 Compose 快速说明。
-5. [deploy/config.example.yaml](../deploy/config.example.yaml)：配置键及默认值。
-6. [backend/migrations/README.md](../backend/migrations/README.md)：迁移不可修改原则和执行规则。
-7. [openspec/](../openspec/)：已经设计或冻结的功能变更，修改相关功能前先检查是否有对应 proposal。
+- OpenAI 请求在账号调度前按 Responses、Chat Completions、Messages 入口筛选。
+- `openai_responses_only` 独立限制 Responses、compact 和 WebSocket 入口。
+- `codex_cli_only` 只判断 Codex 客户端身份，不自动等同 Responses-only。
+- 调度器、sticky 路由和 failover 会跳过不符合入口条件的账号。
+- 风控中心支持按 `pro`、`plus`、`team`、`free` 账号类型单选或多选。
+- 内置更新检查和回滚源改为 `jxb412/quya-sub2api`。
+- 首次安装和数据库启动初始化默认关闭。
 
-支付和会员功能相关文档：
+主要代码位置：
 
-- `docs/PAYMENT_CN.md`
-- `docs/PAYMENT.md`
-- `docs/ADMIN_PAYMENT_INTEGRATION_API.md`
-- `docs/COMPOSITE_GROUPS.md`
+- OpenAI 调度：`backend/internal/service/openai_*`
+- Codex 转换和身份：`backend/internal/service/openai_codex_*`
+- 风控：`backend/internal/service/content_moderation.go`
+- 后台风控页面：`frontend/src/views/admin/RiskControlView.vue`
+- 更新服务：`backend/internal/service/update_service.go`
+- 启动和安装：`backend/cmd/server/main.go`、`backend/internal/setup/`
+- 数据库连接和迁移：`backend/internal/repository/ent.go`、`backend/migrations/`
 
-## 5. Codex/OpenAI 相关代码索引
+## 默认安全开关
 
-| 功能 | 主要文件 |
-|---|---|
-| Responses 主转发 | `backend/internal/service/openai_gateway_forward.go` |
-| 透传路径 | `backend/internal/service/openai_gateway_passthrough.go` |
-| Chat Completions | `backend/internal/service/openai_gateway_chat_completions.go`、`openai_gateway_chat_completions_raw.go` |
-| Anthropic `/v1/messages` 桥接 | `backend/internal/service/openai_gateway_messages.go`、`openai_messages_bridge.go` |
-| 账号调度 | `backend/internal/service/openai_account_scheduler.go`、`openai_gateway_scheduling.go` |
-| Codex 客户端识别/限制 | `openai_client_restriction_detector.go`、`backend/internal/pkg/openai/request.go` |
-| Codex UA/originator | `openai_codex_identity.go`、`openai_gateway_service.go` |
-| 指纹收敛 | `openai_codex_fingerprint.go`、`openai_codex_fingerprint_test.go` |
-| 请求体转换 | `openai_codex_transform.go` |
-| Responses WebSocket | `openai_ws_forwarder*.go`、`openai_ws_forwarder_payload.go` |
-| Live DeviceCheck | `openai_live.go`、`openai_live_attestation.go`、`backend/internal/platform/liveattestation/` |
-| 入口协议筛选（本轮新增） | `openai_inbound_routing.go`、`openai_inbound_routing_test.go` |
+生产 Docker Compose 默认使用：
 
-### 当前已实现的入口限制
+```dotenv
+SETUP_ENABLED=false
+AUTO_SETUP=false
+DATABASE_INITIALIZATION_ENABLED=false
+```
 
-- `codex_cli_only`：仅判断客户端是否属于 Codex 家族，不自动等同于 Responses-only。
-- `openai_responses_only`：独立限制 `/v1/responses`、compact 和 WebSocket，排除 `/v1/chat/completions`、`/v1/messages`。
-- 两个开关同时开启，才表示“官方 Codex 客户端 + Responses 专用账号”。
-- 旧版和高级调度器、HTTP/WS/消息桥接均有二次限制和 failover 处理。
+含义：
 
-### 当前设备证明状态
+- 不启动首次安装向导。
+- 不自动创建数据库、管理员和配置文件。
+- 不在服务启动时执行迁移、JWT 密钥补写或简单模式默认数据写入。
+- 业务运行仍会正常读写已有数据库。
 
-- Codex PR #20619 的 `attestation/generate` / `x-oai-attestation` 目前尚未在 Sub2API 中实现。
-- 当前同名头只用于 Live DeviceCheck，不等于 Desktop attestation。
-- 普通 HTTP、passthrough、WS 的 OpenAI 请求头白名单目前没有 Desktop attestation 透传。
-- 不要伪造、缓存、跨账号复用或记录完整 attestation 值。
-- 后续若实现，应只对 ChatGPT OAuth/Codex 上游原样透传真实客户端提供的值，并在 failover 换账号时清除。
+真正新安装时，先备份环境文件，再同时设置：
 
-## 6. 当前工作区未提交改动
+```dotenv
+SETUP_ENABLED=true
+AUTO_SETUP=true
+DATABASE_INITIALIZATION_ENABLED=true
+```
 
-### 新增文件
+安装完成后恢复为 `false`。如果上游更新包含数据库迁移，只在维护窗口临时打开
+`DATABASE_INITIALIZATION_ENABLED=true`，完成验证后关闭。
 
-- `backend/internal/service/openai_inbound_routing.go`
-- `backend/internal/service/openai_inbound_routing_test.go`
+## 部署
 
-### 后端修改
+生产推荐使用 `deploy/docker-compose.local.yml`，数据保存在部署目录下：
 
-- `backend/internal/handler/admin/content_moderation_handler.go`
-- `backend/internal/handler/content_moderation_helper.go`
-- `backend/internal/handler/gateway_handler.go`
-- `backend/internal/handler/openai_chat_completions.go`
-- `backend/internal/handler/openai_gateway_count_tokens.go`
-- `backend/internal/handler/openai_gateway_handler.go`
-- `backend/internal/handler/openai_images.go`
-- `backend/internal/handler/security_audit_helper.go`
-- `backend/internal/securityaudit/coordinator_legacy.go`
-- `backend/internal/securityaudit/prompt_types.go`
-- `backend/internal/service/account.go`
-- `backend/internal/service/content_moderation.go`
-- `backend/internal/service/openai_account_scheduler.go`
-- `backend/internal/service/openai_client_restriction_detector.go`
-- `backend/internal/service/openai_gateway_chat_completions.go`
-- `backend/internal/service/openai_gateway_forward.go`
-- `backend/internal/service/openai_gateway_messages.go`
-- `backend/internal/service/openai_gateway_scheduling.go`
+```bash
+cp deploy/.env.example deploy/.env
+# 编辑 deploy/.env，设置数据库密码、JWT_SECRET、TOTP_ENCRYPTION_KEY
+cd deploy
+docker compose -f docker-compose.local.yml up -d
+docker compose -f docker-compose.local.yml ps
+docker compose -f docker-compose.local.yml logs --tail=100 sub2api
+```
 
-### 前端修改
+更新镜像前先确认持久化挂载：
 
-- `frontend/src/api/admin/riskControl.ts`
-- `frontend/src/components/account/BulkEditAccountModal.vue`
-- `frontend/src/components/account/CreateAccountModal.vue`
-- `frontend/src/components/account/EditAccountModal.vue`
-- `frontend/src/i18n/locales/en/admin/accounts.ts`
-- `frontend/src/i18n/locales/en/admin/channels.ts`
-- `frontend/src/i18n/locales/zh/admin/accounts.ts`
-- `frontend/src/i18n/locales/zh/admin/channels.ts`
-- `frontend/src/views/admin/RiskControlView.vue`
+```bash
+docker inspect sub2api --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+```
 
-接手前必须先查看：
+不要执行 `docker compose down -v`。只更新应用容器：
+
+```bash
+docker pull ghcr.io/jxb412/sub2api:<version>
+docker compose -f docker-compose.local.yml up -d --no-deps sub2api
+```
+
+拉取镜像不会中断业务；替换应用容器可能造成短暂中断，进行中的流式请求可能
+断开。服务器操作系统不需要重启。
+
+## 发布与更新
+
+`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.1.181`，
+会构建二进制、GitHub Release 和：
+
+```text
+ghcr.io/jxb412/sub2api:0.1.181
+ghcr.io/jxb412/sub2api:latest
+```
+
+Docker 服务器使用固定版本标签更容易回滚。内置更新检查适用于二进制/systemd
+部署；Docker 部署仍需拉取镜像并重建应用容器。
+
+## 上游同步
 
 ```powershell
-cd D:\btc\st\quya-sub2api
 git status --short
-git diff --stat
-git diff -- backend/internal/service/openai_gateway_forward.go
+git fetch origin
+git fetch upstream
+git switch -c sync/upstream-YYYY-MM-DD origin/main
+git merge --no-ff upstream/main
 ```
 
-不要把这些改动当成可以丢弃的临时文件，也不要用 `git reset --hard` 或 `git checkout --` 清理。
+冲突时保留个人自定义逻辑并逐项测试。重点检查启动、更新源、OpenAI 调度、风控、
+部署 Compose 和迁移文件。不要使用 `git reset --hard` 或 `git checkout --` 清理
+工作区。
 
-## 7. 本地环境和验证命令
+## 验证命令
 
-技术栈：Go 1.26.6、Gin、Ent、PostgreSQL 16、Redis、Vue 3、TypeScript、pnpm。
-
-后端：
-
-```powershell
-cd D:\btc\st\quya-sub2api\backend
+```bash
+cd backend
 go test -tags=unit ./...
 go test -tags=integration ./...
-go run ./cmd/server/
-go generate ./ent
 golangci-lint run ./...
-```
 
-前端（必须使用 pnpm，不要用 npm 替代锁文件）：
-
-```powershell
-cd D:\btc\st\quya-sub2api\frontend
+cd ../frontend
 pnpm install --frozen-lockfile
 pnpm typecheck
 pnpm test:run
 pnpm build
 ```
 
-当前这次检查环境曾缺少 Go 和 `vue-tsc`，因此不能把完整后端/前端测试描述为已通过。修改后应在具备依赖的环境重新验证。
+本地缺少 Go、pnpm、PostgreSQL 或 Redis 时，应明确记录检查未执行。
 
-## 8. 数据库、部署和线上安全
+## 线上操作底线
 
-- 数据库迁移目录：`backend/migrations/`。
-- 已应用的迁移文件不可修改；需要新文件递增迁移。
-- 生产配置不在仓库中，使用部署目录的模板生成实际配置；不要把生产密钥写入本文件或 Git。
-- Docker 入口：`deploy/docker-compose.yml`、`deploy/docker-entrypoint.sh`。
-- 部署和升级前先备份 PostgreSQL、Redis（如使用）以及配置文件。
-- 用户明确要求不要随便重启服务器；任何线上部署、重启、数据库写入都要单独确认。
-- CDN/反代可信 IP 设置先阅读 `deploy/EDGE_SECURITY.md`，不要直接信任客户端提交的转发头。
+- 不要未经确认重启服务器或生产服务。
+- 不要删除或更换 PostgreSQL、Redis、`/app/data` 数据卷。
+- 不要把生产密钥、OAuth token、API 秘钥、代理密码或完整 attestation 写入 Git 和日志。
+- 应用、数据库、Redis、配置和镜像更新前都要保留可恢复备份。
+- 已应用 migration 不可修改；新增结构必须创建新的递增 migration。
 
-## 9. 新对话建议开场模板
+## 相关文档
 
-```text
-请接手 D:\btc\st\quya-sub2api 项目。
-先阅读 docs/PROJECT_HANDOFF_CN.md、README_CN.md、DEV_GUIDE.md 和 deploy/README.md。
-当前是 jxb412/quya-sub2api 的 main 分支，origin 是个人仓库，upstream 是 Wei-Shaw/sub2api。
-先执行 git status 和 git diff，不要丢弃未提交改动，不要重启或部署线上服务。
-本次任务范围是：<在这里填写新任务>。
-```
+- [中文项目入口](../README_CN.md)
+- [开发指南](../DEV_GUIDE.md)
+- [部署说明](../deploy/README.md)
+- [Docker 说明](../deploy/DOCKER.md)
+- [边缘安全](../deploy/EDGE_SECURITY.md)
+- [配置模板](../deploy/config.example.yaml)
+- [支付说明](PAYMENT_CN.md)
+- [组合分组](COMPOSITE_GROUPS.md)
+- [异步图片任务](ASYNC_IMAGE_TASKS.md)

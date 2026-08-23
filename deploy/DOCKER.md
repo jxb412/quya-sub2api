@@ -1,76 +1,37 @@
-# Sub2API Docker Image
+# Quya Sub2API Docker 镜像
 
-Sub2API is an AI API Gateway Platform for distributing and managing AI product subscription API quotas.
+个人仓库的稳定版本通过 `v*` 标签发布到 GitHub Container Registry：
 
-## Quick Start
-
-```bash
-docker run -d \
-  --name sub2api \
-  -p 8080:8080 \
-  -e DATABASE_URL="postgres://user:pass@host:5432/sub2api" \
-  -e REDIS_URL="redis://host:6379" \
-  weishaw/sub2api:latest
+```text
+ghcr.io/jxb412/sub2api:<version>
+ghcr.io/jxb412/sub2api:latest
 ```
 
-## Docker Compose
+生产环境建议固定版本：
+
+```bash
+docker pull ghcr.io/jxb412/sub2api:0.1.181
+```
+
+Compose 示例：
 
 ```yaml
-version: '3.8'
-
 services:
   sub2api:
-    image: weishaw/sub2api:latest
+    image: ghcr.io/jxb412/sub2api:0.1.181
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
-      - DATABASE_URL=postgres://postgres:postgres@db:5432/sub2api?sslmode=disable
-      - REDIS_URL=redis://redis:6379
-    depends_on:
-      - db
-      - redis
-
-  db:
-    image: postgres:15-alpine
-    environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-      - POSTGRES_DB=sub2api
+      SETUP_ENABLED: "false"
+      AUTO_SETUP: "false"
+      DATABASE_INITIALIZATION_ENABLED: "false"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-    volumes:
-      - redis_data:/data
-
-volumes:
-  postgres_data:
-  redis_data:
+      - ./data:/app/data
 ```
 
-## Environment Variables
+完整的 PostgreSQL、Redis、环境变量、首次安装、升级、迁移、备份和回退说明见
+[README.md](README.md)。
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes | - |
-| `REDIS_URL` | Redis connection string | Yes | - |
-| `PORT` | Server port | No | `8080` |
-| `GIN_MODE` | Gin framework mode (`debug`/`release`) | No | `release` |
-
-## Supported Architectures
-
-- `linux/amd64`
-- `linux/arm64`
-
-## Tags
-
-- `latest` - Latest stable release
-- `x.y.z` - Specific version
-- `x.y` - Latest patch of minor version
-- `x` - Latest minor of major version
-
-## Links
-
-- [GitHub Repository](https://github.com/weishaw/sub2api)
-- [Documentation](https://github.com/weishaw/sub2api#readme)
+`docker pull` 只下载镜像，不启动容器、不初始化数据库，也不中断现有业务。真正使用
+新镜像需要重新创建应用容器。不要执行 `docker compose down -v`。

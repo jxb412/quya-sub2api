@@ -1,6 +1,6 @@
 [Unit]
 Description=Sub2API - AI API Gateway Platform
-Documentation=https://github.com/Wei-Shaw/sub2api
+Documentation=https://github.com/jxb412/quya-sub2api
 After=network.target postgresql.service redis.service
 Wants=postgresql.service redis.service
 
@@ -28,6 +28,9 @@ ReadWritePaths=/opt/sub2api
 Environment=GIN_MODE=release
 Environment=SERVER_HOST=0.0.0.0
 Environment=SERVER_PORT=8080
+Environment=SETUP_ENABLED=false
+Environment=AUTO_SETUP=false
+Environment=DATABASE_INITIALIZATION_ENABLED=false
 
 [Install]
 WantedBy=multi-user.target

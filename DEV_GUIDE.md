@@ -1,346 +1,115 @@
-# sub2api 项目开发指南
+# Quya Sub2API 开发指南
 
-> 本文档记录项目环境配置、常见坑点和注意事项，供 Claude Code 和团队成员参考。
+本文档只记录本项目的开发、测试、同步和安全注意事项，不记录其他仓库、个人
+服务器密码或临时排障数据。
 
-## 一、项目基本信息
+## 项目与工具链
 
-| 项目 | 说明 |
-|------|------|
-| **上游仓库** | Wei-Shaw/sub2api |
-| **Fork 仓库** | bayma888/sub2api-bmai |
-| **技术栈** | Go 后端 (Ent ORM + Gin) + Vue3 前端 (pnpm) |
-| **数据库** | PostgreSQL 16 + Redis |
-| **包管理** | 后端: go modules, 前端: **pnpm**（不是 npm） |
+| 项目 | 值 |
+|---|---|
+| 个人仓库 | `https://github.com/jxb412/quya-sub2api` |
+| 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
+| 后端 | Go 1.26.6、Gin、Ent |
+| 前端 | Vue 3、TypeScript、pnpm |
+| 数据库 | PostgreSQL、Redis |
+| 本地项目目录 | `D:\btc\st\quya-sub2api` |
 
-## 二、本地环境配置
+不要把生产凭据、API 秘钥、OAuth token、数据库密码或代理密码写入仓库。
 
-### PostgreSQL 16 (Windows 服务)
+## 目录边界
 
-| 配置项 | 值 |
-|--------|-----|
-| 端口 | 5432 |
-| psql 路径 | `C:\Program Files\PostgreSQL\16\bin\psql.exe` |
-| pg_hba.conf | `C:\Program Files\PostgreSQL\16\data\pg_hba.conf` |
-| 数据库凭据 | user=`sub2api`, password=`sub2api`, dbname=`sub2api` |
-| 超级用户 | user=`postgres`, password=`postgres` |
+- `backend/`：网关服务、协议处理、账号调度、计费、数据访问和迁移。
+- `frontend/`：管理后台和用户页面。
+- `deploy/`：Docker/systemd 部署文件、环境模板和配置模板。
+- `docs/`：功能、支付、API、运维和安全文档。
+- `openspec/`：项目设计提案和变更记录。
 
-### Redis
+Ent 生成代码位于 `backend/ent/`，修改数据模型时编辑
+`backend/ent/schema/`，然后运行代码生成，不要手工修改生成文件。
 
-| 配置项 | 值 |
-|--------|-----|
-| 端口 | 6379 |
-| 密码 | 无 |
+## 本地检查
 
-### 开发工具
-
-```bash
-# golangci-lint（CI 用 v2.13，本地建议装同一版以免版本差异带来的噪音）
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13
-
-# pnpm (前端包管理)
-npm install -g pnpm
-```
-
-## 三、CI/CD 流水线
-
-### GitHub Actions Workflows
-
-| Workflow | 触发条件 | 检查内容 |
-|----------|----------|----------|
-| **backend-ci.yml** | push, pull_request | 单元测试 + 集成测试 + golangci-lint v2.13 |
-| **security-scan.yml** | push, pull_request, 每周一 | govulncheck + gosec + pnpm audit |
-| **release.yml** | tag `v*` | 构建发布（PR 不触发） |
-
-### CI 要求
-
-- Go 版本必须是 **1.27.0**：三个 workflow 都用 `go-version-file: backend/go.mod` 取版本，随后硬断言 `go version | grep -q 'go1.27.0'`。升级 Go 时要同时改 `backend/go.mod`、`backend-ci.yml`（两处）、`release.yml`、`security-scan.yml` 里的这句断言，**以及三个 Dockerfile 里的 Go 构建镜像**（`Dockerfile` / `deploy/Dockerfile` 的 `ARG GOLANG_IMAGE`、`backend/Dockerfile` 的 `FROM golang:`）。前者漏了 CI 会在版本校验步骤直接失败；**后者漏了 CI 不会报，而是等到有人用这些 Dockerfile 构建时才失败**（`go.mod requires go >= X (running Y; GOTOOLCHAIN=local)`）。
-- 前端使用 `pnpm install --frozen-lockfile`，必须提交 `pnpm-lock.yaml`
-
-### 本地测试命令
-
-```bash
-# 后端单元测试
-cd backend && go test -tags=unit ./...
-
-# 后端集成测试
-cd backend && go test -tags=integration ./...
-
-# 代码质量检查
-cd backend && golangci-lint run ./...
-
-# 前端依赖安装（必须用 pnpm）
-cd frontend && pnpm install
-```
-
-## 四、常见坑点 & 解决方案
-
-### 坑 1：pnpm-lock.yaml 必须同步提交
-
-**问题**：`package.json` 新增依赖后，CI 的 `pnpm install --frozen-lockfile` 失败。
-
-**原因**：上游 CI 使用 pnpm，lock 文件不同步会报错。
-
-**解决**：
-```bash
-cd frontend
-pnpm install  # 更新 pnpm-lock.yaml
-git add pnpm-lock.yaml
-git commit -m "chore: update pnpm-lock.yaml"
-```
-
----
-
-### 坑 2：npm 和 pnpm 的 node_modules 冲突
-
-**问题**：之前用 npm 装过 `node_modules`，pnpm install 报 `EPERM` 错误。
-
-**解决**：
-```bash
-cd frontend
-rm -rf node_modules  # 或 PowerShell: Remove-Item -Recurse -Force node_modules
-pnpm install
-```
-
----
-
-### 坑 3：PowerShell 中 bcrypt hash 的 `$` 被转义
-
-**问题**：bcrypt hash 格式如 `$2a$10$xxx...`，PowerShell 把 `$2a` 当变量解析，导致数据丢失。
-
-**解决**：将 SQL 写入文件，用 `psql -f` 执行：
-```bash
-# 错误示范（PowerShell 会吃掉 $）
-psql -c "INSERT INTO users ... VALUES ('$2a$10$...')"
-
-# 正确做法
-echo "INSERT INTO users ... VALUES ('\$2a\$10\$...')" > temp.sql
-psql -U sub2api -h 127.0.0.1 -d sub2api -f temp.sql
-```
-
----
-
-### 坑 4：psql 不支持中文路径
-
-**问题**：`psql -f "D:\中文路径\file.sql"` 报错找不到文件。
-
-**解决**：复制到纯英文路径再执行：
-```bash
-cp "D:\中文路径\file.sql" "C:\temp.sql"
-psql -f "C:\temp.sql"
-```
-
----
-
-### 坑 5：PostgreSQL 密码重置流程
-
-**场景**：忘记 PostgreSQL 密码。
-
-**步骤**：
-1. 修改 `C:\Program Files\PostgreSQL\16\data\pg_hba.conf`
-   ```
-   # 将 scram-sha-256 改为 trust
-   host    all    all    127.0.0.1/32    trust
-   ```
-2. 重启 PostgreSQL 服务
-   ```powershell
-   Restart-Service postgresql-x64-16
-   ```
-3. 无密码登录并重置
-   ```bash
-   psql -U postgres -h 127.0.0.1
-   ALTER USER sub2api WITH PASSWORD 'sub2api';
-   ALTER USER postgres WITH PASSWORD 'postgres';
-   ```
-4. 改回 `scram-sha-256` 并重启
-
----
-
-### 坑 6：Go interface 新增方法后 test stub 必须补全
-
-**问题**：给 interface 新增方法后，编译报错 `does not implement interface (missing method XXX)`。
-
-**原因**：所有测试文件中实现该 interface 的 stub/mock 都必须补上新方法。
-
-**解决**：
-```bash
-# 搜索所有实现该 interface 的 struct
-cd backend
-grep -r "type.*Stub.*struct" internal/
-grep -r "type.*Mock.*struct" internal/
-
-# 逐一补全新方法
-```
-
----
-
-### 坑 7：Windows 上 psql 连 localhost 的 IPv6 问题
-
-**问题**：psql 连 `localhost` 先尝试 IPv6 (::1)，可能报错后再回退 IPv4。
-
-**建议**：直接用 `127.0.0.1` 代替 `localhost`。
-
----
-
-### 坑 8：Windows 没有 make 命令
-
-**问题**：CI 里用 `make test-unit`，本地 Windows 没有 make。
-
-**解决**：直接用 Makefile 里的原始命令：
-```bash
-# 代替 make test-unit
+```powershell
+cd D:\btc\st\quya-sub2api\backend
 go test -tags=unit ./...
-
-# 代替 make test-integration
 go test -tags=integration ./...
-```
+golangci-lint run ./...
 
----
-
-### 坑 9：Ent Schema 修改后必须重新生成
-
-**问题**：修改 `ent/schema/*.go` 后，代码不生效。
-
-**解决**：
-```bash
-cd backend
-go generate ./ent  # 重新生成 ent 代码（json.RawMessage 字段会生成为同类型的 jsontext.Value，属预期）
-git add ent/       # 生成的文件也要提交
-```
-
----
-
-### 坑 10：前端测试看似正常，但后端调用失败（模型映射被批量误改）
-
-**典型现象**：
-- 前端按钮点测看起来正常；
-- 实际通过 API/客户端调用时返回 `Service temporarily unavailable` 或提示无可用账号；
-- 常见于 OpenAI 账号（例如 Codex 模型）在批量修改后突然不可用。
-
-**根因**：
-- OpenAI 账号编辑页默认不显式展示映射规则，容易让人误以为“没映射也没关系”；
-- 但在**批量修改同时选中不同平台账号**（OpenAI + Antigravity/Gemini）时，模型白名单/映射可能被跨平台策略覆盖；
-- 结果是 OpenAI 账号的关键模型映射丢失或被改坏，后端选不到可用账号。
-
-**修复方案（按优先级）**：
-1. **快速修复（推荐）**：在批量修改中补回正确的透传映射（例如 `gpt-5.3-codex -> gpt-5.3-codex-spark`）。
-2. **彻底重建**：删除并重新添加全部相关账号（最稳但成本高）。
-
-**关键经验**：
-- 如果某模型已被软件内置默认映射覆盖，通常不需要额外再加透传；
-- 但当上游模型更新快于本仓库默认映射时，**手动批量添加透传映射**是最简单、最低风险的临时兜底方案；
-- 批量操作前尽量按平台分组，不要混选不同平台账号。
-
----
-
-### 坑 11：PR 提交前检查清单
-
-提交 PR 前务必本地验证：
-
-- [ ] `go test -tags=unit ./...` 通过
-- [ ] `go test -tags=integration ./...` 通过
-- [ ] `golangci-lint run ./...` 无新增问题
-- [ ] `pnpm-lock.yaml` 已同步（如果改了 package.json）
-- [ ] 所有 test stub 补全新接口方法（如果改了 interface）
-- [ ] Ent 生成的代码已提交（如果改了 schema）
-
-## 五、常用命令速查
-
-### 数据库操作
-
-```bash
-# 连接数据库
-psql -U sub2api -h 127.0.0.1 -d sub2api
-
-# 查看所有用户
-psql -U postgres -h 127.0.0.1 -c "\du"
-
-# 查看所有数据库
-psql -U postgres -h 127.0.0.1 -c "\l"
-
-# 执行 SQL 文件
-psql -U sub2api -h 127.0.0.1 -d sub2api -f migration.sql
-```
-
-### Git 操作
-
-```bash
-# 同步上游
-git fetch upstream
-git checkout main
-git merge upstream/main
-git push origin main
-
-# 创建功能分支
-git checkout -b feature/xxx
-
-# Rebase 到最新 main
-git fetch upstream
-git rebase upstream/main
-```
-
-### 前端操作
-
-```bash
-# 安装依赖（必须用 pnpm）
-cd frontend
-pnpm install
-
-# 开发服务器
-pnpm dev
-
-# 构建
+cd ..\frontend
+pnpm install --frozen-lockfile
+pnpm typecheck
+pnpm test:run
 pnpm build
 ```
 
-### 后端操作
+CI 使用 `.github/workflows/backend-ci.yml`、`security-scan.yml` 和
+`release.yml`。本地缺少 Go、pnpm 或数据库时，应明确标记对应检查未执行。
 
-```bash
-# 运行服务器
-cd backend
-go run ./cmd/server/
+## 自定义功能边界
 
-# 生成 Ent 代码
-go generate ./ent
+修改 OpenAI/Codex 调度时重点检查：
 
-# 运行测试
-go test -tags=unit ./...
-go test -tags=integration ./...
+- `backend/internal/service/openai_inbound_routing.go`
+- `backend/internal/service/openai_account_scheduler.go`
+- `backend/internal/service/openai_gateway_scheduling.go`
+- `backend/internal/service/openai_gateway_forward.go`
+- `backend/internal/service/openai_client_restriction_detector.go`
 
-# Lint 检查
-golangci-lint run ./...
+修改风控账号类型筛选时重点检查：
+
+- `backend/internal/service/content_moderation.go`
+- `backend/internal/handler/admin/content_moderation_handler.go`
+- `frontend/src/views/admin/RiskControlView.vue`
+
+修改更新源时检查 `backend/internal/service/update_service.go`。当前发布源是
+`jxb412/quya-sub2api`，不要误改回上游仓库。
+
+## 安装和数据库安全
+
+生产部署默认关闭：
+
+```dotenv
+SETUP_ENABLED=false
+AUTO_SETUP=false
+DATABASE_INITIALIZATION_ENABLED=false
 ```
 
-## 六、项目结构速览
+这会关闭首次安装、自动安装、启动迁移和启动阶段的数据库引导写入，但不会阻止
+正常业务访问数据库。
 
-```
-sub2api-bmai/
-├── backend/
-│   ├── cmd/server/          # 主程序入口
-│   ├── ent/                 # Ent ORM 生成代码
-│   │   └── schema/          # 数据库 Schema 定义
-│   ├── internal/
-│   │   ├── handler/         # HTTP 处理器
-│   │   ├── service/         # 业务逻辑
-│   │   ├── repository/      # 数据访问层
-│   │   └── server/          # 服务器配置
-│   ├── migrations/          # 数据库迁移脚本
-│   └── config.yaml          # 配置文件
-├── frontend/
-│   ├── src/
-│   │   ├── api/             # API 调用
-│   │   ├── components/      # Vue 组件
-│   │   ├── views/           # 页面视图
-│   │   ├── types/           # TypeScript 类型
-│   │   └── i18n/            # 国际化
-│   ├── package.json         # 依赖配置
-│   └── pnpm-lock.yaml       # pnpm 锁文件（必须提交）
-└── .claude/
-    └── CLAUDE.md            # 本文档
+只有新安装或确认需要执行迁移时才显式开启。新安装需要三个变量同时为 `true`；
+普通升级通常只临时开启 `DATABASE_INITIALIZATION_ENABLED=true`，完成后恢复为
+`false`。已应用迁移文件不可修改，必须创建新的递增迁移。
+
+## 上游同步流程
+
+个人改动必须先提交，工作区保持干净后再同步：
+
+```powershell
+git status --short
+git fetch origin
+git fetch upstream
+git switch -c sync/upstream-YYYY-MM-DD origin/main
+git merge --no-ff upstream/main
 ```
 
-## 七、参考资源
+解决冲突后运行后端和前端检查，提交同步分支并创建 PR，再合并到个人 `main`。
+不要使用 `git reset --hard upstream/main` 或直接覆盖个人分支。
 
-- [上游仓库](https://github.com/Wei-Shaw/sub2api)
-- [Ent 文档](https://entgo.io/docs/getting-started)
-- [Vue3 文档](https://vuejs.org/)
-- [pnpm 文档](https://pnpm.io/)
+## 发布流程
+
+1. 合并代码并等待 CI、安全扫描通过。
+2. 创建稳定版本标签，例如 `v0.1.181`。
+3. `release.yml` 构建 GitHub Release、二进制和 GHCR 镜像。
+4. Docker 使用 `ghcr.io/jxb412/sub2api:0.1.181` 更新应用容器。
+5. 更新前备份数据库和配置，更新后检查 `/health`、日志和关键 API。
+
+Docker 镜像更新不需要服务器操作系统重启，但替换单个应用容器可能造成短暂中断。
+
+## 操作底线
+
+- 不要未经确认连接或修改生产服务器。
+- 不要删除 PostgreSQL/Redis 数据卷。
+- 不要把生产配置提交到 Git。
+- 不要把真实 attestation、OAuth token 或完整上游凭据写入日志。
+- 发现数据库迁移、认证、计费或账号调度冲突时，先停在同步分支处理。

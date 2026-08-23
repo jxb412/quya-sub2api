@@ -55,8 +55,8 @@ export default {
     rollbackSourceHint: 'Online rollback is not available for source builds',
     deployScript: 'Script',
     deployDocker: 'Docker',
-    dockerEditCompose: 'Edit the image tag in docker-compose.yml',
-    dockerRecreate: 'Recreate the container'
+    dockerEditCompose: 'Pull the pinned image from the custom repository',
+    dockerRecreate: 'Recreate only the Sub2API application container'
   },
 
   // Recharge / Subscription Page

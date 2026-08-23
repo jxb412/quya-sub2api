@@ -21,7 +21,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # GitHub raw content base URL
-GITHUB_RAW_URL="https://raw.githubusercontent.com/Wei-Shaw/sub2api/main/deploy"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/jxb412/quya-sub2api/main/deploy"
 
 # Print colored message
 print_info() {
@@ -78,7 +78,7 @@ main() {
     # Download docker-compose.local.yml and save as docker-compose.yml
     print_info "Downloading docker-compose.yml..."
     if command_exists curl; then
-        curl -sSL "${GITHUB_RAW_URL}/docker-compose.local.yml" -o docker-compose.yml
+        curl -fsSL "${GITHUB_RAW_URL}/docker-compose.local.yml" -o docker-compose.yml
     elif command_exists wget; then
         wget -q "${GITHUB_RAW_URL}/docker-compose.local.yml" -O docker-compose.yml
     else
@@ -90,7 +90,7 @@ main() {
     # Download .env.example
     print_info "Downloading .env.example..."
     if command_exists curl; then
-        curl -sSL "${GITHUB_RAW_URL}/.env.example" -o .env.example
+        curl -fsSL "${GITHUB_RAW_URL}/.env.example" -o .env.example
     else
         wget -q "${GITHUB_RAW_URL}/.env.example" -O .env.example
     fi
@@ -114,11 +114,17 @@ main() {
         sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
         sed -i "s/^TOTP_ENCRYPTION_KEY=.*/TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}/" .env
         sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${POSTGRES_PASSWORD}/" .env
+        sed -i "s/^SETUP_ENABLED=.*/SETUP_ENABLED=true/" .env
+        sed -i "s/^AUTO_SETUP=.*/AUTO_SETUP=true/" .env
+        sed -i "s/^DATABASE_INITIALIZATION_ENABLED=.*/DATABASE_INITIALIZATION_ENABLED=true/" .env
     else
         # BSD sed (macOS)
         sed -i '' "s/^JWT_SECRET=.*/JWT_SECRET=${JWT_SECRET}/" .env
         sed -i '' "s/^TOTP_ENCRYPTION_KEY=.*/TOTP_ENCRYPTION_KEY=${TOTP_ENCRYPTION_KEY}/" .env
         sed -i '' "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=${POSTGRES_PASSWORD}/" .env
+        sed -i '' "s/^SETUP_ENABLED=.*/SETUP_ENABLED=true/" .env
+        sed -i '' "s/^AUTO_SETUP=.*/AUTO_SETUP=true/" .env
+        sed -i '' "s/^DATABASE_INITIALIZATION_ENABLED=.*/DATABASE_INITIALIZATION_ENABLED=true/" .env
     fi
 
     # Create data directories
@@ -164,6 +170,7 @@ main() {
     echo ""
     print_info "If admin password is not set in .env, it will be auto-generated."
     print_info "Check logs for the generated admin password on first startup."
+    print_warning "After setup succeeds, set SETUP_ENABLED, AUTO_SETUP, and DATABASE_INITIALIZATION_ENABLED back to false."
     echo ""
 }
 
