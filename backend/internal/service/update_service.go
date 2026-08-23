@@ -30,7 +30,9 @@ var (
 const (
 	updateCacheKey = "update_check_cache"
 	updateCacheTTL = 1200 // 20 minutes
-	githubRepo     = "Wei-Shaw/sub2api"
+	// githubRepo is the release source for this distribution. Keep this aligned
+	// with the repository that publishes the custom binaries and images.
+	githubRepo = "jxb412/quya-sub2api"
 
 	// Security: allowed download domains for updates
 	allowedDownloadHost = "github.com"
