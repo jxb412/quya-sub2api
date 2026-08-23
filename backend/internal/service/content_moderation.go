@@ -310,19 +310,19 @@ type ContentModerationModelFilter struct {
 }
 
 type ContentModerationCheckInput struct {
-	RequestID  string
-	UserID     int64
-	UserEmail  string
-	APIKeyID   int64
-	APIKeyName string
-	GroupID    *int64
-	GroupName  string
+	RequestID       string
+	UserID          int64
+	UserEmail       string
+	APIKeyID        int64
+	APIKeyName      string
+	GroupID         *int64
+	GroupName       string
 	AccountPlanType string
-	Endpoint   string
-	Provider   string
-	Model      string
-	Protocol   string
-	Body       []byte
+	Endpoint        string
+	Provider        string
+	Model           string
+	Protocol        string
+	Body            []byte
 }
 
 type contentModerationAccountPlanTypeContextKey struct{}
@@ -2173,7 +2173,7 @@ func defaultContentModerationConfig() *ContentModerationConfig {
 			Type:   ContentModerationModelFilterAll,
 			Models: []string{},
 		},
-		AccountPlanTypes: []string{},
+		AccountPlanTypes:               []string{},
 		CyberPolicyExcludeFromBanCount: false,
 	}
 }
