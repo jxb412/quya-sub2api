@@ -81,17 +81,16 @@ func runContentModeration(c *gin.Context, reqLog *zap.Logger, svc *service.Conte
 }
 
 func buildContentModerationInput(c *gin.Context, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol string, model string, body []byte) service.ContentModerationCheckInput {
-	input := service.ContentModerationCheckInput{
-		RequestID:       contentModerationRequestID(c.Request.Context()),
-		UserID:          subject.UserID,
-		Endpoint:        GetInboundEndpoint(c),
-		Provider:        contentModerationProvider(apiKey),
-		Model:           clientRequestedModel(c, model),
-		AccountPlanType:         service.ContentModerationAccountPlanTypeFromContext(c.Request.Context()),
-		AccountPlanTypeResolved: service.ContentModerationAccountPlanTypeBoundFromContext(c.Request.Context()),
-		Protocol:        protocol,
-		Body:            body,
-	}
+	input := service.ContentModerationCheckInput{}
+	input.RequestID = contentModerationRequestID(c.Request.Context())
+	input.UserID = subject.UserID
+	input.Endpoint = GetInboundEndpoint(c)
+	input.Provider = contentModerationProvider(apiKey)
+	input.Model = clientRequestedModel(c, model)
+	input.AccountPlanType = service.ContentModerationAccountPlanTypeFromContext(c.Request.Context())
+	input.AccountPlanTypeResolved = service.ContentModerationAccountPlanTypeBoundFromContext(c.Request.Context())
+	input.Protocol = protocol
+	input.Body = body
 	if resolvedPlatform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {
 		input.Provider = resolvedPlatform
 	}

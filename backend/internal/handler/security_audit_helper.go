@@ -104,13 +104,16 @@ func runSecurityAudit(c *gin.Context, reqLog *zap.Logger, coordinator *securitya
 			return nil
 		}
 		decision := securityaudit.Decision{Kind: securityaudit.DecisionAllow, HTTPStatus: http.StatusOK, AllowNextStage: true}
-		decision.Legacy = &securityaudit.LegacyDecision{
-			Allowed: legacyDecision.Allowed, Blocked: legacyDecision.Blocked, Flagged: legacyDecision.Flagged,
-			Message: legacyDecision.Message, StatusCode: legacyDecision.StatusCode,
-			ErrorCode: "content_policy_violation", Action: legacyDecision.Action,
-			AccountPlanTypePending:   legacyDecision.AccountPlanTypePending,
-			AccountPlanTypeOutOfScope: legacyDecision.AccountPlanTypeOutOfScope,
-		}
+		decision.Legacy = &securityaudit.LegacyDecision{}
+		decision.Legacy.Allowed = legacyDecision.Allowed
+		decision.Legacy.Blocked = legacyDecision.Blocked
+		decision.Legacy.Flagged = legacyDecision.Flagged
+		decision.Legacy.Message = legacyDecision.Message
+		decision.Legacy.StatusCode = legacyDecision.StatusCode
+		decision.Legacy.ErrorCode = "content_policy_violation"
+		decision.Legacy.Action = legacyDecision.Action
+		decision.Legacy.AccountPlanTypePending = legacyDecision.AccountPlanTypePending
+		decision.Legacy.AccountPlanTypeOutOfScope = legacyDecision.AccountPlanTypeOutOfScope
 		if legacyDecision.Blocked {
 			decision.Kind, decision.HTTPStatus, decision.ErrorCode, decision.ClientMessage, decision.AllowNextStage = securityaudit.DecisionBlock, contentModerationStatus(legacyDecision), "content_policy_violation", legacyDecision.Message, false
 		}
