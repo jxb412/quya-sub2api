@@ -99,9 +99,9 @@ git merge --no-ff upstream/main
 ## 发布流程
 
 1. 合并代码并等待 CI、安全扫描通过。
-2. 创建稳定版本标签，例如 `v0.1.180`。
+2. 创建稳定版本标签，例如 `v0.1.182`。
 3. `release.yml` 构建 GitHub Release、二进制和 GHCR 镜像。
-4. Docker 使用 `ghcr.io/jxb412/sub2api:0.1.180` 更新应用容器。
+4. Docker 使用 `ghcr.io/jxb412/sub2api:0.1.182` 更新应用容器。
 5. 更新前备份数据库和配置，更新后检查 `/health`、日志和关键 API。
 
 Docker 镜像更新不需要服务器操作系统重启，但替换单个应用容器可能造成短暂中断。
