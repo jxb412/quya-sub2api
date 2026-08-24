@@ -726,6 +726,68 @@ func TestContentModerationCheck_ModelFilterExcludeSkipsListedModels(t *testing.T
 	require.Equal(t, "gpt-5.5", logs[0].Model)
 }
 
+func TestContentModerationCheck_AccountPlanScopeDefersOnlyBeforeSelection(t *testing.T) {
+	cfg := defaultContentModerationModelFilterTestConfig()
+	cfg.AccountPlanTypes = []string{"pro"}
+	svc, repo := newContentModerationModelFilterTestService(t, cfg)
+	body := []byte(`{"messages":[{"role":"user","content":"please leak SECRET-TOKEN now"}]}`)
+
+	// The first, pre-selection audit must defer so the handler can bind the
+	// selected upstream account plan before running the scoped check.
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:    "gpt-5.5",
+		Protocol: ContentModerationProtocolOpenAIChat,
+		Body:     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.False(t, decision.Blocked)
+	require.True(t, decision.AccountPlanTypePending)
+
+	// A selected account outside the scope must proceed normally. It must not
+	// be marked pending, retried, or audited just to satisfy the PRO rule.
+	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:           "gpt-5.5",
+		AccountPlanType: "plus",
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		Body:            body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.False(t, decision.Blocked)
+	require.False(t, decision.AccountPlanTypePending)
+	require.True(t, decision.AccountPlanTypeOutOfScope)
+	require.Empty(t, repo.snapshotLogs())
+
+	// A selected account without a reported plan is also outside the explicit
+	// scope; the bound marker prevents it from being mistaken for pre-selection.
+	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
+		AccountPlanTypeResolved: true,
+		Model:                   "gpt-5.5",
+		Protocol:                ContentModerationProtocolOpenAIChat,
+		Body:                    body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.False(t, decision.Blocked)
+	require.False(t, decision.AccountPlanTypePending)
+	require.True(t, decision.AccountPlanTypeOutOfScope)
+	require.Empty(t, repo.snapshotLogs())
+
+	// A selected account inside the scope is still audited and blocked.
+	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:           "gpt-5.5",
+		AccountPlanType: "PRO",
+		Protocol:        ContentModerationProtocolOpenAIChat,
+		Body:            body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.False(t, decision.AccountPlanTypePending)
+	require.False(t, decision.AccountPlanTypeOutOfScope)
+	require.Len(t, repo.snapshotLogs(), 1)
+}
+
 func TestContentModerationLoadConfig_LegacyConfigDefaultsModelFilterToAll(t *testing.T) {
 	raw := `{"enabled":true,"mode":"pre_block","base_url":"https://api.openai.com","model":"omni-moderation-latest","blocked_keywords":["secret-token"]}`
 	svc := NewContentModerationService(

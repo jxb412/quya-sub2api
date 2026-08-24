@@ -2265,6 +2265,30 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 		// 准入完成：门并入连接 ctx，turn 级复核与 failover 重选共用。
 		ctx = admissionCtx
+		// The first WebSocket audit runs before account selection. Bind the
+		// selected account before the first upstream attempt so an account-plan
+		// scope audits only the configured plans; accounts outside that scope
+		// remain usable without being retried or rejected.
+		c.Request = c.Request.WithContext(ctx)
+		bindContentModerationAccountPlanType(c, account)
+		ctx = c.Request.Context()
+		if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, firstMessage, "first_turn"); securityAuditAccountPlanPending(decision) {
+			failedAccountIDs[account.ID] = struct{}{}
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+				accountReleaseFunc = nil
+			}
+			currentAccountRelease = nil
+			continue
+		} else if decision != nil && !decision.AllowNextStage {
+			if accountReleaseFunc != nil {
+				accountReleaseFunc()
+				accountReleaseFunc = nil
+			}
+			writeSecurityAuditWSError(ctx, wsConn, decision)
+			closeOpenAIClientWS(wsConn, securityAuditWSCloseStatus(decision), securityAuditWSCloseReason(decision))
+			return
+		}
 		// Account selection starts a fresh upstream attempt. Clear any model
 		// captured by the previous failover account before credential lookup.
 		setOpsSelectedAccount(c, account.ID, account.Platform)

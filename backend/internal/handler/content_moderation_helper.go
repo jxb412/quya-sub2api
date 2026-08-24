@@ -87,7 +87,8 @@ func buildContentModerationInput(c *gin.Context, apiKey *service.APIKey, subject
 		Endpoint:        GetInboundEndpoint(c),
 		Provider:        contentModerationProvider(apiKey),
 		Model:           clientRequestedModel(c, model),
-		AccountPlanType: service.ContentModerationAccountPlanTypeFromContext(c.Request.Context()),
+		AccountPlanType:         service.ContentModerationAccountPlanTypeFromContext(c.Request.Context()),
+		AccountPlanTypeResolved: service.ContentModerationAccountPlanTypeBoundFromContext(c.Request.Context()),
 		Protocol:        protocol,
 		Body:            body,
 	}
