@@ -270,3 +270,17 @@ func TestNormalizeOpenAIParallelToolCallsWithoutTools(t *testing.T) {
 	require.True(t, changed)
 	require.False(t, gjson.GetBytes(normalized, "parallel_tool_calls").Exists())
 }
+
+func TestNormalizeOpenAIParallelToolCallsWithoutToolsKeepsResponsesLiteAdditionalTools(t *testing.T) {
+	liteBody := []byte(`{"input":[{"type":"message","role":"user","content":"hi"},{"type":"additional_tools","tools":[{"type":"function","name":"spawn_agent"}]}],"parallel_tool_calls":false}`)
+	normalized, changed, err := normalizeOpenAIParallelToolCallsWithoutTools(liteBody)
+	require.NoError(t, err)
+	require.False(t, changed)
+	require.Equal(t, gjson.False, gjson.GetBytes(normalized, "parallel_tool_calls").Type)
+
+	emptyLiteBody := []byte(`{"input":[{"type":"additional_tools","tools":[]}],"parallel_tool_calls":true}`)
+	normalized, changed, err = normalizeOpenAIParallelToolCallsWithoutTools(emptyLiteBody)
+	require.NoError(t, err)
+	require.True(t, changed)
+	require.False(t, gjson.GetBytes(normalized, "parallel_tool_calls").Exists())
+}

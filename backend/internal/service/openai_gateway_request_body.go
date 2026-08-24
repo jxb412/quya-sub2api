@@ -366,8 +366,7 @@ func normalizeOpenAIParallelToolCallsWithoutTools(body []byte) ([]byte, bool, er
 	if !parallel.Exists() {
 		return body, false, nil
 	}
-	tools := gjson.GetBytes(body, "tools")
-	if tools.IsArray() && len(tools.Array()) > 0 {
+	if openAIRequestBodyHasTools(body) {
 		return body, false, nil
 	}
 	normalized, err := sjson.DeleteBytes(body, "parallel_tool_calls")
@@ -375,6 +374,24 @@ func normalizeOpenAIParallelToolCallsWithoutTools(body []byte) ([]byte, bool, er
 		return body, false, fmt.Errorf("normalize parallel_tool_calls without tools: %w", err)
 	}
 	return normalized, true, nil
+}
+
+// openAIRequestBodyHasTools recognizes both standard Responses tools and the
+// Responses Lite additional_tools carrier. The Lite normalization moves
+// namespace tools into input items and removes the top-level tools field.
+func openAIRequestBodyHasTools(body []byte) bool {
+	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
+		return true
+	}
+	for _, item := range gjson.GetBytes(body, "input").Array() {
+		if strings.TrimSpace(item.Get("type").String()) != "additional_tools" {
+			continue
+		}
+		if tools := item.Get("tools"); tools.IsArray() && len(tools.Array()) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeOpenAIAPIKeyStoreFalseReasoningReplay(body []byte, knownStoreFalse bool) ([]byte, bool, error) {
