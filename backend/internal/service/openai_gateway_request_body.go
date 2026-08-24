@@ -376,9 +376,16 @@ func normalizeOpenAIParallelToolCallsWithoutTools(body []byte) ([]byte, bool, er
 	return normalized, true, nil
 }
 
-// openAIRequestBodyHasTools recognizes both standard Responses tools and the
-// Responses Lite additional_tools carrier. The Lite normalization moves
-// namespace tools into input items and removes the top-level tools field.
+// openAIRequestBodyHasTools is the []byte counterpart of openAIResponsesLiteHasTools:
+// besides the top-level "tools" array it also recognizes the Responses Lite carrier.
+// normalizeOpenAIResponsesLiteTools moves namespace tools into an input item of type
+// "additional_tools" and drops the top-level "tools" key; the request still carries
+// tools at that point. Looking only at the top level therefore misreads such a body as
+// "no tools" and deletes the parallel_tool_calls:false that
+// ensureOpenAIResponsesLiteParallelToolCalls had just pinned, and OpenAI falls back to
+// its default of true and rejects the request with
+// 400 unsupported_value: "X-OpenAI-Internal-Codex-Responses-Lite requires
+// `parallel_tool_calls` to be false."
 func openAIRequestBodyHasTools(body []byte) bool {
 	if tools := gjson.GetBytes(body, "tools"); tools.IsArray() && len(tools.Array()) > 0 {
 		return true
