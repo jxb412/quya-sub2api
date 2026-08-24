@@ -66,10 +66,10 @@ DATABASE_INITIALIZATION_ENABLED=true
 ## 更新与发布
 
 GitHub Actions 在稳定的 `v*` 标签上构建发布包和镜像。CI 通过后，例如创建
-`v0.1.180`，会发布：
+`v0.1.182`，会发布：
 
 ```text
-ghcr.io/jxb412/sub2api:0.1.180
+ghcr.io/jxb412/sub2api:0.1.182
 ghcr.io/jxb412/sub2api:latest
 ```
 

@@ -61,10 +61,10 @@ backup, reverse-proxy, and configuration instructions.
 ## Release and Update
 
 The GitHub Actions release workflow is triggered by a stable `v*` tag. After CI
-passes, create a tag such as `v0.1.180`. The workflow publishes:
+passes, create a tag such as `v0.1.182`. The workflow publishes:
 
 ```text
-ghcr.io/jxb412/sub2api:0.1.180
+ghcr.io/jxb412/sub2api:0.1.182
 ghcr.io/jxb412/sub2api:latest
 ```
 

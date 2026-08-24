@@ -110,11 +110,11 @@ docker compose -f docker-compose.local.yml up -d --no-deps sub2api
 
 ## 发布与更新
 
-`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.1.180`，
+`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.1.182`，
 会构建二进制、GitHub Release 和：
 
 ```text
-ghcr.io/jxb412/sub2api:0.1.180
+ghcr.io/jxb412/sub2api:0.1.182
 ghcr.io/jxb412/sub2api:latest
 ```
 
