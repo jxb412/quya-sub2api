@@ -320,7 +320,7 @@ type ContentModerationCheckInput struct {
 	AccountPlanType			string
 	// AccountPlanTypeResolved distinguishes the pre-selection audit (false)
 	// from a selected account whose upstream plan is unknown/empty (true).
-	AccountPlanTypeResolved		bool
+	AccountPlanTypeResolved	bool
 	Endpoint			string
 	Provider			string
 	Model				string

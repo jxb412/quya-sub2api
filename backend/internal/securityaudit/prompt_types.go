@@ -156,7 +156,7 @@ type LegacyDecision struct {
 	StatusCode			int    `json:"status_code"`
 	ErrorCode			string `json:"error_code"`
 	Action				string `json:"action"`
-	AccountPlanTypePending		bool   `json:"-"`
+	AccountPlanTypePending	bool   `json:"-"`
 	AccountPlanTypeOutOfScope	bool   `json:"-"`
 }
 
