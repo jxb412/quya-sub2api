@@ -28,12 +28,15 @@ func (a *LegacyModerationAdapter) Check(ctx context.Context, req Request) (*Lega
 	if err != nil || decision == nil {
 		return nil, err
 	}
-	return &LegacyDecision{
-		Allowed: decision.Allowed, Blocked: decision.Blocked, Flagged: decision.Flagged,
-		Message: decision.Message, StatusCode: decision.StatusCode,
-		ErrorCode:               "content_policy_violation",
-		Action:                  decision.Action,
-		AccountPlanTypePending:  decision.AccountPlanTypePending,
-		AccountPlanTypeOutOfScope: decision.AccountPlanTypeOutOfScope,
-	}, nil
+	legacy := &LegacyDecision{}
+	legacy.Allowed = decision.Allowed
+	legacy.Blocked = decision.Blocked
+	legacy.Flagged = decision.Flagged
+	legacy.Message = decision.Message
+	legacy.StatusCode = decision.StatusCode
+	legacy.ErrorCode = "content_policy_violation"
+	legacy.Action = decision.Action
+	legacy.AccountPlanTypePending = decision.AccountPlanTypePending
+	legacy.AccountPlanTypeOutOfScope = decision.AccountPlanTypeOutOfScope
+	return legacy, nil
 }

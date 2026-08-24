@@ -2280,14 +2280,12 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			failedAccountIDs[account.ID] = struct{}{}
 			if accountReleaseFunc != nil {
 				accountReleaseFunc()
-				accountReleaseFunc = nil
 			}
 			currentAccountRelease = nil
 			continue
 		} else if decision != nil && !decision.AllowNextStage {
 			if accountReleaseFunc != nil {
 				accountReleaseFunc()
-				accountReleaseFunc = nil
 			}
 			writeSecurityAuditWSError(ctx, wsConn, decision)
 			closeOpenAIClientWS(wsConn, securityAuditWSCloseStatus(decision), securityAuditWSCloseReason(decision))
