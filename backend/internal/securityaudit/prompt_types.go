@@ -149,15 +149,15 @@ type PromptDecision struct {
 }
 
 type LegacyDecision struct {
-	Allowed                bool   `json:"allowed"`
-	Blocked                bool   `json:"blocked"`
-	Flagged                bool   `json:"flagged"`
-	Message                string `json:"message"`
-	StatusCode             int    `json:"status_code"`
-	ErrorCode              string `json:"error_code"`
-	Action                 string `json:"action"`
-	AccountPlanTypePending    bool `json:"-"`
-	AccountPlanTypeOutOfScope bool `json:"-"`
+	Allowed				bool   `json:"allowed"`
+	Blocked				bool   `json:"blocked"`
+	Flagged				bool   `json:"flagged"`
+	Message				string `json:"message"`
+	StatusCode			int    `json:"status_code"`
+	ErrorCode			string `json:"error_code"`
+	Action				string `json:"action"`
+	AccountPlanTypePending		bool   `json:"-"`
+	AccountPlanTypeOutOfScope	bool   `json:"-"`
 }
 
 type Decision struct {

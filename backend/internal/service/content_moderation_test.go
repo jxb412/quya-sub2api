@@ -785,7 +785,7 @@ func TestContentModerationCheck_AccountPlanScopeDefersOnlyBeforeSelection(t *tes
 	require.True(t, decision.Blocked)
 	require.False(t, decision.AccountPlanTypePending)
 	require.False(t, decision.AccountPlanTypeOutOfScope)
-	require.Len(t, repo.snapshotLogs(), 1)
+	require.Len(t, requireContentModerationLogCount(t, repo, 1), 1)
 }
 
 func TestContentModerationLoadConfig_LegacyConfigDefaultsModelFilterToAll(t *testing.T) {
