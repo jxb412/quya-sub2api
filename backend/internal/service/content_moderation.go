@@ -310,13 +310,13 @@ type ContentModerationModelFilter struct {
 }
 
 type ContentModerationCheckInput struct {
-	RequestID       string
-	UserID          int64
-	UserEmail       string
-	APIKeyID        int64
-	APIKeyName      string
-	GroupID         *int64
-	GroupName       string
+	RequestID               string
+	UserID                  int64
+	UserEmail               string
+	APIKeyID                int64
+	APIKeyName              string
+	GroupID                 *int64
+	GroupName               string
 	AccountPlanType         string
 	// AccountPlanTypeResolved distinguishes the pre-selection audit (false)
 	// from a selected account whose upstream plan is unknown/empty (true).

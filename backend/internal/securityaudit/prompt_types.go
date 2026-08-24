@@ -67,14 +67,14 @@ const (
 )
 
 type Request struct {
-	RequestID       string
-	UserID          int64
-	Username        string
-	UserEmail       string
-	APIKeyID        int64
-	APIKeyName      string
-	GroupID         *int64
-	GroupName       string
+	RequestID               string
+	UserID                  int64
+	Username                string
+	UserEmail               string
+	APIKeyID                int64
+	APIKeyName              string
+	GroupID                 *int64
+	GroupName               string
 	AccountPlanType         string
 	AccountPlanTypeResolved bool
 	Provider                string
