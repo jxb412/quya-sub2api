@@ -317,20 +317,25 @@ type ContentModerationCheckInput struct {
 	APIKeyName      string
 	GroupID         *int64
 	GroupName       string
-	AccountPlanType string
-	Endpoint        string
-	Provider        string
-	Model           string
-	Protocol        string
-	Body            []byte
+	AccountPlanType         string
+	// AccountPlanTypeResolved distinguishes the pre-selection audit (false)
+	// from a selected account whose upstream plan is unknown/empty (true).
+	AccountPlanTypeResolved bool
+	Endpoint                string
+	Provider                string
+	Model                   string
+	Protocol                string
+	Body                    []byte
 }
 
 type contentModerationAccountPlanTypeContextKey struct{}
+type contentModerationAccountPlanTypeBoundContextKey struct{}
 
 // WithContentModerationAccountPlanType carries the selected upstream account's
 // plan type from the scheduler back into the security-audit request builder.
 func WithContentModerationAccountPlanType(ctx context.Context, planType string) context.Context {
-	return context.WithValue(ctx, contentModerationAccountPlanTypeContextKey{}, strings.ToLower(strings.TrimSpace(planType)))
+	ctx = context.WithValue(ctx, contentModerationAccountPlanTypeContextKey{}, strings.ToLower(strings.TrimSpace(planType)))
+	return context.WithValue(ctx, contentModerationAccountPlanTypeBoundContextKey{}, true)
 }
 
 func ContentModerationAccountPlanTypeFromContext(ctx context.Context) string {
@@ -339,6 +344,14 @@ func ContentModerationAccountPlanTypeFromContext(ctx context.Context) string {
 	}
 	value, _ := ctx.Value(contentModerationAccountPlanTypeContextKey{}).(string)
 	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func ContentModerationAccountPlanTypeBoundFromContext(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	bound, _ := ctx.Value(contentModerationAccountPlanTypeBoundContextKey{}).(bool)
+	return bound
 }
 
 type ContentModerationInput struct {
@@ -406,6 +419,11 @@ type ContentModerationDecision struct {
 	// AccountPlanTypePending is set when the pre-selection check needs the
 	// selected upstream account before it can evaluate the configured scope.
 	AccountPlanTypePending bool `json:"-"`
+	// AccountPlanTypeOutOfScope marks an explicitly selected account whose plan
+	// is outside the configured scope. Such an allow decision must not be
+	// cached for the whole request because a later failover may select a plan
+	// that does require moderation.
+	AccountPlanTypeOutOfScope bool `json:"-"`
 }
 
 type ContentModerationLog struct {
@@ -886,7 +904,8 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	inGroupScope := cfg.includesGroup(input.GroupID)
 	inModelScope := cfg.includesModel(input.Model)
 	inAccountPlanScope := cfg.includesAccountPlanType(input.AccountPlanType)
-	accountPlanTypePending := len(cfg.AccountPlanTypes) > 0 && strings.TrimSpace(input.AccountPlanType) == ""
+	accountPlanTypeResolved := input.AccountPlanTypeResolved || strings.TrimSpace(input.AccountPlanType) != ""
+	accountPlanTypePending := len(cfg.AccountPlanTypes) > 0 && !accountPlanTypeResolved
 	slog.Info("content_moderation.config_loaded",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
@@ -955,9 +974,13 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"configured_models", cfg.ModelFilter.Models)
 		return allow, nil
 	}
-	if !inAccountPlanScope {
+	// An empty account plan type means the request is being checked before
+	// account selection. Defer the scoped audit until the scheduler provides
+	// the selected account's plan. A known plan outside the configured scope is
+	// a normal allow, not a signal to retry another account.
+	if accountPlanTypePending {
 		allow.AccountPlanTypePending = true
-		slog.Info("content_moderation.skip_account_plan_type_out_of_scope",
+		slog.Info("content_moderation.defer_account_plan_type_scope",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
@@ -966,9 +989,9 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		)
 		return allow, nil
 	}
-	if accountPlanTypePending {
-		allow.AccountPlanTypePending = true
-		slog.Info("content_moderation.defer_account_plan_type_scope",
+	if !inAccountPlanScope {
+		allow.AccountPlanTypeOutOfScope = true
+		slog.Info("content_moderation.skip_account_plan_type_out_of_scope",
 			"user_id", input.UserID,
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),

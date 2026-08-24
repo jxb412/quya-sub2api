@@ -75,13 +75,14 @@ type Request struct {
 	APIKeyName      string
 	GroupID         *int64
 	GroupName       string
-	AccountPlanType string
-	Provider        string
-	Endpoint        string
-	Protocol        string
-	Model           string
-	Body            []byte
-	Stage           string
+	AccountPlanType         string
+	AccountPlanTypeResolved bool
+	Provider                string
+	Endpoint                string
+	Protocol                string
+	Model                   string
+	Body                    []byte
+	Stage                   string
 }
 
 func (r Request) Clone() Request {
@@ -155,7 +156,8 @@ type LegacyDecision struct {
 	StatusCode             int    `json:"status_code"`
 	ErrorCode              string `json:"error_code"`
 	Action                 string `json:"action"`
-	AccountPlanTypePending bool   `json:"-"`
+	AccountPlanTypePending    bool `json:"-"`
+	AccountPlanTypeOutOfScope bool `json:"-"`
 }
 
 type Decision struct {

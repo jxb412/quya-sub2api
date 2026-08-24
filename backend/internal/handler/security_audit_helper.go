@@ -84,6 +84,10 @@ func securityAuditAccountPlanPending(decision *securityaudit.Decision) bool {
 	return decision != nil && decision.Legacy != nil && decision.Legacy.AccountPlanTypePending
 }
 
+func securityAuditAccountPlanOutOfScope(decision *securityaudit.Decision) bool {
+	return decision != nil && decision.Legacy != nil && decision.Legacy.AccountPlanTypeOutOfScope
+}
+
 func runSecurityAudit(c *gin.Context, reqLog *zap.Logger, coordinator *securityaudit.Coordinator, legacy *service.ContentModerationService, apiKey *service.APIKey, subject middleware2.AuthSubject, protocol, model string, body []byte, stage string) *securityaudit.Decision {
 	if c == nil || c.Request == nil {
 		return nil
@@ -104,12 +108,13 @@ func runSecurityAudit(c *gin.Context, reqLog *zap.Logger, coordinator *securitya
 			Allowed: legacyDecision.Allowed, Blocked: legacyDecision.Blocked, Flagged: legacyDecision.Flagged,
 			Message: legacyDecision.Message, StatusCode: legacyDecision.StatusCode,
 			ErrorCode: "content_policy_violation", Action: legacyDecision.Action,
-			AccountPlanTypePending: legacyDecision.AccountPlanTypePending,
+			AccountPlanTypePending:   legacyDecision.AccountPlanTypePending,
+			AccountPlanTypeOutOfScope: legacyDecision.AccountPlanTypeOutOfScope,
 		}
 		if legacyDecision.Blocked {
 			decision.Kind, decision.HTTPStatus, decision.ErrorCode, decision.ClientMessage, decision.AllowNextStage = securityaudit.DecisionBlock, contentModerationStatus(legacyDecision), "content_policy_violation", legacyDecision.Message, false
 		}
-		if decision.AllowNextStage && cacheCompletion && !legacyDecision.AccountPlanTypePending {
+		if decision.AllowNextStage && cacheCompletion && !legacyDecision.AccountPlanTypePending && !legacyDecision.AccountPlanTypeOutOfScope {
 			c.Set(securityAuditCompletedContextKey, true)
 		}
 		return &decision
@@ -128,7 +133,7 @@ func runSecurityAudit(c *gin.Context, reqLog *zap.Logger, coordinator *securitya
 			}
 			logSecurityAuditStart(reqLog, request, len(body), false)
 			decision := coordinator.Check(c.Request.Context(), request)
-			if decision.Kind == securityaudit.DecisionAllow {
+			if decision.Kind == securityaudit.DecisionAllow && !securityAuditAccountPlanPending(&decision) && !securityAuditAccountPlanOutOfScope(&decision) {
 				c.Set(securityAuditWSDedupeContextKey, securityAuditWSDedupeEntry{
 					stage: request.Stage, turn: turnNo, bodyHash: bodyHash, decision: decision,
 				})
@@ -140,7 +145,7 @@ func runSecurityAudit(c *gin.Context, reqLog *zap.Logger, coordinator *securitya
 	logSecurityAuditStart(reqLog, request, len(body), false)
 	decision := coordinator.Check(c.Request.Context(), request)
 	accountPlanTypePending := decision.Legacy != nil && decision.Legacy.AccountPlanTypePending
-	if decision.AllowNextStage && cacheCompletion && !accountPlanTypePending {
+	if decision.AllowNextStage && cacheCompletion && !accountPlanTypePending && !securityAuditAccountPlanOutOfScope(&decision) {
 		c.Set(securityAuditCompletedContextKey, true)
 	}
 	logSecurityAuditDone(reqLog, request, decision, false)
@@ -184,7 +189,8 @@ func buildSecurityAuditRequest(c *gin.Context, apiKey *service.APIKey, subject m
 		RequestID: legacy.RequestID, UserID: legacy.UserID, UserEmail: legacy.UserEmail,
 		APIKeyID: legacy.APIKeyID, APIKeyName: legacy.APIKeyName, GroupID: cloneSecurityAuditGroupID(legacy.GroupID),
 		GroupName: legacy.GroupName, Provider: legacy.Provider, Endpoint: legacy.Endpoint,
-		AccountPlanType: legacy.AccountPlanType, Protocol: legacy.Protocol, Model: legacy.Model, Body: body, Stage: strings.TrimSpace(stage),
+		AccountPlanType: legacy.AccountPlanType, AccountPlanTypeResolved: legacy.AccountPlanTypeResolved,
+		Protocol: legacy.Protocol, Model: legacy.Model, Body: body, Stage: strings.TrimSpace(stage),
 	}
 	if apiKey != nil && apiKey.User != nil {
 		request.Username = apiKey.User.Username
