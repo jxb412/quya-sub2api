@@ -13,6 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
+| 当前发布 | `v0.1.190`（合并上游 `v0.1.185`） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -110,11 +111,11 @@ docker compose -f docker-compose.local.yml up -d --no-deps sub2api
 
 ## 发布与更新
 
-`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.1.182`，
+`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.1.190`，
 会构建二进制、GitHub Release 和：
 
 ```text
-ghcr.io/jxb412/sub2api:0.1.182
+ghcr.io/jxb412/sub2api:0.1.190
 ghcr.io/jxb412/sub2api:latest
 ```
 
