@@ -10,7 +10,7 @@ ghcr.io/jxb412/sub2api:latest
 生产环境建议固定版本：
 
 ```bash
-docker pull ghcr.io/jxb412/sub2api:0.2.1
+docker pull ghcr.io/jxb412/sub2api:0.2.2
 ```
 
 Compose 示例：
@@ -18,7 +18,7 @@ Compose 示例：
 ```yaml
 services:
   sub2api:
-    image: ghcr.io/jxb412/sub2api:0.2.1
+    image: ghcr.io/jxb412/sub2api:0.2.2
     restart: unless-stopped
     ports:
       - "8080:8080"

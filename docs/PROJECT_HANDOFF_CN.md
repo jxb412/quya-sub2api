@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前发布 | `v0.2.1`（合并上游 `v0.2.0`） |
+| 当前发布 | `v0.2.2`（合并上游 `v0.2.1`） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -111,23 +111,27 @@ docker compose -f docker-compose.local.yml up -d --no-deps sub2api
 
 ## 发布与更新
 
-`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.2.1`，
+`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.2.2`，
 会构建二进制、GitHub Release 和：
 
 ```text
-ghcr.io/jxb412/sub2api:0.2.1
+ghcr.io/jxb412/sub2api:0.2.2
 ghcr.io/jxb412/sub2api:latest
 ```
 
 Docker 服务器使用固定版本标签更容易回滚。内置更新检查适用于二进制/systemd
 部署；Docker 部署仍需拉取镜像并重建应用容器。
 
-`v0.2.1` 基于上游 `v0.2.0`，新增 4 个幂等迁移文件：
+`v0.2.2` 基于上游 `v0.2.1`，除本项目已有迁移外新增 4 个幂等迁移文件：
 
 - `232_channel_cache_write_1h_pricing.sql`：为 4 张渠道定价表新增 `cache_write_1h_price`。
 - `232_group_force_openai_fast.sql`：新增 `groups.force_openai_fast`。
 - `232_group_reasoning_effort_over_limit.sql`：新增 `groups.max_reasoning_effort_over_limit`。
 - `233_group_free_openai_fast.sql`：新增 `groups.free_openai_fast`。
+- `232_add_usage_log_upstream_request_id.sql`：新增用量记录的上游请求标识。
+- `233_add_usage_log_upstream_request_id_index_notx.sql`：创建对应非事务索引。
+- `234_channel_max_reasoning_effort_multiplier.sql`：新增渠道 reasoning effort 倍率配置。
+- `234_group_codex_models_manifest_config.sql`：新增 Codex 模型清单配置。
 
 生产环境保持 `DATABASE_INITIALIZATION_ENABLED=false` 时，升级前应在备份后手工执行
 上述迁移，并在 `schema_migrations` 中登记对应文件和校验值；不要为了迁移重启
