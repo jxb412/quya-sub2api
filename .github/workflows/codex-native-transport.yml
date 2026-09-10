@@ -30,6 +30,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+          targets: x86_64-unknown-linux-musl
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y perl musl-tools
       - name: Format
@@ -64,6 +65,8 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y perl musl-tools
       - name: Build Linux runtime
