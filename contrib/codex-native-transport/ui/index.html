@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Codex Native Transport</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 13px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 16px 20px; background: #ffffff; color: #1f2328; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #1b1b1f; color: #e6e6e6; }
+  }
+  h2 { font-size: 15px; margin: 0 0 4px; }
+  p.desc { margin: 0 0 16px; opacity: .7; }
+  fieldset { border: 1px solid rgba(128,128,128,.35); border-radius: 8px; margin: 0 0 14px; padding: 10px 14px 14px; }
+  legend { font-weight: 600; padding: 0 6px; }
+  label { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+  label span.k { min-width: 200px; }
+  input[type=text], input[type=number], select { flex: 1; min-width: 160px; padding: 4px 8px; border: 1px solid rgba(128,128,128,.4); border-radius: 6px; background: transparent; color: inherit; }
+  .row { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
+  button { padding: 6px 18px; border-radius: 6px; border: 1px solid rgba(128,128,128,.4); background: rgba(128,128,128,.12); color: inherit; cursor: pointer; }
+  button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+  #status { margin-left: 6px; opacity: .85; }
+  .hint { font-size: 12px; opacity: .6; margin: 2px 0 0; }
+  .custom-only, .machine-only { display: none; }
+  .warn { color: #b45309; }
+</style>
+</head>
+<body>
+  <h2>Codex Native Transport</h2>
+  <p class="desc">使用固定版本的 Rust reqwest + native-tls + hyper/h2 出站。应用层身份默认由 Sub2API 宿主管理，插件主要负责原生传输、连接池和 Cookie 隔离。</p>
+
+  <fieldset>
+    <legend>指纹隔离</legend>
+    <label><span class="k">一账号一指纹</span><input type="checkbox" id="per_account_fingerprint"></label>
+    <p class="hint">默认开启。每个账号拥有独立连接池、稳定 installation-id 和 Cloudflare Cookie，避免多个 OAuth 账号共用同一设备环境。</p>
+    <label><span class="k">会话指纹模式</span>
+      <select id="fingerprint_mode">
+        <option value="passthrough">passthrough（推荐，保留宿主会话）</option>
+        <option value="machine">machine（按账号稳定假名化）</option>
+      </select>
+    </label>
+    <p class="hint machine-only">machine 会把已有 session/thread/window/prompt_cache_key 按账号做稳定 1:1 映射；不会把所有用户压成一个会话，也不会凭空添加身份字段。</p>
+    <label class="machine-only"><span class="k">清理非原生遗留身份头</span><input type="checkbox" id="strip_non_native_identity_headers"></label>
+    <label class="machine-only"><span class="k">UA 与 sandbox 系统一致</span><input type="checkbox" id="align_sandbox_with_user_agent"></label>
+    <label><span class="k">一并发一套 ID</span><input type="checkbox" id="one_id_per_request"></label>
+    <p class="hint warn">实验功能，默认关闭。开启后每个请求重建 session/thread/cache key 并剥离 turn-state，会降低缓存命中并破坏远端会话延续，只用于短期故障排查。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>身份 Profile</legend>
+    <label><span class="k">Profile</span>
+      <select id="profile">
+        <option value="passthrough">passthrough（信任宿主身份收口，默认）</option>
+        <option value="codex_cli">codex cli</option>
+        <option value="codex_desktop">codex desktop</option>
+        <option value="opencode">opencode</option>
+        <option value="pi">pi</option>
+        <option value="custom">custom</option>
+      </select>
+    </label>
+    <label class="custom-only"><span class="k">自定义 originator</span><input type="text" id="custom_originator" placeholder="my_client"></label>
+    <label class="custom-only"><span class="k">自定义 UA 模板</span><input type="text" id="custom_user_agent_template" placeholder="my_client/{version} ({os}) {terminal}"></label>
+    <label><span class="k">UA {os} 段</span><input type="text" id="os_segment"></label>
+    <label><span class="k">UA {terminal} 段</span><input type="text" id="terminal_segment"></label>
+    <label><span class="k">residency 头</span>
+      <select id="residency"><option value="">不发送</option><option value="us">us</option></select>
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>版本自动同步</legend>
+    <label><span class="k">自动同步官方版本</span><input type="checkbox" id="version_auto_sync"></label>
+    <label><span class="k">同步间隔（小时）</span><input type="number" id="version_sync_interval_hours" min="1" max="168"></label>
+    <label><span class="k">固定版本（同步失败回退）</span><input type="text" id="pinned_version"></label>
+    <p class="hint warn">默认关闭。自动同步只更新 UA/version 文本，不会更新已编译的 TLS/HTTP2 依赖；网络栈升级仍必须重新构建插件。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>传输</legend>
+    <p class="hint">自动捕获并回放 __cf_bm / _cfuvid 等 Cloudflare 基建 Cookie（白名单与 Codex 源码一致，绝不保存账号/会话 Cookie）；隔离粒度由上方"一账号一指纹"开关决定。</p>
+    <label><span class="k">强制 HTTP/1.1</span><input type="checkbox" id="force_http11"></label>
+    <label><span class="k">连接超时（秒，0=不限制）</span><input type="number" id="connect_timeout_seconds" min="0" max="300"></label>
+    <label><span class="k">请求体上限（MB）</span><input type="number" id="max_request_body_mb" min="1" max="1024"></label>
+    <label><span class="k">Client 缓存上限</span><input type="number" id="max_cached_clients" min="8" max="4096"></label>
+  </fieldset>
+
+  <div class="row">
+    <button class="primary" id="save">保存</button>
+    <button id="test">测试连通性</button>
+    <span id="status"></span>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+  var bridgeToken = (location.hash.match(/bridge_token=([^&]+)/) || [])[1] || "";
+  var pending = Object.create(null);
+  var seq = 0;
+  var installationSeed = "";
+
+  function send(type, extra, expectReply) {
+    var requestId = "req-" + (++seq);
+    var message = Object.assign({
+      source: "sub2api-plugin-ui",
+      bridge_token: bridgeToken,
+      type: type,
+      request_id: requestId
+    }, extra || {});
+    var promise = null;
+    if (expectReply) {
+      promise = new Promise(function (resolve, reject) {
+        var timer = setTimeout(function () {
+          delete pending[requestId];
+          reject(new Error("请求超时: " + type));
+        }, 10000);
+        pending[requestId] = { resolve: resolve, reject: reject, timer: timer };
+      });
+    }
+    window.parent.postMessage(message, "*");
+    return promise;
+  }
+
+  window.addEventListener("message", function (event) {
+    if (event.source !== window.parent) return;
+    var msg = event.data || {};
+    if (msg.source !== "sub2api-plugin-host" || msg.bridge_token !== bridgeToken) return;
+    var entry = pending[msg.request_id];
+    if (!entry) return;
+    delete pending[msg.request_id];
+    clearTimeout(entry.timer);
+    if (msg.ok) entry.resolve(msg); else entry.reject(new Error(msg.error || "宿主返回失败"));
+  });
+
+  window.addEventListener("unload", function () {
+    Object.keys(pending).forEach(function (id) { clearTimeout(pending[id].timer); });
+  });
+
+  function byId(id) { return document.getElementById(id); }
+  function setStatus(text, ok) {
+    var status = byId("status");
+    status.textContent = text;
+    status.style.color = ok === false ? "#dc2626" : (ok === true ? "#16a34a" : "");
+  }
+
+  function fillForm(config) {
+    config = config || {};
+    var identity = config.identity || {};
+    installationSeed = identity.installation_id_seed || "";
+    byId("profile").value = identity.profile || "passthrough";
+    byId("fingerprint_mode").value = identity.fingerprint_mode || "passthrough";
+    byId("custom_originator").value = identity.custom_originator || "";
+    byId("custom_user_agent_template").value = identity.custom_user_agent_template || "";
+    byId("os_segment").value = identity.os_segment || "Ubuntu 22.04; x86_64";
+    byId("terminal_segment").value = identity.terminal_segment || "xterm-256color";
+    byId("residency").value = identity.residency || "";
+    byId("per_account_fingerprint").checked = config.per_account_fingerprint !== false;
+    byId("one_id_per_request").checked = config.one_id_per_request === true;
+    byId("strip_non_native_identity_headers").checked = identity.strip_non_native_identity_headers !== false;
+    byId("align_sandbox_with_user_agent").checked = identity.align_sandbox_with_user_agent !== false;
+    byId("version_auto_sync").checked = identity.version_auto_sync === true;
+    byId("version_sync_interval_hours").value = identity.version_sync_interval_hours || 6;
+    byId("pinned_version").value = identity.pinned_version || "0.153.4";
+    byId("force_http11").checked = !!config.force_http11;
+    byId("connect_timeout_seconds").value = config.connect_timeout_seconds || 0;
+    byId("max_request_body_mb").value = config.max_request_body_mb || 128;
+    byId("max_cached_clients").value = config.max_cached_clients || 256;
+    toggleConditional();
+  }
+
+  function collectForm() {
+    return {
+      force_http11: byId("force_http11").checked,
+      connect_timeout_seconds: Number(byId("connect_timeout_seconds").value) || 0,
+      per_account_fingerprint: byId("per_account_fingerprint").checked,
+      one_id_per_request: byId("one_id_per_request").checked,
+      max_request_body_mb: Number(byId("max_request_body_mb").value) || 128,
+      max_cached_clients: Number(byId("max_cached_clients").value) || 256,
+      identity: {
+        fingerprint_mode: byId("fingerprint_mode").value,
+        profile: byId("profile").value,
+        custom_originator: byId("custom_originator").value.trim(),
+        custom_user_agent_template: byId("custom_user_agent_template").value.trim(),
+        os_segment: byId("os_segment").value.trim(),
+        terminal_segment: byId("terminal_segment").value.trim(),
+        residency: byId("residency").value,
+        strip_non_native_identity_headers: byId("strip_non_native_identity_headers").checked,
+        align_sandbox_with_user_agent: byId("align_sandbox_with_user_agent").checked,
+        installation_id_seed: installationSeed,
+        version_auto_sync: byId("version_auto_sync").checked,
+        version_sync_interval_hours: Number(byId("version_sync_interval_hours").value) || 6,
+        pinned_version: byId("pinned_version").value.trim() || "0.153.4"
+      }
+    };
+  }
+
+  function toggleConditional() {
+    var isCustom = byId("profile").value === "custom";
+    var isMachine = byId("fingerprint_mode").value === "machine";
+    document.querySelectorAll(".custom-only").forEach(function (el) {
+      el.style.display = isCustom ? "flex" : "none";
+    });
+    document.querySelectorAll(".machine-only").forEach(function (el) {
+      el.style.display = isMachine ? (el.tagName === "P" ? "block" : "flex") : "none";
+    });
+    resize();
+  }
+
+  function resize() {
+    send("ui.resize", { height: document.documentElement.scrollHeight + 20 });
+  }
+
+  byId("profile").addEventListener("change", toggleConditional);
+  byId("fingerprint_mode").addEventListener("change", toggleConditional);
+
+  byId("save").addEventListener("click", function () {
+    setStatus("保存中…");
+    send("config.save", { config: collectForm() }, true).then(function (reply) {
+      fillForm(reply.config || collectForm());
+      setStatus("已保存", true);
+    }).catch(function (err) { setStatus(err.message, false); });
+  });
+
+  byId("test").addEventListener("click", function () {
+    setStatus("测试中…（先保存当前表单再测试）");
+    send("config.save", { config: collectForm() }, true).then(function () {
+      return send("config.test", {}, true);
+    }).then(function (reply) {
+      var result = reply.result || {};
+      setStatus((result.success ? "✓ " : "✗ ") + (result.message || "") +
+        (result.latency_ms != null ? "（" + result.latency_ms + "ms）" : ""), !!result.success);
+    }).catch(function (err) { setStatus(err.message, false); });
+  });
+
+  send("sub2api.plugin.ready");
+  send("config.load", {}, true).then(function (reply) {
+    fillForm(reply.config);
+    resize();
+  }).catch(function () {
+    fillForm(null);
+    resize();
+  });
+})();
+</script>
+</body>
+</html>
