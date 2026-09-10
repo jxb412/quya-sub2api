@@ -200,7 +200,7 @@ fn build_client(config: &PluginConfig, proxy: Option<&str>) -> Result<reqwest::C
         builder = builder.http1_only();
     }
     if let Some(proxy_url) = proxy {
-        validate_proxy_url(proxy_url)?;
+        let proxy_url = reqwest_proxy_url(proxy_url)?;
         let proxy = reqwest::Proxy::all(proxy_url)
             .map_err(|_| "invalid proxy URL or unsupported proxy scheme".to_string())?;
         builder = builder.proxy(proxy);
@@ -415,8 +415,8 @@ pub fn validate_forward_target(start: &ForwardRequestStart) -> Result<(), String
     Ok(())
 }
 
-fn validate_proxy_url(raw: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(raw)
+fn reqwest_proxy_url(raw: &str) -> Result<reqwest::Url, String> {
+    let mut parsed = reqwest::Url::parse(raw)
         .map_err(|_| "invalid proxy URL or unsupported proxy scheme".to_string())?;
     if !matches!(
         parsed.scheme(),
@@ -425,13 +425,23 @@ fn validate_proxy_url(raw: &str) -> Result<(), String> {
     {
         return Err("invalid proxy URL or unsupported proxy scheme".to_string());
     }
-    Ok(())
+    // Sub2API's existing Go SOCKS5 path sends the destination hostname to the
+    // proxy. reqwest distinguishes that behavior as socks5h; normalize the
+    // stored socks5 scheme so rollout does not change DNS or IPv4/IPv6 routing.
+    if parsed.scheme() == "socks5" {
+        parsed
+            .set_scheme("socks5h")
+            .map_err(|_| "invalid proxy URL or unsupported proxy scheme".to_string())?;
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proto::sub2api::plugin::v1::HeaderValues;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     fn values(items: &[&str]) -> HeaderValues {
         HeaderValues {
@@ -554,5 +564,76 @@ mod tests {
 
         let other: reqwest::Url = "https://api.openai.com/v1".parse().unwrap();
         assert!(jar.cookies(&other).is_none());
+    }
+
+    #[tokio::test]
+    async fn authenticated_socks5_proxy_uses_remote_dns_and_forwards_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let proxy = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+
+            let mut greeting = [0_u8; 2];
+            socket.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting[0], 5);
+            let mut methods = vec![0_u8; greeting[1] as usize];
+            socket.read_exact(&mut methods).await.unwrap();
+            assert!(methods.contains(&2));
+            socket.write_all(&[5, 2]).await.unwrap();
+
+            let mut auth = [0_u8; 2];
+            socket.read_exact(&mut auth).await.unwrap();
+            assert_eq!(auth[0], 1);
+            let mut username = vec![0_u8; auth[1] as usize];
+            socket.read_exact(&mut username).await.unwrap();
+            let password_len = socket.read_u8().await.unwrap();
+            let mut password = vec![0_u8; password_len as usize];
+            socket.read_exact(&mut password).await.unwrap();
+            assert_eq!(username, b"proxy-user");
+            assert_eq!(password, b"proxy-pass");
+            socket.write_all(&[1, 0]).await.unwrap();
+
+            let mut request = [0_u8; 4];
+            socket.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request[..3], &[5, 1, 0]);
+            assert_eq!(request[3], 3, "socks5 must be normalized to proxy DNS");
+            let hostname_len = socket.read_u8().await.unwrap();
+            let mut hostname = vec![0_u8; hostname_len as usize];
+            socket.read_exact(&mut hostname).await.unwrap();
+            let port = socket.read_u16().await.unwrap();
+            assert_eq!(hostname, b"unit.test");
+            assert_eq!(port, 18080);
+            socket
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
+                .await
+                .unwrap();
+
+            let mut received = Vec::new();
+            let mut buffer = [0_u8; 512];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert!(count > 0, "request closed before HTTP headers");
+                received.extend_from_slice(&buffer[..count]);
+            }
+            assert!(received.starts_with(b"GET /probe HTTP/1.1\r\n"));
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .await
+                .unwrap();
+        });
+
+        let config = PluginConfig::default();
+        let proxy_url = format!("socks5://proxy-user:proxy-pass@{proxy_addr}");
+        let client = build_client(&config, Some(&proxy_url)).unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.get("http://unit.test:18080/probe").send(),
+        )
+        .await
+        .expect("SOCKS request timed out")
+        .expect("SOCKS request failed");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "OK");
+        proxy.await.unwrap();
     }
 }

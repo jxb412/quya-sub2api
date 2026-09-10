@@ -1,6 +1,6 @@
 [package]
 name = "codex-native-transport"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2021"
 description = "Auditable Sub2API OpenAI OAuth transport using the Codex-compatible reqwest/native-tls/hyper stack."
 license = "MIT"
@@ -17,7 +17,7 @@ path = "src/main.rs"
 # 改动这些版本号前必须重新对照 codex 上游 lockfile。
 # ---------------------------------------------------------------------------
 [dependencies]
-reqwest = { version = "=0.12.28", features = ["cookies", "stream", "json"] }
+reqwest = { version = "=0.12.28", features = ["cookies", "stream", "json", "socks"] }
 hyper = "=1.8.1"
 h2 = "=0.4.16"
 hyper-util = "=0.1.20"

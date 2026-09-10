@@ -7,7 +7,8 @@
 - Rust `reqwest 0.12.28` + `native-tls` + `hyper 1.8.1` + `h2 0.4.16`。
 - HTTP/2 默认开启；可选强制 HTTP/1.1。
 - 每账号独立连接池和 Cloudflare 基础 Cookie Jar，默认不读取进程代理环境变量。
-- 支持 HTTP、HTTPS、SOCKS4a、SOCKS5、SOCKS5h 出站代理。
+- 支持 HTTP、HTTPS、SOCKS4a、SOCKS5、SOCKS5h 出站代理；Sub2API 的
+  `socks5://` 按原 Go 传输行为使用代理端 DNS，避免灰度切换改变解析路径。
 - 只保存 Cloudflare 基础 Cookie，不保存 ChatGPT 会话 Cookie。
 - 仅接受 OpenAI OAuth 账号和批准的 `chatgpt.com`、`api.openai.com` 上游地址。
 - `passthrough` 身份模式默认开启，不重复改写宿主已经生成的身份。
