@@ -75,7 +75,10 @@ jobs:
         env:
           CODEX_TRANSPORT_SIGNING_SEED_HEX: ${{ secrets.CODEX_TRANSPORT_SIGNING_SEED_HEX }}
         run: |
-          test -n "$CODEX_TRANSPORT_SIGNING_SEED_HEX"
+          if ! [[ "$CODEX_TRANSPORT_SIGNING_SEED_HEX" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "CODEX_TRANSPORT_SIGNING_SEED_HEX must be exactly 64 hexadecimal characters"
+            exit 1
+          fi
           umask 077
           printf '%s\n' "$CODEX_TRANSPORT_SIGNING_SEED_HEX" > signing-seed.hex
       - name: Package signed artifact
