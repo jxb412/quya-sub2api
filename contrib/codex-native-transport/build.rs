@@ -4,7 +4,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_client(false)
         .build_server(true)
-        .compile(
+        .compile_protos(
             &[
                 "proto/sub2api/plugin.proto",
                 "proto/goplugin/grpc_controller.proto",

@@ -59,7 +59,7 @@ fn main() {
     // Sub2API 以 SkipHostEnv 启动插件（环境变量几乎为空）。Linux 上 vendored
     // OpenSSL 的默认 CA 路径不可用，按系统实际路径探测并设置 SSL_CERT_FILE/DIR。
     #[cfg(target_os = "linux")]
-    openssl_probe::init_ssl_cert_env_vars();
+    openssl_probe::init_openssl_env_vars();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -11,7 +11,7 @@
 //! profile = "passthrough"（默认）时完全不动宿主给出的请求。
 
 use hmac::{Hmac, Mac};
-use reqwest::header::{HeaderMap, HeaderValue};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
@@ -487,7 +487,9 @@ fn replace_header_if_present(headers: &mut HeaderMap, name: &str, value: &str) {
         return;
     }
     if let Ok(value) = HeaderValue::from_str(value) {
-        headers.insert(name, value);
+        if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
+            headers.insert(header_name, value);
+        }
     }
 }
 
