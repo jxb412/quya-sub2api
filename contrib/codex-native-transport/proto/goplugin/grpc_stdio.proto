@@ -1,0 +1,22 @@
+// Vendored from hashicorp/go-plugin v1.8.0 (internal/plugin/grpc_stdio.proto).
+// The host mirrors plugin stdout/stderr through this stream; Sub2API discards it
+// (SyncStdout/SyncStderr = io.Discard) but the client still opens the stream.
+syntax = "proto3";
+package plugin;
+option go_package = "./plugin";
+
+import "google/protobuf/empty.proto";
+
+service GRPCStdio {
+  rpc StreamStdio(google.protobuf.Empty) returns (stream StdioData);
+}
+
+message StdioData {
+  enum Channel {
+    INVALID = 0;
+    STDOUT = 1;
+    STDERR = 2;
+  }
+  Channel channel = 1;
+  bytes data = 2;
+}

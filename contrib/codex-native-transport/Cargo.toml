@@ -1,0 +1,58 @@
+[package]
+name = "codex-native-transport"
+version = "0.4.5"
+edition = "2021"
+description = "Auditable Sub2API OpenAI OAuth transport using the Codex-compatible reqwest/native-tls/hyper stack."
+license = "MIT"
+
+[[bin]]
+name = "plugin"
+path = "src/main.rs"
+
+# ---------------------------------------------------------------------------
+# 上游传输栈：逐版本复刻 openai/codex rust-v0.153.4 的 Cargo.lock。
+# 真实 Codex CLI 的默认 TLS 后端是 native-tls（Linux=OpenSSL vendored、
+# macOS=Security.framework、Windows=SChannel），HTTP 栈是 hyper 1.8.1 + h2 0.4.16。
+# 指纹不是"伪装"出来的——依赖版本一致时 ClientHello / HTTP2 SETTINGS 天然一致。
+# 改动这些版本号前必须重新对照 codex 上游 lockfile。
+# ---------------------------------------------------------------------------
+[dependencies]
+reqwest = { version = "=0.12.28", features = ["cookies", "stream", "json", "socks"] }
+hyper = "=1.8.1"
+h2 = "=0.4.16"
+hyper-util = "=0.1.20"
+native-tls = "=0.2.14"
+tokio-native-tls = "=0.3.1"
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+futures-util = "0.3"
+hmac = "0.12"
+tonic = "0.12"
+tonic-health = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+serde = { version = "1", features = ["derive"] }
+# preserve_order 必须开启:改写请求体/头内 JSON 时保持键序与原客户端一致,
+# 否则 serde_json 默认 BTreeMap 会把 JSON 键重排成字母序,破坏 body 指纹。
+serde_json = { version = "1", features = ["preserve_order"] }
+bytes = "1"
+http = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "v7"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# codex-rs/core 在 Linux 目标上启用 openssl-sys vendored（静态链接 OpenSSL）。
+# openssl-src 需 pin 到 300.6.1+3.6.3（cargo update -p openssl-src --precise）。
+openssl = "=0.10.75"
+openssl-sys = { version = "=0.9.111", features = ["vendored"] }
+openssl-probe = "=0.1.6"
+
+[build-dependencies]
+protoc-bin-vendored = "3"
+tonic-build = "0.12"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 2

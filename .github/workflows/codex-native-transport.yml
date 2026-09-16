@@ -1,0 +1,96 @@
+name: Codex Native Transport
+
+on:
+  push:
+    paths:
+      - 'contrib/codex-native-transport/**'
+      - '.github/workflows/codex-native-transport.yml'
+  pull_request:
+    paths:
+      - 'contrib/codex-native-transport/**'
+      - '.github/workflows/codex-native-transport.yml'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check plugin
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contrib/codex-native-transport
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: x86_64-unknown-linux-musl
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y perl musl-tools
+      - name: Format
+        run: cargo fmt --check
+      - name: Test
+        run: cargo test
+      - name: Build Linux runtime
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Package unsigned development artifact
+        run: |
+          python3 tools/package.py \
+            --runtime linux-amd64=target/x86_64-unknown-linux-musl/release/plugin \
+            --output-dir dist
+      - name: Upload development artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-native-transport-linux-${{ github.sha }}
+          path: contrib/codex-native-transport/dist/*.s2plugin
+
+  release:
+    name: Sign release package
+    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: contrib/codex-native-transport
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y perl musl-tools
+      - name: Build Linux runtime
+        run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: Write signing seed
+        env:
+          CODEX_TRANSPORT_SIGNING_SEED_HEX: ${{ secrets.CODEX_TRANSPORT_SIGNING_SEED_HEX }}
+        run: |
+          if ! [[ "$CODEX_TRANSPORT_SIGNING_SEED_HEX" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "CODEX_TRANSPORT_SIGNING_SEED_HEX must be exactly 64 hexadecimal characters"
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$CODEX_TRANSPORT_SIGNING_SEED_HEX" > signing-seed.hex
+      - name: Package signed artifact
+        run: |
+          python3 tools/package.py \
+            --runtime linux-amd64=target/x86_64-unknown-linux-musl/release/plugin \
+            --output-dir dist \
+            --sign-key signing-seed.hex \
+            --key-id quya-codex-native-transport-v1
+          rm -f signing-seed.hex
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: contrib/codex-native-transport/dist/*.s2plugin

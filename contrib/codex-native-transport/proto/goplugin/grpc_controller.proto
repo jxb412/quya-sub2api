@@ -1,0 +1,11 @@
+// Vendored from hashicorp/go-plugin v1.8.0 (internal/plugin/grpc_controller.proto).
+// The host calls Shutdown for graceful plugin termination before killing the process.
+syntax = "proto3";
+package plugin;
+option go_package = "./plugin";
+
+message Empty {}
+
+service GRPCController {
+  rpc Shutdown(Empty) returns (Empty);
+}
