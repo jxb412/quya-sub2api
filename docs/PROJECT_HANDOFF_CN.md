@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前发布 | `v0.2.2`（合并上游 `v0.2.1`） |
+| 当前开发版本 | `0.4.6`（合并上游 `v0.2.5`，待发布） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -111,31 +111,32 @@ docker compose -f docker-compose.local.yml up -d --no-deps sub2api
 
 ## 发布与更新
 
-`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.2.2`，
+`release.yml` 只在 `v*` 标签上发布稳定版本。CI 通过后创建例如 `v0.4.6`，
 会构建二进制、GitHub Release 和：
 
 ```text
-ghcr.io/jxb412/sub2api:0.2.2
+ghcr.io/jxb412/sub2api:0.4.6
 ghcr.io/jxb412/sub2api:latest
 ```
 
 Docker 服务器使用固定版本标签更容易回滚。内置更新检查适用于二进制/systemd
 部署；Docker 部署仍需拉取镜像并重建应用容器。
 
-`v0.2.2` 基于上游 `v0.2.1`，除本项目已有迁移外新增 4 个幂等迁移文件：
+`0.4.6` 基于本项目 `0.4.5`，合并上游 `v0.2.5`。上游主要变化包括 OpenCode
+平台、站点类型开关、订阅/API Key 批量管理、Codex 配额窗口修复、Responses Lite
+namespace 修复、OpenAI WebSocket 连接池与执行作用域修复，以及用量费用精度改进。
 
-- `232_channel_cache_write_1h_pricing.sql`：为 4 张渠道定价表新增 `cache_write_1h_price`。
-- `232_group_force_openai_fast.sql`：新增 `groups.force_openai_fast`。
-- `232_group_reasoning_effort_over_limit.sql`：新增 `groups.max_reasoning_effort_over_limit`。
-- `233_group_free_openai_fast.sql`：新增 `groups.free_openai_fast`。
-- `232_add_usage_log_upstream_request_id.sql`：新增用量记录的上游请求标识。
-- `233_add_usage_log_upstream_request_id_index_notx.sql`：创建对应非事务索引。
-- `234_channel_max_reasoning_effort_multiplier.sql`：新增渠道 reasoning effort 倍率配置。
-- `234_group_codex_models_manifest_config.sql`：新增 Codex 模型清单配置。
+本次新增两个幂等迁移文件：
 
-生产环境保持 `DATABASE_INITIALIZATION_ENABLED=false` 时，升级前应在备份后手工执行
-上述迁移，并在 `schema_migrations` 中登记对应文件和校验值；不要为了迁移重启
-PostgreSQL。
+- `238_opencode_go_platform.sql`：在现有平台约束中增加 `opencode_go`。
+- `238_purge_unlimited_user_platform_quotas.sql`：删除三档额度均为 `NULL` 的无效平台额度行。
+
+生产环境保持 `DATABASE_INITIALIZATION_ENABLED=false` 时，应用不会自行执行这两项
+迁移。升级前必须先备份 PostgreSQL，在维护步骤中执行并登记迁移，再同时替换所有
+连接同一数据库的应用节点；不需要重启 PostgreSQL。
+
+本次在隔离环境完成了从 `0.4.5` 数据库原地升级到 `0.4.6` 的验证：两项迁移均已
+登记，四个相关平台约束包含 `opencode_go`，原管理员数据和登录状态保持正常。
 
 ## 上游同步
 
