@@ -6,6 +6,7 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig, AxiosResponse } from 'axios'
 import type { ApiResponse } from '@/types'
 import { getLocale } from '@/i18n'
+import { DISPLAY_TIME_ZONE } from '@/utils/format'
 import {
   ADMIN_UI_REQUEST_HEADER,
   USER_UI_REQUEST_HEADER,
@@ -29,15 +30,6 @@ export const apiClient: AxiosInstance = axios.create({
 
 // ==================== Request Interceptor ====================
 
-// Get user's timezone
-const getUserTimezone = (): string => {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone
-  } catch {
-    return 'UTC'
-  }
-}
-
 apiClient.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     // Attach token from localStorage
@@ -51,12 +43,12 @@ apiClient.interceptors.request.use(
       config.headers['Accept-Language'] = getLocale()
     }
 
-    // Attach timezone for all GET requests (backend may use it for default date ranges)
+    // Keep report boundaries aligned with the Beijing-time UI.
     if (config.method === 'get') {
       if (!config.params) {
         config.params = {}
       }
-      config.params.timezone = getUserTimezone()
+      config.params.timezone = DISPLAY_TIME_ZONE
     }
 
     if (config.headers) {

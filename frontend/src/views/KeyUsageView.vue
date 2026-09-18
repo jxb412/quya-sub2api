@@ -424,7 +424,7 @@ import { FeatureFlags, resolveFeatureFlag } from '@/utils/featureFlags'
 import LocaleSwitcher from '@/components/common/LocaleSwitcher.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { buildGatewayUrl } from '@/api/client'
-import { formatDateLocalInput } from '@/utils/format'
+import { DISPLAY_TIME_ZONE, formatDateDisplayInput } from '@/utils/format'
 import { sanitizeUrl } from '@/utils/url'
 
 const { t, locale } = useI18n()
@@ -501,19 +501,19 @@ function getDateParams(): string {
       params.set('end_date', customEndDate.value)
     }
   } else {
-    const end = formatDateLocalInput(now)
+    const end = formatDateDisplayInput(now)
     let start: string
     switch (currentRange.value) {
       case 'today': start = end; break
-      case '7d': start = formatDateLocalInput(new Date(now.getTime() - 7 * 86400000)); break
-      case '30d': start = formatDateLocalInput(new Date(now.getTime() - 30 * 86400000)); break
-      default: start = formatDateLocalInput(new Date(now.getTime() - 30 * 86400000))
+      case '7d': start = formatDateDisplayInput(new Date(now.getTime() - 7 * 86400000)); break
+      case '30d': start = formatDateDisplayInput(new Date(now.getTime() - 30 * 86400000)); break
+      default: start = formatDateDisplayInput(new Date(now.getTime() - 30 * 86400000))
     }
     params.set('start_date', start)
     params.set('end_date', end)
   }
   params.set('days', String(dailyUsageDays.value))
-  params.set('timezone', getBrowserTimezone())
+  params.set('timezone', DISPLAY_TIME_ZONE)
   return params.toString()
 }
 
@@ -847,15 +847,12 @@ function formatDate(iso: string | null | undefined): string {
   if (!iso) return '-'
   const d = new Date(iso)
   const loc = locale.value === 'zh' ? 'zh-CN' : 'en-US'
-  return d.toLocaleDateString(loc, { year: 'numeric', month: 'long', day: 'numeric' })
-}
-
-function getBrowserTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-  } catch {
-    return 'UTC'
-  }
+  return d.toLocaleDateString(loc, {
+    timeZone: DISPLAY_TIME_ZONE,
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric'
+  })
 }
 
 // ==================== API Query ====================

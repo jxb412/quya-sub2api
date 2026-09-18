@@ -140,6 +140,7 @@ const formatDate = (timestamp: number) => {
   // Backend returns Unix timestamp in seconds, convert to milliseconds
   const date = new Date(timestamp * 1000)
   return date.toLocaleDateString(undefined, {
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: 'long',
     day: 'numeric',

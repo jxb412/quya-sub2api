@@ -823,7 +823,7 @@ function formatPublishedAt(publishedAt: string): string {
   if (!publishedAt) return ''
   const date = new Date(publishedAt)
   if (Number.isNaN(date.getTime())) return ''
-  return date.toLocaleDateString()
+  return date.toLocaleDateString(undefined, { timeZone: 'Asia/Shanghai' })
 }
 
 async function handleRollback() {

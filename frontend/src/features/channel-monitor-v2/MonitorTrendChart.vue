@@ -116,6 +116,7 @@ const chartData = computed(() => {
   if (!points.length) return null
   const labels = points.map((p) =>
     new Intl.DateTimeFormat(locale.value || undefined, {
+      timeZone: 'Asia/Shanghai',
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',

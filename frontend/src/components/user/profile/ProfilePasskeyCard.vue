@@ -291,6 +291,7 @@ async function confirmDelete(): Promise<void> {
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: 'short',
     day: 'numeric'

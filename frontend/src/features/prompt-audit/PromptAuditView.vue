@@ -425,7 +425,11 @@ async function confirmFilterDelete(filters?: PromptEventFilters) {
   } finally { loading.deleting = false }
 }
 function formatDate(value: string): string {
-  return new Intl.DateTimeFormat(locale.value, { dateStyle: 'medium', timeStyle: 'medium' }).format(new Date(value))
+  return new Intl.DateTimeFormat(locale.value, {
+    timeZone: 'Asia/Shanghai',
+    dateStyle: 'medium',
+    timeStyle: 'medium'
+  }).format(new Date(value))
 }
 
 onMounted(loadInitial)

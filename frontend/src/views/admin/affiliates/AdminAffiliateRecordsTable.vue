@@ -232,11 +232,7 @@ function loadInitialSortState(): { sort_by: string; sort_order: 'asc' | 'desc' }
 const sortState = reactive(loadInitialSortState())
 
 function userTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone
-  } catch {
-    return 'UTC'
-  }
+  return 'Asia/Shanghai'
 }
 
 function buildParams(): ListAffiliateRecordsParams {

@@ -770,7 +770,7 @@ const compositePlatforms: GroupPlatform[] = ['anthropic', 'openai', 'gemini', 'a
 // ── Helpers ──
 function formatDate(value: string): string {
   if (!value) return '-'
-  return new Date(value).toLocaleDateString()
+  return new Date(value).toLocaleDateString(undefined, { timeZone: 'Asia/Shanghai' })
 }
 
 // ── Platform section helpers ──

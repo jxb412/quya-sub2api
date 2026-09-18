@@ -873,7 +873,7 @@
               {{ t('admin.proxies.qualityBaseLatency') }}:
               {{ typeof qualityReport.base_latency_ms === 'number' ? `${qualityReport.base_latency_ms}ms` : '-' }}
             </div>
-            <div>{{ t('admin.proxies.qualityCheckedAt') }}: {{ new Date(qualityReport.checked_at * 1000).toLocaleString() }}</div>
+            <div>{{ t('admin.proxies.qualityCheckedAt') }}: {{ new Date(qualityReport.checked_at * 1000).toLocaleString(undefined, { timeZone: 'Asia/Shanghai' }) }}</div>
           </div>
         </div>
 

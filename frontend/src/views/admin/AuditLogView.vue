@@ -661,7 +661,7 @@ async function submitClear() {
 function formatTime(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleString()
+  return d.toLocaleString(undefined, { timeZone: 'Asia/Shanghai' })
 }
 
 function statusText(status: number): string {

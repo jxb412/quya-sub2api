@@ -110,7 +110,7 @@ const formatTime = (value: string) => {
   if (!value) return '-'
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return value
-  return d.toLocaleString()
+  return d.toLocaleString(undefined, { timeZone: 'Asia/Shanghai' })
 }
 
 const getExtraString = (extra: Record<string, any> | undefined, key: string) => {

@@ -181,7 +181,11 @@ function toggleAll() {
   emit('selection', allSelected.value ? [] : props.events.map((event) => event.id))
 }
 function formatDate(value: string): string {
-  return new Intl.DateTimeFormat(locale.value, { dateStyle: 'short', timeStyle: 'medium' }).format(new Date(value))
+  return new Intl.DateTimeFormat(locale.value, {
+    timeZone: 'Asia/Shanghai',
+    dateStyle: 'short',
+    timeStyle: 'medium'
+  }).format(new Date(value))
 }
 function decisionClass(decision: string): string {
   if (decision === 'critical') return 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300'

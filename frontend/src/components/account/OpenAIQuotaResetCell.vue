@@ -345,6 +345,7 @@ const formatResetCreditExpiry = (value: string, style: 'short' | 'full'): string
   if (Number.isNaN(date.getTime())) return value
 
   const options: Intl.DateTimeFormatOptions = {
+    timeZone: 'Asia/Shanghai',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',

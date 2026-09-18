@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { formatDateLocalInput } from '../format'
+import { formatDateDisplayInput, formatDateLocalInput } from '../format'
 
 describe('formatDateLocalInput', () => {
   it('formats the calendar date in local time', () => {
@@ -14,5 +14,9 @@ describe('formatDateLocalInput', () => {
 
   it('returns an empty string for an invalid date', () => {
     expect(formatDateLocalInput(new Date('invalid'))).toBe('')
+  })
+
+  it('formats date controls in Beijing time', () => {
+    expect(formatDateDisplayInput(new Date('2026-07-12T16:30:00Z'))).toBe('2026-07-13')
   })
 })

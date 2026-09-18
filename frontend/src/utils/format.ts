@@ -5,6 +5,8 @@
 
 import { i18n, getLocale } from '@/i18n'
 
+export const DISPLAY_TIME_ZONE = 'Asia/Shanghai'
+
 /**
  * 格式化相对时间
  * @param date 日期字符串或 Date 对象
@@ -118,7 +120,26 @@ export function formatDate(
   if (isNaN(d.getTime())) return ''
 
   const locale = localeOverride ?? getLocale()
-  return new Intl.DateTimeFormat(locale, options).format(d)
+  return new Intl.DateTimeFormat(locale, {
+    ...options,
+    timeZone: DISPLAY_TIME_ZONE
+  }).format(d)
+}
+
+/**
+ * 格式化为展示时区的 date 控件值（YYYY-MM-DD）。
+ */
+export function formatDateDisplayInput(date: Date): string {
+  if (isNaN(date.getTime())) return ''
+
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: DISPLAY_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(date)
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day}`
 }
 
 /**

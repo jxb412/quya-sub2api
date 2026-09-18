@@ -257,6 +257,7 @@ const memberSinceLabel = computed(() => {
   }
 
   return new Intl.DateTimeFormat(undefined, {
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: 'short',
   }).format(date)

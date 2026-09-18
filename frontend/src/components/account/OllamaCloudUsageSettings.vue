@@ -176,7 +176,9 @@ const formatPercent = (value?: number) => typeof value === 'number' && Number.is
 const formatDate = (value?: string) => {
   if (!value) return '-'
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString()
+  return Number.isNaN(date.getTime())
+    ? value
+    : date.toLocaleString(undefined, { timeZone: 'Asia/Shanghai' })
 }
 const windowSummary = (window?: OllamaCloudUsageWindow) => {
   if (!window) return '-'

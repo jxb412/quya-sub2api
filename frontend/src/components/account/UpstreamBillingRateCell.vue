@@ -212,6 +212,7 @@ const hasEffectiveRate = computed(() => effectiveRate.value !== '-')
 const primaryValue = computed(() => hasEffectiveRate.value ? effectiveRate.value : statusLabel.value || '-')
 const formatDate = (value?: string) => value
   ? new Date(value).toLocaleString(undefined, {
+      timeZone: 'Asia/Shanghai',
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',

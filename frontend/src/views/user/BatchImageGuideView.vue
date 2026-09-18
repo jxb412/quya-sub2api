@@ -2591,12 +2591,12 @@ function batchImageErrorMessage(error: any, fallback: string) {
 
 function formatDate(timestamp: number) {
   if (!timestamp) return ''
-  return new Date(timestamp * 1000).toLocaleString()
+  return new Date(timestamp * 1000).toLocaleString(undefined, { timeZone: 'Asia/Shanghai' })
 }
 
 function defaultTaskName(timestamp?: number) {
   const date = timestamp ? new Date(timestamp * 1000) : new Date()
-  return date.toLocaleString()
+  return date.toLocaleString(undefined, { timeZone: 'Asia/Shanghai' })
 }
 
 onMounted(() => {

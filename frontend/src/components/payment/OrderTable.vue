@@ -55,7 +55,9 @@ const props = defineProps<{
   showUser?: boolean
 }>()
 
-function formatDate(dateStr: string) { return new Date(dateStr).toLocaleString() }
+function formatDate(dateStr: string) {
+  return new Date(dateStr).toLocaleString(undefined, { timeZone: 'Asia/Shanghai' })
+}
 
 const creditedAmountSymbol = currencySymbol('USD')
 

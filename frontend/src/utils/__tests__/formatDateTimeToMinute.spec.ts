@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { formatDateTimeToMinute } from '../format'
 
 describe('formatDateTimeToMinute', () => {
-  it('formats local date and time without seconds', () => {
-    const value = new Date(2026, 6, 19, 20, 30, 45)
+  it('formats Beijing date and time without seconds', () => {
+    const value = new Date('2026-07-19T12:30:45Z')
 
     expect(formatDateTimeToMinute(value, 'en-GB')).toBe('19/07/2026, 20:30')
   })

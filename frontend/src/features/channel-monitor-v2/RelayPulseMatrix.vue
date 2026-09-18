@@ -457,6 +457,7 @@ function formatMs(value: number | null) {
 
 function formatAxisTime(value: string) {
   return new Intl.DateTimeFormat(locale.value || undefined, {
+    timeZone: 'Asia/Shanghai',
     month: '2-digit',
     day: '2-digit',
     hour: '2-digit',
@@ -467,7 +468,7 @@ function formatAxisTime(value: string) {
 function formatBucketRange(value: string) {
   const start = new Date(value)
   const end = new Date(start.getTime() + props.coverage.bucket_seconds * 1000)
-  return `${formatAxisTime(start.toISOString())} - ${new Intl.DateTimeFormat(locale.value || undefined, { hour: '2-digit', minute: '2-digit' }).format(end)}`
+  return `${formatAxisTime(start.toISOString())} - ${new Intl.DateTimeFormat(locale.value || undefined, { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit' }).format(end)}`
 }
 </script>
 
