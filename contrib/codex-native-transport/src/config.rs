@@ -115,6 +115,10 @@ pub struct PluginConfig {
     /// 每格独立游标，连续 egress_advance_threshold 次非-292/报错即换池里下一个;出 292 即锁票。
     /// 支持 socks5h:// / socks5:// / http:// / https://，可带账密。空行与 # 注释行忽略。
     pub egress_pool: String,
+    /// 锁到有效 turn-state 后是否回到账号原本配置的代理。
+    /// true（默认）= 锁票后业务流量走账号原代理；
+    /// false = 继续走铸出该锁票的代理池出口。
+    pub use_account_proxy_after_lock: bool,
     /// Telegram 通知 bot token（BotFather 下发；空 = 不通知）。仅内存，随插件配置加密存 DB。
     /// 填了 token + chat_id 即开启：每当账号(×模型)的智商发生切换（掉智/回真6）就直连
     /// api.telegram.org 推一条通知。best-effort，绝不影响转发与养池。
@@ -225,6 +229,7 @@ impl Default for PluginConfig {
             pin_giveup_rounds: 3,
             pin_giveup_retry_seconds: 21600,
             egress_pool: String::new(),
+            use_account_proxy_after_lock: true,
             tg_bot_token: String::new(),
             tg_chat_id: String::new(),
             tg_notify_events: "degrade_recover".to_string(),
@@ -754,10 +759,14 @@ mod tests {
     #[test]
     fn egress_pool_parses_and_validates() {
         // 默认空。
-        assert!(PluginConfig::parse(b"{}")
-            .unwrap()
-            .egress_pool_list()
-            .is_empty());
+        let defaults = PluginConfig::parse(b"{}").unwrap();
+        assert!(defaults.egress_pool_list().is_empty());
+        assert!(defaults.use_account_proxy_after_lock);
+        assert!(
+            !PluginConfig::parse(br#"{"use_account_proxy_after_lock":false}"#)
+                .unwrap()
+                .use_account_proxy_after_lock
+        );
         // 多行解析：去空白、跳过空行与 # 注释，保序。
         let cfg = PluginConfig::parse(
             br#"{"turn_state_mode":"pin","egress_pool":"socks5h://a:1080\n  # note\n\nhttp://u:p@b:8080\n"}"#,
@@ -911,6 +920,7 @@ mod tests {
             "per_account_cookie_jar",
             "max_request_body_mb",
             "max_cached_clients",
+            "use_account_proxy_after_lock",
             "identity",
         ] {
             assert!(object.contains_key(key), "missing {key}");

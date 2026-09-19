@@ -127,6 +127,29 @@ impl EgressRotor {
     }
 }
 
+/// 选择本次业务请求使用的代理池槽位。
+/// - 未锁票：用轮转器当前槽位铸票；
+/// - 已锁票且开启“账号原代理”：不使用池；
+/// - 已锁票且关闭该开关：仅在票记录了铸票槽位时沿用该出口。
+fn select_pool_index(
+    pool_len: usize,
+    mint_needed: bool,
+    use_account_proxy_after_lock: bool,
+    locked_egress_idx: Option<usize>,
+    mint_index: usize,
+) -> Option<usize> {
+    if pool_len == 0 {
+        return None;
+    }
+    if mint_needed {
+        return Some(mint_index % pool_len);
+    }
+    if use_account_proxy_after_lock {
+        return None;
+    }
+    locked_egress_idx.map(|idx| idx % pool_len)
+}
+
 /// 每账号养池休息编排（事件触发 + 优先级排空）。
 ///
 /// 触发：该号在 warming_models 上的养池格**没有任何有效 292 票**，且至少一个格已把出口池
@@ -679,29 +702,50 @@ async fn run_forward(
                     .is_parked(start.account_id, model, crate::turn_state::now_ms() as u64)
             }));
 
-    // 2.1 选择出站代理：pin 模式下该 (account×model) 还没锁到 292 真票时，才需要"铸票出口"。
-    // egress_pool（代理池，游标轮转）非空即接管铸票出口，否则走宿主原代理。
-    // 一旦锁到有效 292 票，该格后续请求一律走宿主原代理（该账号自己的出口 / 服务器自身 IP），行为不变。
-    let mint_needed = pin_active
-        && !parked
-        && match outbound_model.as_deref() {
-            Some(model) => state
+    // 2.1 选择出站代理。未锁票时由代理池轮转铸票；已锁票后由配置决定回到账号原代理，
+    // 或继续使用铸出该票的代理池出口。旧版本票没有记录槽位时安全回退到账号原代理。
+    let locked_ticket = if pin_active && !parked {
+        outbound_model.as_deref().and_then(|model| {
+            state
                 .pool
-                .injectable(start.account_id, model, &pin_params)
-                .is_none(),
-            None => false,
-        };
+                .injectable_with_egress(start.account_id, model, &pin_params)
+        })
+    } else {
+        None
+    };
+    let mint_needed = pin_active && !parked && locked_ticket.is_none();
     let egress_pool = config.egress_pool_list();
     let egress_lap_len = config.egress_lap_len();
     let egress_threshold = config.egress_threshold_effective();
-    let use_pool = mint_needed && config.egress_enabled() && outbound_model.is_some();
+    let mint_index = if !egress_pool.is_empty() {
+        outbound_model
+            .as_deref()
+            .map(|model| {
+                state
+                    .egress
+                    .current_index(start.account_id, model, egress_pool.len())
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let locked_egress_idx = locked_ticket.as_ref().and_then(|(_, idx)| *idx);
+    let selected_pool_idx = if pin_active && !parked && outbound_model.is_some() {
+        select_pool_index(
+            egress_pool.len(),
+            mint_needed,
+            config.use_account_proxy_after_lock,
+            locked_egress_idx,
+            mint_index,
+        )
+    } else {
+        None
+    };
+    let use_pool = selected_pool_idx.is_some();
+    let mint_via_pool = mint_needed && use_pool;
     // 出口池行号（1 起）：每行独立 client / 独立连接，同一网关填多行就是多个出口。
     let mut pool_slot: usize = 0;
-    let effective_proxy: String = if use_pool {
-        let model = outbound_model.as_deref().unwrap_or_default();
-        let idx = state
-            .egress
-            .current_index(start.account_id, model, egress_pool.len());
+    let effective_proxy: String = if let Some(idx) = selected_pool_idx {
         pool_slot = idx + 1;
         egress_pool[idx].clone()
     } else {
@@ -784,12 +828,10 @@ async fn run_forward(
             // 直通兜底（休息/放弃）下**不注入**：此时保留的是客户端真实会话身份，再贴一张别的
             // 会话铸出的票就是 0.6.20 那种跨用户串会话；池里的票留到恢复后配合换身份再用。
             if !parked {
-                if let Some(model) = outbound_model.as_deref() {
-                    if let Some(ts) = state.pool.injectable(start.account_id, model, &pin_params) {
-                        if let Ok(value) = reqwest::header::HeaderValue::from_str(&ts) {
-                            headers.insert("x-codex-turn-state", value);
-                            pin_injected = true;
-                        }
+                if let Some((ts, _)) = locked_ticket.as_ref() {
+                    if let Ok(value) = reqwest::header::HeaderValue::from_str(ts) {
+                        headers.insert("x-codex-turn-state", value);
+                        pin_injected = true;
                     }
                 }
             }
@@ -865,7 +907,7 @@ async fn run_forward(
         Ok(response) => response,
         Err(err) => {
             // 走代理池铸票时连不上/发送失败：按一次"脏"计入该格，触发游标推进，绕开死代理。
-            if use_pool {
+            if mint_via_pool {
                 if let Some(model) = outbound_model.as_deref() {
                     state.egress.on_result(
                         start.account_id,
@@ -920,19 +962,21 @@ async fn run_forward(
             // 这是比硬 TTL 精确的过期信号：丢弃死票，换发若是 292 就地重锁。正常复用有效票时
             // 上游不回 turn-state，此调用是 no-op，锁票照常黏着到过期上限。
             if pin_injected {
-                state.pool.note_injected_reissue(
+                state.pool.note_injected_reissue_with_egress(
                     start.account_id,
                     model,
                     resp_turn_state.as_deref(),
+                    selected_pool_idx,
                     &pin_params,
                 );
             }
             // 被动养池：该格尚无钉住值（空/过期/刚被换发清掉）时，捕获响应里的 292 真6票锁进池。
             if config.passive_warming_enabled {
-                state.pool.capture_if_empty(
+                state.pool.capture_if_empty_with_egress(
                     start.account_id,
                     model,
                     resp_turn_state.as_deref(),
+                    selected_pool_idx,
                     &pin_params,
                 );
             }
@@ -940,7 +984,7 @@ async fn run_forward(
     }
     // 代理池自动轮转：本次走代理池铸票——拿到 292 真票则清零该格脏计数（该格结束轮转）；
     // 否则（假票/短票/无票）累计，连续达阈值即该格游标 +1，换池里下一个代理。
-    if use_pool {
+    if mint_via_pool {
         if let Some(model) = outbound_model.as_deref() {
             let is_real6 = resp_turn_state
                 .as_deref()
@@ -1335,5 +1379,26 @@ mod tests {
         let rotor = EgressRotor::default();
         rotor.on_result(1, "a", false, 0, 3);
         assert_eq!(rotor.current_index(1, "a", 0), 0);
+    }
+
+    #[test]
+    fn proxy_selection_uses_account_proxy_after_lock_when_enabled() {
+        assert_eq!(select_pool_index(10, false, true, Some(7), 3), None);
+    }
+
+    #[test]
+    fn proxy_selection_keeps_minting_exit_after_lock_when_disabled() {
+        assert_eq!(select_pool_index(10, false, false, Some(7), 3), Some(7));
+        // 代理池缩短时仍安全取模。
+        assert_eq!(select_pool_index(3, false, false, Some(7), 1), Some(1));
+    }
+
+    #[test]
+    fn proxy_selection_uses_rotor_while_minting_and_falls_back_for_legacy_ticket() {
+        assert_eq!(select_pool_index(10, true, true, None, 6), Some(6));
+        assert_eq!(select_pool_index(10, true, false, None, 6), Some(6));
+        // 旧版本锁票没有铸票槽位，不能猜一个出口，回到账号原代理。
+        assert_eq!(select_pool_index(10, false, false, None, 6), None);
+        assert_eq!(select_pool_index(0, true, false, Some(2), 6), None);
     }
 }

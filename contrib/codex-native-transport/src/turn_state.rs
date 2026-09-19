@@ -299,6 +299,10 @@ pub struct Cell {
     /// 用于一眼区分真6(292)/假6(312)：即使因票长闸门没锁，也能看出上游此刻发的是哪种票。
     #[serde(default)]
     pub last_seen_ticket_len: u32,
+    /// 铸出当前锁票的出口池槽位（0 起）。None 表示来自账号原代理、手工录入，
+    /// 或由不记录出口槽位的旧版本创建。
+    #[serde(default)]
+    pub locked_egress_idx: Option<usize>,
     /// 近窗口内的 (时刻ms, 是否overload) 采样，用于占比判失。
     #[serde(default)]
     pub recent: VecDeque<(u64, bool)>,
@@ -335,6 +339,7 @@ impl Cell {
             last_outcome_ms: 0,
             last_tps: 0.0,
             last_seen_ticket_len: 0,
+            locked_egress_idx: None,
             recent: VecDeque::new(),
             stuck_rounds: 0,
             abandoned_until_ms: 0,
@@ -380,6 +385,13 @@ impl Cell {
 
     fn expired(&self, now_ms: u64, params: &PinParams) -> bool {
         self.turn_state.is_some() && now_ms.saturating_sub(self.pinned_at_ms) > params.max_age_ms
+    }
+
+    fn clear_turn_state(&mut self) {
+        self.turn_state = None;
+        self.pinned_at_ms = 0;
+        self.minted_at_s = None;
+        self.locked_egress_idx = None;
     }
 
     fn overload_ratio_pct(&self, now_ms: u64, window_ms: u64) -> (usize, u32) {
@@ -471,11 +483,25 @@ impl TurnStatePool {
 
     /// 出站前查询：该 (account, model) 是否有可注入的 turn-state。
     pub fn injectable(&self, account_id: i64, model: &str, params: &PinParams) -> Option<String> {
+        self.injectable_with_egress(account_id, model, params)
+            .map(|(turn_state, _)| turn_state)
+    }
+
+    /// 返回当前可注入锁票及铸票出口池槽位。旧票或账号原代理铸出的票槽位为 None。
+    pub fn injectable_with_egress(
+        &self,
+        account_id: i64,
+        model: &str,
+        params: &PinParams,
+    ) -> Option<(String, Option<usize>)> {
         let now = now_ms() as u64;
         let cells = self.lock();
         cells
             .get(&(account_id, model.to_string()))
-            .and_then(|cell| cell.injectable(now, params))
+            .and_then(|cell| {
+                cell.injectable(now, params)
+                    .map(|turn_state| (turn_state, cell.locked_egress_idx))
+            })
     }
 
     /// 收到上游响应头后：若该格当前没有钉住的 turn-state（空/过期），把响应里的 turn-state 捕获钉住。
@@ -484,6 +510,18 @@ impl TurnStatePool {
         account_id: i64,
         model: &str,
         resp_turn_state: Option<&str>,
+        params: &PinParams,
+    ) {
+        self.capture_if_empty_with_egress(account_id, model, resp_turn_state, None, params);
+    }
+
+    /// 与 capture_if_empty 相同，并记录铸出新锁票的代理池槽位。
+    pub fn capture_if_empty_with_egress(
+        &self,
+        account_id: i64,
+        model: &str,
+        resp_turn_state: Option<&str>,
+        locked_egress_idx: Option<usize>,
         params: &PinParams,
     ) {
         let Some(ts) = resp_turn_state else {
@@ -515,6 +553,7 @@ impl TurnStatePool {
                     cell.turn_state = Some(ts.to_string());
                     cell.pinned_at_ms = now;
                     cell.minted_at_s = parse_fernet_timestamp(ts);
+                    cell.locked_egress_idx = locked_egress_idx;
                 }
                 cell.clear_stuck();
             }
@@ -537,6 +576,18 @@ impl TurnStatePool {
         account_id: i64,
         model: &str,
         resp_turn_state: Option<&str>,
+        params: &PinParams,
+    ) -> bool {
+        self.note_injected_reissue_with_egress(account_id, model, resp_turn_state, None, params)
+    }
+
+    /// 与 note_injected_reissue 相同，并记录换发票实际使用的代理池槽位。
+    pub fn note_injected_reissue_with_egress(
+        &self,
+        account_id: i64,
+        model: &str,
+        resp_turn_state: Option<&str>,
+        locked_egress_idx: Option<usize>,
         _params: &PinParams,
     ) -> bool {
         let Some(ts) = resp_turn_state else {
@@ -554,9 +605,7 @@ impl TurnStatePool {
             let before = cell_tier(cell);
             cell.last_seen_ticket_len = ts.len() as u32;
             // 旧钉票被换发 = 费了，先无条件丢弃。
-            cell.turn_state = None;
-            cell.pinned_at_ms = 0;
-            cell.minted_at_s = None;
+            cell.clear_turn_state();
             // 新票若是真6(292)：就地治愈并重锁，无缝续命，不必等下一次重铸。
             if is_lockable_ticket_len(ts.len()) {
                 cell.failed = false;
@@ -565,6 +614,7 @@ impl TurnStatePool {
                 cell.turn_state = Some(ts.to_string());
                 cell.pinned_at_ms = now;
                 cell.minted_at_s = parse_fernet_timestamp(ts);
+                cell.locked_egress_idx = locked_egress_idx;
                 cell.clear_stuck();
             }
             (before, cell_tier(cell))
@@ -707,14 +757,14 @@ impl TurnStatePool {
                         // 恢复：清失效/降智标记，丢弃旧 turn-state，等下一次捕获新的。
                         cell.failed = false;
                         cell.degraded = false;
-                        cell.turn_state = None;
+                        cell.clear_turn_state();
                     }
                 }
                 Outcome::Overload => {
                     cell.ov_count += 1;
                     cell.fail_streak += 1;
                     // overload 即刷新：清掉当前钉住的 turn-state，下次重新捕获。
-                    cell.turn_state = None;
+                    cell.clear_turn_state();
                     let (samples, ratio) = cell.overload_ratio_pct(now, params.window_ms);
                     if cell.fail_streak >= params.fail_threshold
                         || (samples >= params.min_samples && ratio >= params.fail_ratio_pct)
@@ -738,7 +788,7 @@ impl TurnStatePool {
                         cell.fail_streak += 1;
                         cell.degraded = true;
                         cell.failed = true;
-                        cell.turn_state = None;
+                        cell.clear_turn_state();
                     }
                 }
                 Outcome::OtherError => {
@@ -764,15 +814,14 @@ impl TurnStatePool {
                 cell.minted_at_s = parse_fernet_timestamp(&ts);
                 cell.turn_state = Some(ts);
                 cell.pinned_at_ms = now;
+                cell.locked_egress_idx = None;
                 cell.failed = false;
                 cell.degraded = false;
                 cell.fail_streak = 0;
                 cell.clear_stuck();
             }
             _ => {
-                cell.turn_state = None;
-                cell.pinned_at_ms = 0;
-                cell.minted_at_s = None;
+                cell.clear_turn_state();
             }
         }
     }
@@ -781,9 +830,7 @@ impl TurnStatePool {
     pub fn cut(&self, account_id: i64, model: &str) {
         let mut cells = self.lock();
         if let Some(cell) = cells.get_mut(&(account_id, model.to_string())) {
-            cell.turn_state = None;
-            cell.pinned_at_ms = 0;
-            cell.minted_at_s = None;
+            cell.clear_turn_state();
             cell.failed = false;
             cell.degraded = false;
             cell.fail_streak = 0;
@@ -802,7 +849,7 @@ impl TurnStatePool {
         let mut guard = self.lock();
         for mut cell in cells {
             if cell.expired(now, params) {
-                cell.turn_state = None;
+                cell.clear_turn_state();
             }
             guard.insert((cell.account_id, cell.model.clone()), cell);
         }
@@ -1032,6 +1079,34 @@ mod tests {
         let cell = pool.get_cell(21, "m").unwrap();
         assert_eq!(cell.last_seen_ticket_len, REAL6_TICKET_LEN_V2 as u32);
         assert!(!cell.failed && !cell.degraded);
+    }
+
+    #[test]
+    fn locked_ticket_keeps_its_minting_egress_until_cleared() {
+        let pool = TurnStatePool::new();
+        let p = params();
+        let first = "v".repeat(REAL6_TICKET_LEN);
+        let replacement = "w".repeat(REAL6_TICKET_LEN_V2);
+
+        pool.capture_if_empty_with_egress(22, "m", Some(&first), Some(7), &p);
+        assert_eq!(
+            pool.injectable_with_egress(22, "m", &p),
+            Some((first, Some(7)))
+        );
+
+        assert!(pool.note_injected_reissue_with_egress(22, "m", Some(&replacement), Some(3), &p));
+        assert_eq!(
+            pool.injectable_with_egress(22, "m", &p),
+            Some((replacement, Some(3)))
+        );
+
+        pool.record_outcome(22, "m", Outcome::Overload, 0.0, &p);
+        let cell = pool.get_cell(22, "m").unwrap();
+        assert!(cell.turn_state.is_none());
+        assert_eq!(cell.pinned_at_ms, 0);
+        assert_eq!(cell.minted_at_s, None);
+        assert_eq!(cell.locked_egress_idx, None);
+        assert_eq!(cell.last_seen_ticket_len, REAL6_TICKET_LEN_V2 as u32);
     }
 
     #[test]

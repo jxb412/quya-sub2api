@@ -18,6 +18,7 @@
 |---|---|
 | 插件 key | `io.sub2api.codex-native-transport`(升级时按 key upsert,插件数据库 id 不变) |
 | 可锁票 | turn-state 长度 **292 或 332** 字节,可锁进养池 |
+| 锁票后出口 | `use_account_proxy_after_lock=true`(默认)时回到账号原代理;关闭时继续使用铸出该锁票的代理池出口。旧版本锁票没有出口槽位记录,会安全回退账号原代理,等新票重铸后再固定池出口 |
 | pin 关注模型(≥0.6.21) | `warming_models`(默认 `gpt-6-astra` + `gpt-5.6-sol`)。**只有列表里的模型**参与 pin:铸票出口池、身份轮换、票注入、被动捕获、休息编排、养池、面板。其它模型(gpt-5.2、codex-auto-review…)在 pin 模式下一律直通,不建格、不耗额度。pin 模式下列表不能为空 |
 | 假6 / 酱汁票 | turn-state 长度 **312**,不锁,继续试 |
 | 格级休息(≥0.6.21) | **按 (号×模型) 触发,不按时间**。某格出口池已整整轮转一圈(每个出口连续 3 次非 292 即换下一个,换满 `pool.len()` 个)仍无 292 → 这一格休息 `warming_rest_seconds`:不探铸、真实流量直通(走账号自己出口、保留客户端身份、不注入),不碰宿主。持有 292 的格永不休息。同一号 astra 有 292、terra 只出 312 时只有 terra 歇 |
@@ -296,7 +297,11 @@ PYEOF
 
 ### 4.2 出口池:每行一个独立出口(≥0.7.2)
 
-出口池按**行号**隔离 client:第 N 行有自己的一条连接,同一代理 URL 复制多行就是多个独立出口。配合「一条新连接分配一个新 IP」的网关(如 `socks5h://user:pass@gate-us.vaultproxies.com:31`,实测每条连接落在不同 /48 的 IPv6;注意必须用 `socks5h://`,`socks5://` 会因本地解析成 IPv4 而连不上),复制 N 行就得到 N 个不同出口,一圈 = N × `egress_advance_threshold`。不需要任何额外开关。
+出口池按**行号**隔离 client:第 N 行有自己的一条连接,同一代理 URL 复制多行就是多个独立出口。配合「一条新连接分配一个新 IP」的网关(如 `socks5h://user:pass@gate-us.vaultproxies.com:31`,实测每条连接落在不同 /48 的 IPv6;注意必须用 `socks5h://`,`socks5://` 会因本地解析成 IPv4 而连不上),复制 N 行就得到 N 个不同出口,一圈 = N × `egress_advance_threshold`。
+
+`use_account_proxy_after_lock` 控制锁票后的业务出口:
+- `true`(默认):代理池只用于铸票,锁定后业务请求回到账号自身配置的代理。
+- `false`:锁定后继续使用实际铸出该票的代理池行。该行号随票持久化,插件重启后仍保持;代理池缩短时按新池长度安全取模。
 
 历史:0.7.0 的「IPv6 轮换代理接口」(`egress_api_*`)与 0.7.1 的 `egress_pool_fresh_client` / `egress_pool_lap_size` 均已移除,升级时自动剥离这些键。
 

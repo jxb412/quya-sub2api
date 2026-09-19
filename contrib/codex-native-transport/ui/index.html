@@ -180,9 +180,10 @@
 
     <fieldset>
       <legend>出口代理池（铸票出口）</legend>
+      <label><span class="k">锁定后使用账号原代理</span><input type="checkbox" id="use_account_proxy_after_lock"></label>
       <label style="display:block"><span class="k">代理池（一行一个）</span></label>
       <textarea id="egress_pool" rows="6" style="width:100%;box-sizing:border-box;font-family:monospace" placeholder="socks5h://user:pass@1.2.3.4:1080&#10;http://user:pass@5.6.7.8:8080&#10;socks5h://[2a01:abc::1]:1080"></textarea>
-      <p class="hint"><b>填几行就是几个出口</b>：每一行独立一条连接（按行号隔离 client），同一代理 URL 复制多行即多个独立出口。配合“一条新连接分配一个新 IP”的网关（如 socks5h://user:pass@gate:31），复制 N 行就得到 N 个不同出口 IP，一圈 = N × 连续非有效票次数。<br>需 turn_state_mode=pin。非空时接管铸票出口：pin 模式下“还没锁到有效票”的每个（账号×型号）格从池里取一个代理发；每格独立游标，连续 3 次拿到非 292/332 票（其它票长/连不上）就换池里下一个代理；铸出 292/332 即锁票并停止该格轮转、转直连。<br>支持 socks5h:// / socks5:// / http:// / https://，可带账密，v4/v6 混填。空行与 # 注释行忽略。填好后控制面板每格会显示“出口#N”。</p>
+      <p class="hint"><b>填几行就是几个出口</b>：每一行独立一条连接（按行号隔离 client），同一代理 URL 复制多行即多个独立出口。配合“一条新连接分配一个新 IP”的网关（如 socks5h://user:pass@gate:31），复制 N 行就得到 N 个不同出口 IP，一圈 = N × 连续非有效票次数。<br>需 turn_state_mode=pin。非空时接管铸票出口：pin 模式下“还没锁到有效票”的每个（账号×型号）格从池里取一个代理发；每格独立游标，连续 3 次拿到非 292/332 票（其它票长/连不上）就换池里下一个代理。勾选后，锁票账号的业务流量回到账号原代理；取消勾选时继续使用铸出该票的代理池出口。<br>支持 socks5h:// / socks5:// / http:// / https://，可带账密，v4/v6 混填。空行与 # 注释行忽略。填好后控制面板每格会显示“出口#N”。</p>
     </fieldset>
 
   </details>
@@ -285,6 +286,7 @@
     byId("canary_enabled").checked = config.canary_enabled === true;
     byId("canary_interval_seconds").value = config.canary_interval_seconds || 600;
     byId("egress_pool").value = config.egress_pool || "";
+    byId("use_account_proxy_after_lock").checked = config.use_account_proxy_after_lock !== false;
     byId("passive_warming_enabled").checked = config.passive_warming_enabled !== false;
     byId("active_warming_enabled").checked = config.active_warming_enabled === true;
     byId("active_warming_interval_seconds").value = config.active_warming_interval_seconds || 15;
@@ -327,6 +329,7 @@
       canary_enabled: byId("canary_enabled").checked,
       canary_interval_seconds: Number(byId("canary_interval_seconds").value) || 600,
       egress_pool: byId("egress_pool").value,
+      use_account_proxy_after_lock: byId("use_account_proxy_after_lock").checked,
       passive_warming_enabled: byId("passive_warming_enabled").checked,
       active_warming_enabled: byId("active_warming_enabled").checked,
       active_warming_interval_seconds: Number(byId("active_warming_interval_seconds").value) || 15,
@@ -389,6 +392,7 @@
   byId("recommend").addEventListener("click", function () {
     byId("turn_state_mode").value = "pin";
     byId("pin_identity_strategy").value = "pinned";
+    byId("use_account_proxy_after_lock").checked = true;
     byId("fingerprint_mode").value = "machine";
     byId("profile").value = "codex_cli";
     byId("pin_max_age_seconds").value = 10800;

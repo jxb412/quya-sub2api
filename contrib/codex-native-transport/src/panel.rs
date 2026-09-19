@@ -353,8 +353,14 @@ fn status_json(state: &Arc<SharedState>) -> String {
             };
             let ts = c.turn_state.as_deref().unwrap_or("");
             let ticket_len = ts.len();
-            // 当前该格用代理池里第几个（仅在池非空且该格还没锁到 292/332 时有意义；否则 -1）。
-            let egress_idx: i64 = if egress_pool_size > 0 && !locked {
+            // 未锁票显示当前铸票出口；锁票后若配置为沿用铸票出口，则显示锁票记录的槽位。
+            let egress_idx: i64 = if egress_pool_size == 0 {
+                -1
+            } else if locked && !config.use_account_proxy_after_lock {
+                c.locked_egress_idx
+                    .map(|idx| (idx % egress_pool_size) as i64)
+                    .unwrap_or(-1)
+            } else if !locked {
                 state
                     .egress
                     .current_index(c.account_id, &c.model, egress_pool_size) as i64
@@ -426,7 +432,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         ));
     }
     format!(
-        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"egress_pool_size\":{},\"accounts\":[{}]}}",
+        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"egress_pool_size\":{},\"use_account_proxy_after_lock\":{},\"accounts\":[{}]}}",
         json_string(&config.turn_state_mode),
         json_string(&config.pin_identity_strategy),
         config.canary_enabled,
@@ -442,6 +448,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         config.pin_giveup_rounds,
         config.pin_max_age_seconds,
         egress_pool_size,
+        config.use_account_proxy_after_lock,
         accts.join(",")
     )
 }
@@ -565,7 +572,7 @@ async function load(){
     const r=await api('/api/status'); if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
     document.getElementById('err').textContent='';
-    const poolTxt = (d.egress_pool_size>0) ? ` · 代理池 ${d.egress_pool_size} 个出口` : '';
+    const poolTxt = (d.egress_pool_size>0) ? ` · 代理池 ${d.egress_pool_size} 个出口 · 锁票后${d.use_account_proxy_after_lock?'账号原代理':'保持铸票出口'}` : '';
     const warmTxt = ` · 主动养池 ${d.active_warming?('on/'+d.warm_interval_s+'s'):'off'} · 被动养池 ${d.passive_warming?'on':'off'}`;
     const adminTxt = d.admin_warming?(` · 全池养池 on/${d.admin_warm_interval_s}s`):' · 全池养池 off';
     const modelsTxt = ` · 关注模型 [${esc(d.warming_model_names||'')}]`;
@@ -590,13 +597,12 @@ function renderModel(acct,m){
   const w=document.createElement('div'); w.className='model';
   const ok=m.state==='ok';
   const label = m.abandoned?('已放弃铸票·直通 '+(m.abandoned_s||0)+'s后重试'):(m.resting?('格休息中·直通 '+(m.rest_s||0)+'s'):(ok?'可用':(m.state==='degraded'?'降智':'失效')));
-  const lock = m.locked?'锁定':(ok?'空':'fail');
+  const lock = m.locked?'已锁定':'未锁定';
   const tps=(m.tps||0).toFixed(2);
   const tl=m.ticket_len||0, seen=m.last_seen_len||0;
   // 票长徽章：锁住时显示锁定的票长；否则显示上次看到的票长。
-  const shown = m.locked ? tl : seen;
-  const ticket = shown ? ('票'+shown) : '票—';
-  const egress = (typeof m.egress_idx==='number' && m.egress_idx>=0 && !m.abandoned && !m.resting) ? ` · 出口#${m.egress_idx}${m.egress_host?' '+esc(m.egress_host):''}${m.lap_exhausted?' · 本圈已转满':''}` : '';
+  const ticket = m.locked ? ('锁票'+tl) : (seen ? ('曾见'+seen+' · 当前无票') : '当前无票');
+  const egress = (typeof m.egress_idx==='number' && m.egress_idx>=0 && !m.abandoned && !m.resting) ? ` · ${m.locked?'锁定出口':'铸票出口'}#${m.egress_idx}${m.egress_host?' '+esc(m.egress_host):''}${m.lap_exhausted?' · 本圈已转满':''}` : '';
   const stuck = (m.stuck_rounds>0) ? ` · 卡住${m.stuck_rounds}轮` : '';
   w.innerHTML=`
     <div class="model-head">

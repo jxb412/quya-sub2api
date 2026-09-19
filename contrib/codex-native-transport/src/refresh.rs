@@ -580,9 +580,13 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
     }
 
     if is_real6 {
-        state
-            .pool
-            .capture_if_empty(account_id, model, resp_turn_state.as_deref(), &params);
+        state.pool.capture_if_empty_with_egress(
+            account_id,
+            model,
+            resp_turn_state.as_deref(),
+            use_pool.then_some(pool_slot.saturating_sub(1)),
+            &params,
+        );
         state
             .pool
             .record_outcome(account_id, model, Outcome::Success, 0.0, &params);
