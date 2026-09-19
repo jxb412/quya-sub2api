@@ -22,67 +22,170 @@
   #status { margin-left: 6px; opacity: .85; }
   .hint { font-size: 12px; opacity: .6; margin: 2px 0 0; }
   .custom-only, .machine-only { display: none; }
-  .warn { color: #b45309; }
+  details { border: 1px solid rgba(128,128,128,.35); border-radius: 8px; margin: 0 0 14px; padding: 0 14px; }
+  details > summary { cursor: pointer; font-weight: 600; padding: 10px 4px; }
+  details[open] { padding-bottom: 6px; }
+  details fieldset { margin-top: 12px; }
+  details fieldset:first-of-type { margin-top: 4px; }
 </style>
 </head>
 <body>
   <h2>Codex Native Transport</h2>
-  <p class="desc">使用固定版本的 Rust reqwest + native-tls + hyper/h2 出站。应用层身份默认由 Sub2API 宿主管理，插件主要负责原生传输、连接池和 Cookie 隔离。</p>
+  <p class="desc">与官方 Codex CLI 逐版本一致的网络栈与指纹。养池锁定 292/332 字节的有效票，保持会话缓存亲和。</p>
 
   <fieldset>
-    <legend>指纹隔离</legend>
-    <label><span class="k">一账号一指纹</span><input type="checkbox" id="per_account_fingerprint"></label>
-    <p class="hint">默认开启。每个账号拥有独立连接池、稳定 installation-id 和 Cloudflare Cookie，避免多个 OAuth 账号共用同一设备环境。</p>
-    <label><span class="k">会话指纹模式</span>
-      <select id="fingerprint_mode">
-        <option value="passthrough">passthrough（推荐，保留宿主会话）</option>
-        <option value="machine">machine（按账号稳定假名化）</option>
+    <legend>养池（常用）</legend>
+    <label><span class="k">处理模式</span>
+      <select id="turn_state_mode">
+        <option value="passthrough">passthrough（不干预）</option>
+        <option value="strip">strip（剥离 turn-state）</option>
+        <option value="pin">pin（按账号×模型养池·锁真6票）</option>
       </select>
     </label>
-    <p class="hint machine-only">machine 会把已有 session/thread/window/prompt_cache_key 按账号做稳定 1:1 映射；不会把所有用户压成一个会话，也不会凭空添加身份字段。</p>
-    <label class="machine-only"><span class="k">清理非原生遗留身份头</span><input type="checkbox" id="strip_non_native_identity_headers"></label>
-    <label class="machine-only"><span class="k">UA 与 sandbox 系统一致</span><input type="checkbox" id="align_sandbox_with_user_agent"></label>
-    <label><span class="k">一并发一套 ID</span><input type="checkbox" id="one_id_per_request"></label>
-    <p class="hint warn">实验功能，默认关闭。开启后每个请求重建 session/thread/cache key 并剥离 turn-state，会降低缓存命中并破坏远端会话延续，只用于短期故障排查。</p>
+    <label><span class="k">池持久化路径</span><input type="text" id="pin_persist_path" placeholder="/app/data/codex-native-transport/turnstate-pool.json"></label>
+    <label><span class="k">面板监听地址</span><input type="text" id="panel_addr" placeholder="127.0.0.1:8848（空=关闭）"></label>
+    <label><span class="k">面板 token</span><input type="text" id="panel_token" placeholder="强随机串，绝不无鉴权暴露"></label>
+    <p class="hint">锁定 292 或 332 字节的有效票；其它长度不锁、继续试。生产建议使用 pinned 身份策略，保留会员原 session 和 prompt_cache_key。面板访问 http://面板地址/?token=你的token。</p>
+    <div class="row"><button id="recommend">套用推荐</button></div>
   </fieldset>
 
   <fieldset>
-    <legend>身份 Profile</legend>
-    <label><span class="k">Profile</span>
-      <select id="profile">
-        <option value="passthrough">passthrough（信任宿主身份收口，默认）</option>
-        <option value="codex_cli">codex cli</option>
-        <option value="codex_desktop">codex desktop</option>
-        <option value="opencode">opencode</option>
-        <option value="pi">pi</option>
-        <option value="custom">custom</option>
+    <legend>养池策略</legend>
+    <label><span class="k">被动养池（真实流量锁票）</span><input type="checkbox" id="passive_warming_enabled"></label>
+    <label><span class="k">主动养池（有模板的号补票）</span><input type="checkbox" id="active_warming_enabled"></label>
+    <label><span class="k">主动养池间隔(秒)</span><input type="number" id="active_warming_interval_seconds" min="1" max="3600"></label>
+    <label><span class="k">休息·两次休息最短间隔(秒, 0=不限)</span><input type="number" id="warming_duty_seconds" min="0" max="86400"></label>
+    <label><span class="k">休息·时长(秒, 0=不休息)</span><input type="number" id="warming_rest_seconds" min="0" max="86400"></label>
+    <label><span class="k">出口池·连续几次非292/332换下一个IP</span><input type="number" id="egress_advance_threshold" min="1" max="10"></label>
+    <label><span class="k">休息·排空优先级</span><input type="number" id="warming_drain_priority" min="0" max="1000000"></label>
+    <label><span class="k">放弃铸票·卡住轮数(0=永不放弃)</span><input type="number" id="pin_giveup_rounds" min="0" max="100"></label>
+    <label><span class="k">放弃铸票·重试间隔(秒)</span><input type="number" id="pin_giveup_retry_seconds" min="60" max="604800"></label>
+    <p class="hint">被动=靠用户请求，上游出现 292/332 有效票就锁进池（默认开）。主动=对<b>已有过真实流量</b>的（账号×型号）、还没锁到有效票的格，后台用最小 hi 补票（走出口池轮换换 IP），锁到即停、TTL 过期再养。均需 turn_state_mode=pin。<br><b>休息机制（事件触发 + 优先级排空）</b>：休息<b>不按时间触发</b>。只有当某个号在养池模型上<b>没有任何有效票</b>、且出口池已经<b>整整轮转一圈仍铸不出有效票</b> 时才休息；手里有有效票的号、票过期后一圈内就能重新铸出的号永远不休息。休息 = 通过 admin API 把该号的调度<b>优先级</b>临时改成“排空优先级”：宿主只在分配<b>新会话</b>时看优先级，已粘住的老会话继续留在原号（不打散、提示缓存不丢），闲置满宿主粘性 TTL 自然脱落；期间不探铸。休息到点写回原优先级、重新开始轮转出口池铸票。“最短间隔”只是防抖。连续“转满一圈→休息”达“卡住轮数”的格进入<b>放弃铸票</b>：真实流量退回直通（走账号自己的出口、保留客户端会话身份、不换身份），养池不再探它，“重试间隔”后再给一圈机会。<b>需配 admin API + 开启任一养池 + 出口池非空</b>；建议配 pin 持久化路径（休息集含原优先级落盘，重启/关停都能写回，不会卡在低优先级）。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>全池主动养池（内置 admin key·覆盖空闲号）</legend>
+    <label><span class="k">开启全池养池</span><input type="checkbox" id="admin_warming_enabled"></label>
+    <label><span class="k">宿主 admin API 基址</span><input type="text" id="admin_api_base" placeholder="http://127.0.0.1:8080"></label>
+    <label><span class="k">宿主 admin API key</span><input type="text" id="admin_api_key" placeholder="后台生成的 x-api-key（仅内存·随配置加密存储）"></label>
+    <label><span class="k">全池养池间隔(秒)</span><input type="number" id="admin_warming_interval_seconds" min="5" max="3600"></label>
+    <label style="display:block"><span class="k">pin 关注模型（一行一个；其余模型一律直通）</span></label>
+    <textarea id="warming_models" rows="5" style="width:100%;box-sizing:border-box;font-family:monospace" placeholder="gpt-6-astra&#10;gpt-5.6-luna&#10;gpt-5.6-sol"></textarea>
+    <p class="hint"><b>只有这个列表里的模型参与 pin</b>：铸票出口池、身份轮换、票注入、被动捕获、休息编排、养池、面板。其它模型即使在 pin 模式下也按直通处理（走账号自己出口、保留客户端身份、不建格、不耗额度）。默认 gpt-6-astra + gpt-5.6-sol。<br>全池养池：插件直接调宿主 admin API 枚举<b>全部</b>可调度 openai oauth 号并取 access_token，对每个（号×模型）没锁真6的格发最小 hi 造票（借任一真实模板做请求形状，出口走下面的代理池）。覆盖从没跑过流量的空闲号。<br>需 turn_state_mode=pin、admin key 非空、且<b>出口代理池非空</b>。admin key = 全站管理员权限，请用后台可单独吊销的 API key，勿填 JWT。首轮需至少一条真实 codex 流量喂进来做“形状模板”。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>智商切换通知（Telegram）</legend>
+    <label><span class="k">Bot Token</span><input type="text" id="tg_bot_token" placeholder="BotFather 下发（空=不通知）"></label>
+    <label><span class="k">Chat ID</span><input type="text" id="tg_chat_id" placeholder="数字 id 或 @频道名"></label>
+    <label><span class="k">通知事件</span>
+      <select id="tg_notify_events">
+        <option value="degrade_only">仅掉智</option>
+        <option value="degrade_recover">掉智 + 回真6</option>
+        <option value="all">全部（含过载失效/恢复）</option>
       </select>
     </label>
-    <label class="custom-only"><span class="k">自定义 originator</span><input type="text" id="custom_originator" placeholder="my_client"></label>
-    <label class="custom-only"><span class="k">自定义 UA 模板</span><input type="text" id="custom_user_agent_template" placeholder="my_client/{version} ({os}) {terminal}"></label>
-    <label><span class="k">UA {os} 段</span><input type="text" id="os_segment"></label>
-    <label><span class="k">UA {terminal} 段</span><input type="text" id="terminal_segment"></label>
-    <label><span class="k">residency 头</span>
-      <select id="residency"><option value="">不发送</option><option value="us">us</option></select>
+    <label><span class="k">投递模式</span>
+      <select id="tg_notify_mode">
+        <option value="immediate">即时（每格带冷却）</option>
+        <option value="digest">批量摘要（按窗口汇总）</option>
+      </select>
     </label>
+    <label><span class="k">冷却/汇总窗口(秒)</span><input type="number" id="tg_notify_cooldown_seconds" min="0" max="86400"></label>
+    <p class="hint">填了 <b>Token + Chat ID</b> 即开启：每当（账号×模型）智商切换（🔴掉智 / 🟢回真6）就直连 api.telegram.org 推一条。<b>即时</b>模式同一格两次通知至少间隔“冷却”秒防抖；<b>批量摘要</b>模式每“窗口”秒把这段时间的变更汇总成一条。文案里账号邮箱以 @ 打码。需服务器能直连 Telegram，发送失败静默、绝不影响转发与养池。</p>
   </fieldset>
 
-  <fieldset>
-    <legend>版本自动同步</legend>
-    <label><span class="k">自动同步官方版本</span><input type="checkbox" id="version_auto_sync"></label>
-    <label><span class="k">同步间隔（小时）</span><input type="number" id="version_sync_interval_hours" min="1" max="168"></label>
-    <label><span class="k">固定版本（同步失败回退）</span><input type="text" id="pinned_version"></label>
-    <p class="hint warn">默认关闭。自动同步只更新 UA/version 文本，不会更新已编译的 TLS/HTTP2 依赖；网络栈升级仍必须重新构建插件。</p>
-  </fieldset>
+  <details>
+    <summary>高级设置</summary>
 
-  <fieldset>
-    <legend>传输</legend>
-    <p class="hint">自动捕获并回放 __cf_bm / _cfuvid 等 Cloudflare 基建 Cookie（白名单与 Codex 源码一致，绝不保存账号/会话 Cookie）；隔离粒度由上方"一账号一指纹"开关决定。</p>
-    <label><span class="k">强制 HTTP/1.1</span><input type="checkbox" id="force_http11"></label>
-    <label><span class="k">连接超时（秒，0=不限制）</span><input type="number" id="connect_timeout_seconds" min="0" max="300"></label>
-    <label><span class="k">请求体上限（MB）</span><input type="number" id="max_request_body_mb" min="1" max="1024"></label>
-    <label><span class="k">Client 缓存上限</span><input type="number" id="max_cached_clients" min="8" max="4096"></label>
-  </fieldset>
+    <fieldset>
+      <legend>指纹隔离</legend>
+      <label><span class="k">一账号一指纹</span><input type="checkbox" id="per_account_fingerprint"></label>
+      <p class="hint">默认关闭 = 统一指纹：所有账号共用同一个稳定设备标识和 Cookie。开启后 = 每个账号独立的设备指纹（installation-id + Cloudflare Cookie 隔离）。</p>
+      <label><span class="k">会话指纹模式</span>
+        <select id="fingerprint_mode">
+          <option value="passthrough">passthrough（保留宿主会话）</option>
+          <option value="machine">machine（按账号稳定假名化）</option>
+        </select>
+      </label>
+      <p class="hint machine-only">machine 仅改写已有身份字段，稳定映射 session、thread、window 和 prompt_cache_key，保留下游会话边界。</p>
+      <label class="machine-only"><span class="k">清理非原生遗留身份头</span><input type="checkbox" id="strip_non_native_identity_headers"></label>
+      <label class="machine-only"><span class="k">UA 与 sandbox 系统一致</span><input type="checkbox" id="align_sandbox_with_user_agent"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>身份 Profile</legend>
+      <label><span class="k">Profile</span>
+        <select id="profile">
+          <option value="passthrough">passthrough（信任宿主身份收口，默认）</option>
+          <option value="codex_cli">codex cli</option>
+          <option value="codex_desktop">codex desktop</option>
+          <option value="opencode">opencode</option>
+          <option value="pi">pi</option>
+          <option value="custom">custom</option>
+        </select>
+      </label>
+      <label class="custom-only"><span class="k">自定义 originator</span><input type="text" id="custom_originator" placeholder="my_client"></label>
+      <label class="custom-only"><span class="k">自定义 UA 模板</span><input type="text" id="custom_user_agent_template" placeholder="my_client/{version} ({os}) {terminal}"></label>
+      <label><span class="k">UA {os} 段</span><input type="text" id="os_segment"></label>
+      <label><span class="k">UA {terminal} 段</span><input type="text" id="terminal_segment"></label>
+      <label><span class="k">residency 头</span>
+        <select id="residency"><option value="">不发送</option><option value="us">us</option></select>
+      </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>版本自动同步</legend>
+      <label><span class="k">自动同步官方版本</span><input type="checkbox" id="version_auto_sync"></label>
+      <label><span class="k">同步间隔（小时）</span><input type="number" id="version_sync_interval_hours" min="1" max="168"></label>
+      <label><span class="k">固定版本（同步失败回退）</span><input type="text" id="pinned_version"></label>
+      <p class="hint">从 npm registry 轮询 @openai/codex 最新版本，自动更新 UA 与 version 头。</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>传输</legend>
+      <p class="hint">自动捕获并回放 __cf_bm / _cfuvid 等 Cloudflare 基建 Cookie（白名单与 Codex 源码一致，绝不保存账号/会话 Cookie）。</p>
+      <label><span class="k">强制 HTTP/1.1</span><input type="checkbox" id="force_http11"></label>
+      <label><span class="k">连接超时（秒，0=不限制）</span><input type="number" id="connect_timeout_seconds" min="0" max="300"></label>
+      <label><span class="k">请求体上限（MB）</span><input type="number" id="max_request_body_mb" min="1" max="1024"></label>
+      <label><span class="k">Client 缓存上限</span><input type="number" id="max_cached_clients" min="8" max="4096"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>pin 判失 / 身份策略</legend>
+      <label><span class="k">pin 身份策略</span>
+        <select id="pin_identity_strategy">
+          <option value="pinned">pinned（默认：保持 session 和缓存键）</option>
+          <option value="rotate">rotate（实验：换 session，可能降低缓存）</option>
+        </select>
+      </label>
+      <label><span class="k">turn-state 兜底最大存活(秒)</span><input type="number" id="pin_max_age_seconds" min="30" max="86400"></label>
+      <label><span class="k">判失连续 overload 阈</span><input type="number" id="pin_fail_threshold" min="1" max="20"></label>
+      <label><span class="k">判失 overload 占比(%)</span><input type="number" id="pin_fail_ratio_pct" min="1" max="100"></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>turn-state 诊断</legend>
+      <label><span class="k">开启诊断观测</span><input type="checkbox" id="turn_state_diag"></label>
+      <label><span class="k">诊断落盘路径</span><input type="text" id="turn_state_diag_path" placeholder="/app/data/codex-native-transport/turnstate-diag.jsonl"></label>
+      <p class="hint">只观测、不改写：记录每次上游响应的 x-codex-turn-state / openai-model 到 JSONL。</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>canary 主动探测</legend>
+      <label><span class="k">开启 canary</span><input type="checkbox" id="canary_enabled"></label>
+      <label><span class="k">canary 间隔(秒)</span><input type="number" id="canary_interval_seconds" min="30" max="86400"></label>
+      <p class="hint">用最近一次真实请求为模板发受控推理题，靠 reasoning 判降智并重铸 turn-state。</p>
+    </fieldset>
+
+    <fieldset>
+      <legend>出口代理池（铸票出口）</legend>
+      <label style="display:block"><span class="k">代理池（一行一个）</span></label>
+      <textarea id="egress_pool" rows="6" style="width:100%;box-sizing:border-box;font-family:monospace" placeholder="socks5h://user:pass@1.2.3.4:1080&#10;http://user:pass@5.6.7.8:8080&#10;socks5h://[2a01:abc::1]:1080"></textarea>
+      <p class="hint"><b>填几行就是几个出口</b>：每一行独立一条连接（按行号隔离 client），同一代理 URL 复制多行即多个独立出口。配合“一条新连接分配一个新 IP”的网关（如 socks5h://user:pass@gate:31），复制 N 行就得到 N 个不同出口 IP，一圈 = N × 连续非有效票次数。<br>需 turn_state_mode=pin。非空时接管铸票出口：pin 模式下“还没锁到有效票”的每个（账号×型号）格从池里取一个代理发；每格独立游标，连续 3 次拿到非 292/332 票（其它票长/连不上）就换池里下一个代理；铸出 292/332 即锁票并停止该格轮转、转直连。<br>支持 socks5h:// / socks5:// / http:// / https://，可带账密，v4/v6 混填。空行与 # 注释行忽略。填好后控制面板每格会显示“出口#N”。</p>
+    </fieldset>
+
+  </details>
 
   <div class="row">
     <button class="primary" id="save">保存</button>
@@ -142,6 +245,12 @@
     status.style.color = ok === false ? "#dc2626" : (ok === true ? "#16a34a" : "");
   }
 
+  function genToken() {
+    var a = new Uint8Array(24);
+    (window.crypto || window.msCrypto).getRandomValues(a);
+    return Array.prototype.map.call(a, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+  }
+
   function fillForm(config) {
     config = config || {};
     var identity = config.identity || {};
@@ -153,17 +262,48 @@
     byId("os_segment").value = identity.os_segment || "Ubuntu 22.04; x86_64";
     byId("terminal_segment").value = identity.terminal_segment || "xterm-256color";
     byId("residency").value = identity.residency || "";
-    byId("per_account_fingerprint").checked = config.per_account_fingerprint !== false;
-    byId("one_id_per_request").checked = config.one_id_per_request === true;
+    byId("per_account_fingerprint").checked = config.per_account_fingerprint === true;
     byId("strip_non_native_identity_headers").checked = identity.strip_non_native_identity_headers !== false;
     byId("align_sandbox_with_user_agent").checked = identity.align_sandbox_with_user_agent !== false;
-    byId("version_auto_sync").checked = identity.version_auto_sync === true;
+    byId("version_auto_sync").checked = identity.version_auto_sync !== false;
     byId("version_sync_interval_hours").value = identity.version_sync_interval_hours || 6;
     byId("pinned_version").value = identity.pinned_version || "0.153.4";
     byId("force_http11").checked = !!config.force_http11;
     byId("connect_timeout_seconds").value = config.connect_timeout_seconds || 0;
     byId("max_request_body_mb").value = config.max_request_body_mb || 128;
     byId("max_cached_clients").value = config.max_cached_clients || 256;
+    byId("turn_state_diag").checked = config.turn_state_diag === true;
+    byId("turn_state_diag_path").value = config.turn_state_diag_path || "";
+    byId("turn_state_mode").value = config.turn_state_mode || "passthrough";
+    byId("pin_identity_strategy").value = config.pin_identity_strategy || "pinned";
+    byId("pin_max_age_seconds").value = config.pin_max_age_seconds || 10800;
+    byId("pin_fail_threshold").value = config.pin_fail_threshold || 3;
+    byId("pin_fail_ratio_pct").value = config.pin_fail_ratio_pct || 50;
+    byId("pin_persist_path").value = config.pin_persist_path || "";
+    byId("panel_addr").value = config.panel_addr || "";
+    byId("panel_token").value = config.panel_token || "";
+    byId("canary_enabled").checked = config.canary_enabled === true;
+    byId("canary_interval_seconds").value = config.canary_interval_seconds || 600;
+    byId("egress_pool").value = config.egress_pool || "";
+    byId("passive_warming_enabled").checked = config.passive_warming_enabled !== false;
+    byId("active_warming_enabled").checked = config.active_warming_enabled === true;
+    byId("active_warming_interval_seconds").value = config.active_warming_interval_seconds || 15;
+    byId("admin_warming_enabled").checked = config.admin_warming_enabled === true;
+    byId("admin_api_base").value = config.admin_api_base || "http://127.0.0.1:8080";
+    byId("admin_api_key").value = config.admin_api_key || "";
+    byId("admin_warming_interval_seconds").value = config.admin_warming_interval_seconds || 60;
+    byId("warming_models").value = config.warming_models || "gpt-6-astra\ngpt-5.6-sol";
+    byId("warming_duty_seconds").value = config.warming_duty_seconds != null ? config.warming_duty_seconds : 1800;
+    byId("warming_rest_seconds").value = config.warming_rest_seconds != null ? config.warming_rest_seconds : 600;
+    byId("warming_drain_priority").value = config.warming_drain_priority != null ? config.warming_drain_priority : 9999;
+    byId("egress_advance_threshold").value = config.egress_advance_threshold != null ? config.egress_advance_threshold : 3;
+    byId("pin_giveup_rounds").value = config.pin_giveup_rounds != null ? config.pin_giveup_rounds : 3;
+    byId("pin_giveup_retry_seconds").value = config.pin_giveup_retry_seconds != null ? config.pin_giveup_retry_seconds : 21600;
+    byId("tg_bot_token").value = config.tg_bot_token || "";
+    byId("tg_chat_id").value = config.tg_chat_id || "";
+    byId("tg_notify_events").value = config.tg_notify_events || "degrade_recover";
+    byId("tg_notify_mode").value = config.tg_notify_mode || "immediate";
+    byId("tg_notify_cooldown_seconds").value = config.tg_notify_cooldown_seconds != null ? config.tg_notify_cooldown_seconds : 300;
     toggleConditional();
   }
 
@@ -172,9 +312,40 @@
       force_http11: byId("force_http11").checked,
       connect_timeout_seconds: Number(byId("connect_timeout_seconds").value) || 0,
       per_account_fingerprint: byId("per_account_fingerprint").checked,
-      one_id_per_request: byId("one_id_per_request").checked,
       max_request_body_mb: Number(byId("max_request_body_mb").value) || 128,
       max_cached_clients: Number(byId("max_cached_clients").value) || 256,
+      turn_state_diag: byId("turn_state_diag").checked,
+      turn_state_diag_path: byId("turn_state_diag_path").value.trim(),
+      turn_state_mode: byId("turn_state_mode").value,
+      pin_identity_strategy: byId("pin_identity_strategy").value,
+      pin_max_age_seconds: Number(byId("pin_max_age_seconds").value) || 10800,
+      pin_fail_threshold: Number(byId("pin_fail_threshold").value) || 3,
+      pin_fail_ratio_pct: Number(byId("pin_fail_ratio_pct").value) || 50,
+      pin_persist_path: byId("pin_persist_path").value.trim(),
+      panel_addr: byId("panel_addr").value.trim(),
+      panel_token: byId("panel_token").value.trim(),
+      canary_enabled: byId("canary_enabled").checked,
+      canary_interval_seconds: Number(byId("canary_interval_seconds").value) || 600,
+      egress_pool: byId("egress_pool").value,
+      passive_warming_enabled: byId("passive_warming_enabled").checked,
+      active_warming_enabled: byId("active_warming_enabled").checked,
+      active_warming_interval_seconds: Number(byId("active_warming_interval_seconds").value) || 15,
+      admin_warming_enabled: byId("admin_warming_enabled").checked,
+      admin_api_base: byId("admin_api_base").value.trim(),
+      admin_api_key: byId("admin_api_key").value.trim(),
+      admin_warming_interval_seconds: Number(byId("admin_warming_interval_seconds").value) || 60,
+      warming_models: byId("warming_models").value,
+      warming_duty_seconds: Number(byId("warming_duty_seconds").value) || 0,
+      warming_rest_seconds: Number(byId("warming_rest_seconds").value) || 0,
+      warming_drain_priority: Number(byId("warming_drain_priority").value) || 0,
+      egress_advance_threshold: Number(byId("egress_advance_threshold").value) || 3,
+      pin_giveup_rounds: Number(byId("pin_giveup_rounds").value) || 0,
+      pin_giveup_retry_seconds: Number(byId("pin_giveup_retry_seconds").value) || 21600,
+      tg_bot_token: byId("tg_bot_token").value.trim(),
+      tg_chat_id: byId("tg_chat_id").value.trim(),
+      tg_notify_events: byId("tg_notify_events").value,
+      tg_notify_mode: byId("tg_notify_mode").value,
+      tg_notify_cooldown_seconds: Number(byId("tg_notify_cooldown_seconds").value) || 0,
       identity: {
         fingerprint_mode: byId("fingerprint_mode").value,
         profile: byId("profile").value,
@@ -200,7 +371,7 @@
       el.style.display = isCustom ? "flex" : "none";
     });
     document.querySelectorAll(".machine-only").forEach(function (el) {
-      el.style.display = isMachine ? (el.tagName === "P" ? "block" : "flex") : "none";
+      el.style.display = isMachine ? "flex" : "none";
     });
     resize();
   }
@@ -211,6 +382,30 @@
 
   byId("profile").addEventListener("change", toggleConditional);
   byId("fingerprint_mode").addEventListener("change", toggleConditional);
+  document.querySelectorAll("details").forEach(function (d) {
+    d.addEventListener("toggle", resize);
+  });
+
+  byId("recommend").addEventListener("click", function () {
+    byId("turn_state_mode").value = "pin";
+    byId("pin_identity_strategy").value = "pinned";
+    byId("fingerprint_mode").value = "machine";
+    byId("profile").value = "codex_cli";
+    byId("pin_max_age_seconds").value = 10800;
+    if (!byId("pin_persist_path").value.trim()) {
+      byId("pin_persist_path").value = "/app/data/codex-native-transport/turnstate-pool.json";
+    }
+    if (!byId("panel_addr").value.trim()) {
+      byId("panel_addr").value = "127.0.0.1:8848";
+    }
+    if (!byId("panel_token").value.trim()) {
+      byId("panel_token").value = genToken();
+    }
+    byId("canary_enabled").checked = true;
+    byId("canary_interval_seconds").value = 120;
+    toggleConditional();
+    setStatus("已套用推荐，点“保存”生效", true);
+  });
 
   byId("save").addEventListener("click", function () {
     setStatus("保存中…");

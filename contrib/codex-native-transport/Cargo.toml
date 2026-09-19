@@ -1,8 +1,8 @@
 [package]
 name = "codex-native-transport"
-version = "0.4.5"
+version = "0.7.4"
 edition = "2021"
-description = "Auditable Sub2API OpenAI OAuth transport using the Codex-compatible reqwest/native-tls/hyper stack."
+description = "Sub2API OpenAI OAuth outbound transport plugin that reproduces the exact network stack of the official Codex CLI (codex-rs)."
 license = "MIT"
 
 [[bin]]
@@ -49,7 +49,6 @@ openssl-sys = { version = "=0.9.111", features = ["vendored"] }
 openssl-probe = "=0.1.6"
 
 [build-dependencies]
-protoc-bin-vendored = "3"
 tonic-build = "0.12"
 
 [profile.release]

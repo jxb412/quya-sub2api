@@ -131,7 +131,7 @@ func main() {
 	// 模拟宿主转发的完整头集合（乱序 + 混入宿主注入的 version/accept-encoding/cookie，
 	// 用于验证插件的重排与剥除是否与真实 codex 0.153.4 抓包一致）。
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "codex_cli_rs/0.153.4 (Ubuntu 22.04; x86_64) xterm-256color")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.153.4 (Ubuntu 22.4.0; x86_64) xterm-256color")
 	req.Header.Set("Originator", "codex_cli_rs")
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Authorization", "Bearer dummy")

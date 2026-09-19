@@ -18,17 +18,24 @@ use crate::proto::hashicorp::{
 
 pub struct Controller {
     shutdown: tokio::sync::watch::Sender<bool>,
+    /// 关停前把休息编排改低的账号优先级写回原值（宿主停用/升级插件走的就是这条 Shutdown RPC）。
+    state: std::sync::Arc<crate::service::SharedState>,
 }
 
 impl Controller {
-    pub fn new(shutdown: tokio::sync::watch::Sender<bool>) -> Self {
-        Self { shutdown }
+    pub fn new(
+        shutdown: tokio::sync::watch::Sender<bool>,
+        state: std::sync::Arc<crate::service::SharedState>,
+    ) -> Self {
+        Self { shutdown, state }
     }
 }
 
 #[tonic::async_trait]
 impl GrpcController for Controller {
     async fn shutdown(&self, _request: Request<Empty>) -> Result<Response<Empty>, Status> {
+        // 先恢复再退出：优先级是宿主侧持久字段，进程一走就没人再把它写回来。
+        crate::refresh::restore_on_shutdown(&self.state).await;
         let _ = self.shutdown.send(true);
         Ok(Response::new(Empty {}))
     }

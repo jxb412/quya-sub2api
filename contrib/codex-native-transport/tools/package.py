@@ -23,23 +23,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ed25519_tool  # noqa: E402
 
-PLUGIN_ID = "io.quya.codex-native-transport"
+PLUGIN_ID = "io.sub2api.codex-native-transport"
 PLUGIN_NAME = "Codex Native Transport"
 DESCRIPTION = (
-    "Auditable OpenAI OAuth outbound transport using a Codex-compatible "
-    "reqwest + native-tls + hyper/h2 stack, per-account connection and "
-    "Cloudflare-cookie isolation, and optional coherent machine identity mapping."
+    "OpenAI OAuth outbound transport with the exact network stack of the official "
+    "Codex CLI (reqwest + native-tls + hyper/h2, versions pinned to codex-rs). "
+    "TLS and HTTP/2 fingerprints match the real client by construction."
 )
-AUTHOR = "Yunqiao"
+AUTHOR = "sub2api-community"
 CAPABILITY = {
     "id": "openai.oauth.outbound_transport.v1",
     "platform": "openai",
     "account_type": "oauth",
 }
 REQUIRES = {
-    "sub2api": ">=0.2.3",
-    "recommended_sub2api_version": "0.2.4",
-    "tested_sub2api_versions": ["0.2.4"],
+    "sub2api": ">=0.1.0",
+    "recommended_sub2api_version": "0.2.3",
+    "tested_sub2api_versions": ["0.2.3", "0.0.0-dev"],
     "plugin_protocol": 1,
     "transport_api": 1,
     "ui_bridge": 1,
@@ -79,7 +79,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--key-id",
-        default="quya-codex-native-transport-v1",
+        default="codex-native-transport-publisher-v1",
         help="signature.json 的 key_id,需与宿主 plugins.trusted_publishers 的键一致",
     )
     args = parser.parse_args()

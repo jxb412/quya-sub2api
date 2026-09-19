@@ -13,7 +13,6 @@ use reqwest::cookie::{CookieStore, Jar};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::config::PluginConfig;
-use crate::proto::sub2api::plugin::v1::ForwardRequestStart;
 
 // ---------------------------------------------------------------------------
 // Cloudflare-only cookie jar（对齐 codex-rs http-client/chatgpt_cloudflare_cookies.rs）
@@ -115,6 +114,9 @@ struct ClientKey {
     /// per_account_cookie_jar=true 时为账号 ID（cookie jar 按账号隔离），否则为 0。
     account: i64,
     proxy: Option<String>,
+    /// 出口池行号（1 起；0 = 非出口池请求）。同一代理 URL 填多行时每行独立 client /
+    /// 独立连接，配合「按连接轮换出口」的网关，每行就是一个独立出口。
+    slot: usize,
     force_http11: bool,
     connect_timeout_seconds: u32,
 }
@@ -143,6 +145,17 @@ impl ClientCache {
         account_id: i64,
         proxy_url: &str,
     ) -> Result<reqwest::Client, String> {
+        self.client_for_slot(config, account_id, proxy_url, 0)
+    }
+
+    /// 出口池专用：按 (代理 URL × 行号) 缓存，每行一条独立连接。
+    pub fn client_for_slot(
+        &self,
+        config: &PluginConfig,
+        account_id: i64,
+        proxy_url: &str,
+        slot: usize,
+    ) -> Result<reqwest::Client, String> {
         let proxy = {
             let trimmed = proxy_url.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -150,6 +163,7 @@ impl ClientCache {
         let key = ClientKey {
             account: if config.per_account() { account_id } else { 0 },
             proxy,
+            slot,
             force_http11: config.force_http11,
             connect_timeout_seconds: config.connect_timeout_seconds,
         };
@@ -184,6 +198,16 @@ impl ClientCache {
     }
 }
 
+/// 从代理 URL 抽取 host:port，隐去 scheme 与账号密码（面板 / 诊断展示用）。
+pub fn proxy_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = after_scheme
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(after_scheme);
+    host.trim_end_matches('/').to_string()
+}
+
 /// 构造与 codex 默认 client 对齐的 reqwest client。
 ///
 /// 注意：这里刻意 **不** 设置连接池大小、keepalive、HTTP2 窗口等参数——
@@ -200,13 +224,9 @@ fn build_client(config: &PluginConfig, proxy: Option<&str>) -> Result<reqwest::C
         builder = builder.http1_only();
     }
     if let Some(proxy_url) = proxy {
-        let proxy_url = reqwest_proxy_url(proxy_url)?;
-        let proxy = reqwest::Proxy::all(proxy_url)
-            .map_err(|_| "invalid proxy URL or unsupported proxy scheme".to_string())?;
+        let proxy =
+            reqwest::Proxy::all(proxy_url).map_err(|err| format!("invalid proxy URL: {err}"))?;
         builder = builder.proxy(proxy);
-    } else {
-        // Sub2API 已显式决定是否使用账号代理；插件不应再次读取进程代理环境。
-        builder = builder.no_proxy();
     }
     builder
         .build()
@@ -258,8 +278,7 @@ const LATE_HEADER_ORDER: &[&str] = &[
 /// - accept-encoding: 官方 reqwest 未启用压缩特性,不发送;
 /// - cookie: 上游 Cloudflare cookie 由插件的 jar 统一捕获回放（设备一致性），
 ///   透传中转链路上的 cookie 会产生重复/串号。
-const CODEX_ALWAYS_STRIP_HEADERS: &[&str] = &["cookie"];
-const CODEX_STRICT_STRIP_HEADERS: &[&str] = &["version", "accept-encoding"];
+const CODEX_STRIP_HEADERS: &[&str] = &["version", "accept-encoding", "cookie"];
 
 /// 由 hyper/reqwest 管理、禁止透传的头。
 fn is_managed_header(name: &str) -> bool {
@@ -282,16 +301,12 @@ fn is_managed_header(name: &str) -> bool {
 pub fn ordered_headers(
     raw: &HashMap<String, crate::proto::sub2api::plugin::v1::HeaderValues>,
     codex_backend: bool,
-    strict_native_headers: bool,
 ) -> HeaderMap {
     let mut lowered: HashMap<String, &crate::proto::sub2api::plugin::v1::HeaderValues> =
         HashMap::with_capacity(raw.len());
     for (name, values) in raw {
         let name = name.to_ascii_lowercase();
-        if codex_backend
-            && (CODEX_ALWAYS_STRIP_HEADERS.contains(&name.as_str())
-                || strict_native_headers && CODEX_STRICT_STRIP_HEADERS.contains(&name.as_str()))
-        {
+        if codex_backend && CODEX_STRIP_HEADERS.contains(&name.as_str()) {
             continue;
         }
         lowered.insert(name, values);
@@ -348,7 +363,7 @@ pub struct ClassifiedError {
 }
 
 pub fn classify_reqwest_error(err: &reqwest::Error) -> ClassifiedError {
-    let message = safe_reqwest_error(err);
+    let message = full_error_chain(err);
     if err.is_connect() {
         // TCP / TLS / 代理 CONNECT 建立失败：请求未写出。
         return ClassifiedError {
@@ -378,70 +393,21 @@ pub fn classify_reqwest_error(err: &reqwest::Error) -> ClassifiedError {
     }
 }
 
-pub fn safe_reqwest_error(err: &reqwest::Error) -> String {
-    if err.is_connect() {
-        "upstream connection or proxy tunnel failed".to_string()
-    } else if err.is_timeout() {
-        "upstream request timed out".to_string()
-    } else if err.is_builder() {
-        "upstream request could not be constructed".to_string()
-    } else if err.is_decode() {
-        "upstream response could not be decoded".to_string()
-    } else {
-        "upstream request failed".to_string()
+pub fn full_error_chain(err: &dyn std::error::Error) -> String {
+    let mut message = err.to_string();
+    let mut current = err.source();
+    while let Some(cause) = current {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        current = cause.source();
     }
-}
-
-pub fn validate_forward_target(start: &ForwardRequestStart) -> Result<(), String> {
-    if start.platform != "openai" || start.account_type != "oauth" {
-        return Err("plugin only accepts OpenAI OAuth accounts".to_string());
-    }
-    if start.account_id <= 0 {
-        return Err("account_id must be positive".to_string());
-    }
-    let url = reqwest::Url::parse(&start.url).map_err(|_| "invalid upstream URL".to_string())?;
-    let host = url
-        .host_str()
-        .map(str::to_ascii_lowercase)
-        .ok_or_else(|| "upstream URL is missing a host".to_string())?;
-    let loopback_test = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
-    if url.scheme() != "https" && !(loopback_test && url.scheme() == "http") {
-        return Err("upstream URL must use HTTPS".to_string());
-    }
-    let allowed = is_allowed_chatgpt_host(&host) || host == "api.openai.com" || loopback_test;
-    if !allowed {
-        return Err("upstream host is not an approved OpenAI/Codex host".to_string());
-    }
-    Ok(())
-}
-
-fn reqwest_proxy_url(raw: &str) -> Result<reqwest::Url, String> {
-    let mut parsed = reqwest::Url::parse(raw)
-        .map_err(|_| "invalid proxy URL or unsupported proxy scheme".to_string())?;
-    if !matches!(
-        parsed.scheme(),
-        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
-    ) || parsed.host_str().is_none()
-    {
-        return Err("invalid proxy URL or unsupported proxy scheme".to_string());
-    }
-    // Sub2API's existing Go SOCKS5 path sends the destination hostname to the
-    // proxy. reqwest distinguishes that behavior as socks5h; normalize the
-    // stored socks5 scheme so rollout does not change DNS or IPv4/IPv6 routing.
-    if parsed.scheme() == "socks5" {
-        parsed
-            .set_scheme("socks5h")
-            .map_err(|_| "invalid proxy URL or unsupported proxy scheme".to_string())?;
-    }
-    Ok(parsed)
+    message
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proto::sub2api::plugin::v1::HeaderValues;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
     fn values(items: &[&str]) -> HeaderValues {
         HeaderValues {
@@ -469,7 +435,7 @@ mod tests {
         raw.insert("X-Custom".to_string(), values(&["a", "b"]));
         raw.insert("Host".to_string(), values(&["chatgpt.com"]));
 
-        let headers = ordered_headers(&raw, false, false);
+        let headers = ordered_headers(&raw, false);
         let names: Vec<&str> = headers.keys().map(|name| name.as_str()).collect();
         assert_eq!(
             names,
@@ -502,52 +468,15 @@ mod tests {
         raw.insert("Cookie".to_string(), values(&["__cf_bm=stale"]));
         raw.insert("originator".to_string(), values(&["codex_cli_rs"]));
 
-        let codex = ordered_headers(&raw, true, true);
+        let codex = ordered_headers(&raw, true);
         assert!(codex.get("version").is_none());
         assert!(codex.get("accept-encoding").is_none());
         assert!(codex.get("cookie").is_none());
         assert!(codex.get("originator").is_some());
 
         // 非 codex 后端保持透传。
-        let other = ordered_headers(&raw, false, false);
+        let other = ordered_headers(&raw, false);
         assert!(other.get("version").is_some());
-    }
-
-    #[test]
-    fn passthrough_keeps_host_identity_headers_but_never_host_cookie() {
-        let mut raw = HashMap::new();
-        raw.insert("version".to_string(), values(&["0.153.4"]));
-        raw.insert("Accept-Encoding".to_string(), values(&["gzip"]));
-        raw.insert("Cookie".to_string(), values(&["session=secret"]));
-        let headers = ordered_headers(&raw, true, false);
-        assert_eq!(headers.get("version").unwrap(), "0.153.4");
-        assert_eq!(headers.get("accept-encoding").unwrap(), "gzip");
-        assert!(headers.get("cookie").is_none());
-    }
-
-    #[test]
-    fn forward_target_rejects_non_openai_and_untrusted_hosts() {
-        let mut start = ForwardRequestStart {
-            request_id: "r".to_string(),
-            method: "POST".to_string(),
-            url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
-            host: "chatgpt.com".to_string(),
-            headers: HashMap::new(),
-            proxy_url: String::new(),
-            account_id: 1,
-            account_concurrency: 1,
-            platform: "openai".to_string(),
-            account_type: "oauth".to_string(),
-            content_length: 0,
-            has_body: false,
-        };
-        assert!(validate_forward_target(&start).is_ok());
-        start.url = "https://example.com/steal".to_string();
-        assert!(validate_forward_target(&start).is_err());
-        start.url = "http://chatgpt.com/backend-api/codex/responses".to_string();
-        assert!(validate_forward_target(&start).is_err());
-        start.url = "http://127.0.0.1/test".to_string();
-        assert!(validate_forward_target(&start).is_ok());
     }
 
     #[test]
@@ -564,76 +493,5 @@ mod tests {
 
         let other: reqwest::Url = "https://api.openai.com/v1".parse().unwrap();
         assert!(jar.cookies(&other).is_none());
-    }
-
-    #[tokio::test]
-    async fn authenticated_socks5_proxy_uses_remote_dns_and_forwards_request() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let proxy_addr = listener.local_addr().unwrap();
-        let proxy = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-
-            let mut greeting = [0_u8; 2];
-            socket.read_exact(&mut greeting).await.unwrap();
-            assert_eq!(greeting[0], 5);
-            let mut methods = vec![0_u8; greeting[1] as usize];
-            socket.read_exact(&mut methods).await.unwrap();
-            assert!(methods.contains(&2));
-            socket.write_all(&[5, 2]).await.unwrap();
-
-            let mut auth = [0_u8; 2];
-            socket.read_exact(&mut auth).await.unwrap();
-            assert_eq!(auth[0], 1);
-            let mut username = vec![0_u8; auth[1] as usize];
-            socket.read_exact(&mut username).await.unwrap();
-            let password_len = socket.read_u8().await.unwrap();
-            let mut password = vec![0_u8; password_len as usize];
-            socket.read_exact(&mut password).await.unwrap();
-            assert_eq!(username, b"proxy-user");
-            assert_eq!(password, b"proxy-pass");
-            socket.write_all(&[1, 0]).await.unwrap();
-
-            let mut request = [0_u8; 4];
-            socket.read_exact(&mut request).await.unwrap();
-            assert_eq!(&request[..3], &[5, 1, 0]);
-            assert_eq!(request[3], 3, "socks5 must be normalized to proxy DNS");
-            let hostname_len = socket.read_u8().await.unwrap();
-            let mut hostname = vec![0_u8; hostname_len as usize];
-            socket.read_exact(&mut hostname).await.unwrap();
-            let port = socket.read_u16().await.unwrap();
-            assert_eq!(hostname, b"unit.test");
-            assert_eq!(port, 18080);
-            socket
-                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])
-                .await
-                .unwrap();
-
-            let mut received = Vec::new();
-            let mut buffer = [0_u8; 512];
-            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = socket.read(&mut buffer).await.unwrap();
-                assert!(count > 0, "request closed before HTTP headers");
-                received.extend_from_slice(&buffer[..count]);
-            }
-            assert!(received.starts_with(b"GET /probe HTTP/1.1\r\n"));
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
-                .await
-                .unwrap();
-        });
-
-        let config = PluginConfig::default();
-        let proxy_url = format!("socks5://proxy-user:proxy-pass@{proxy_addr}");
-        let client = build_client(&config, Some(&proxy_url)).unwrap();
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            client.get("http://unit.test:18080/probe").send(),
-        )
-        .await
-        .expect("SOCKS request timed out")
-        .expect("SOCKS request failed");
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(response.text().await.unwrap(), "OK");
-        proxy.await.unwrap();
     }
 }

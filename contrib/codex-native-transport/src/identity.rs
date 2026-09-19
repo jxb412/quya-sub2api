@@ -493,6 +493,27 @@ fn replace_header_if_present(headers: &mut HeaderMap, name: &str, value: &str) {
     }
 }
 
+/// 对真实会员请求应用稳定身份：machine 模式做按账号的稳定 1:1 映射；
+/// passthrough 模式完全保留宿主已有身份。两条路径都不会创建会话或缓存键。
+pub fn apply_stable_request_identity(
+    config: &IdentityConfig,
+    per_account: bool,
+    account_id: i64,
+    headers: &mut HeaderMap,
+    body: &mut Vec<u8>,
+) {
+    if config.fingerprint_mode == "machine" {
+        let machine = MachineContext::new(config, account_id, headers);
+        apply_machine_headers(headers, &machine);
+        if let Some(rewritten) = apply_machine_body(body, &machine) {
+            *body = rewritten;
+        }
+        return;
+    }
+
+    let _ = (config, per_account, account_id, headers, body);
+}
+
 fn sandbox_tag_from_user_agent(user_agent: &str) -> String {
     let lowered = user_agent.to_ascii_lowercase();
     if lowered.contains("windows") {
@@ -522,11 +543,12 @@ fn rewrite_platform_sandbox(current: &str, target: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 一并发一套 ID（one_id_per_request）
+// 会话身份轮换（每条请求签发一套全新 ID）
 //
-// 应对场景：同一 OAuth 账号被多路并发复用时，上游按 session / thread /
-// request-id / installation 维度识别"共用脏会话"，触发 server_is_overloaded
-// 降载。开启后每条出站请求签发一套互不相关的标识。
+// 共享底层工具：pin/rotate 策略与各养池路径都用它给出站请求签发一套互不相关
+// 的标识（顺带剥掉旧 turn-state），避免同一 OAuth 账号多路并发复用同一脏会话被
+// 上游按 session / thread / request-id / installation 维度识别、触发
+// server_is_overloaded 降载。
 //
 // 形态与真实 codex 完全一致（实抓验证）：
 // - session-id == thread-id == x-client-request-id，同一个 UUIDv7；
@@ -551,10 +573,10 @@ pub struct RequestIds {
 impl RequestIds {
     pub fn mint() -> Self {
         Self {
-            conversation_id: Uuid::now_v7().to_string(),
-            installation_id: Uuid::new_v4().to_string(),
-            turn_id: Uuid::now_v7().to_string(),
-            context_window_id: Uuid::now_v7().to_string(),
+            conversation_id: rand_ids::new_uuid_v7(),
+            installation_id: rand_ids::new_uuid_v4(),
+            turn_id: rand_ids::new_uuid_v7(),
+            context_window_id: rand_ids::new_uuid_v7(),
         }
     }
 }
@@ -566,8 +588,6 @@ impl RequestIds {
 ///   复用属于脏会话粘连）；
 /// - x-codex-turn-metadata 头 JSON 内的各 id 字段同步改写。
 pub fn apply_one_id_headers(headers: &mut HeaderMap, ids: &RequestIds) {
-    let has_native_session =
-        headers.contains_key("session-id") || headers.contains_key("thread-id");
     for name in ["session-id", "thread-id", "x-client-request-id"] {
         if headers.contains_key(name) {
             if let Ok(value) = HeaderValue::from_str(&ids.conversation_id) {
@@ -590,10 +610,6 @@ pub fn apply_one_id_headers(headers: &mut HeaderMap, ids: &RequestIds) {
         }
     }
     headers.remove("x-codex-turn-state");
-    headers.remove("conversation_id");
-    if has_native_session {
-        headers.remove("session_id");
-    }
     if let Some(existing) = headers.get("x-codex-turn-metadata").cloned() {
         if let Ok(raw) = existing.to_str() {
             if let Some(rewritten) = rewrite_turn_metadata_ids(raw, ids) {
@@ -610,7 +626,12 @@ pub fn apply_one_id_headers(headers: &mut HeaderMap, ids: &RequestIds) {
 pub fn apply_one_id_body(body: &[u8], ids: &RequestIds) -> Option<Vec<u8>> {
     let mut root: serde_json::Value = serde_json::from_slice(body).ok()?;
     let object = root.as_object_mut()?;
+
     let mut modified = false;
+
+    // 根级 prompt_cache_key：真实 codex 恒等于当前 session_id（实抓验证）。轮换会话时
+    // 必须同步改写，否则 session-id 换了、prompt_cache_key 仍指向旧会话——新会话被旧
+    // 缓存键绑回旧的（可能已降智的）路由，正是真6概率被压低的元凶之一。仅改写不插入。
     if object.contains_key("prompt_cache_key") {
         object.insert(
             "prompt_cache_key".to_string(),
@@ -621,30 +642,21 @@ pub fn apply_one_id_body(body: &[u8], ids: &RequestIds) -> Option<Vec<u8>> {
 
     if let Some(metadata) = object
         .get_mut("client_metadata")
-        .and_then(serde_json::Value::as_object_mut)
+        .and_then(|m| m.as_object_mut())
     {
-        let set_string = |metadata: &mut serde_json::Map<String, serde_json::Value>,
-                          key: &str,
-                          value: &str,
-                          modified: &mut bool| {
-            if metadata.contains_key(key) {
-                metadata.insert(
-                    key.to_string(),
-                    serde_json::Value::String(value.to_string()),
-                );
-                *modified = true;
-            }
-        };
-
-        set_string(
+        set_metadata_string(
             metadata,
             "x-codex-installation-id",
             &ids.installation_id,
             &mut modified,
         );
-        set_string(metadata, "session_id", &ids.conversation_id, &mut modified);
-        set_string(metadata, "thread_id", &ids.conversation_id, &mut modified);
-        set_string(metadata, "turn_id", &ids.turn_id, &mut modified);
+        set_metadata_string(metadata, "session_id", &ids.conversation_id, &mut modified);
+        set_metadata_string(metadata, "thread_id", &ids.conversation_id, &mut modified);
+        set_metadata_string(metadata, "turn_id", &ids.turn_id, &mut modified);
+        // 真实 codex 的 client_metadata 顶层也带 root_turn_id（首轮 == turn_id）。
+        // 只改嵌套 turn-metadata 里的 root_turn_id 而漏掉这里，会让新 turn 仍挂在旧 turn
+        // 树根上，被服务端当成旧会话延续。两处必须一起换新。
+        set_metadata_string(metadata, "root_turn_id", &ids.turn_id, &mut modified);
 
         if let Some(serde_json::Value::String(window)) = metadata.get("x-codex-window-id") {
             let rewritten = rewrite_window_id(window, &ids.conversation_id);
@@ -669,6 +681,22 @@ pub fn apply_one_id_body(body: &[u8], ids: &RequestIds) -> Option<Vec<u8>> {
         return None;
     }
     serde_json::to_vec(&root).ok()
+}
+
+/// 只改写 client_metadata 中已存在的字段（不插入），命中即置位 modified。
+fn set_metadata_string(
+    metadata: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &str,
+    modified: &mut bool,
+) {
+    if metadata.contains_key(key) {
+        metadata.insert(
+            key.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+        *modified = true;
+    }
 }
 
 /// 改写 turn-metadata JSON 里的所有 id 字段（存在才改写，键序保持）。
@@ -715,6 +743,70 @@ fn rewrite_window_id(original: &str, conversation_id: &str) -> String {
             format!("{conversation_id}:{number}")
         }
         _ => format!("{conversation_id}:0"),
+    }
+}
+
+/// 无第三方依赖的随机 UUID 生成。
+/// 随机源：进程级随机密钥的 SipHash（std RandomState）+ 原子计数器 + 系统时钟。
+/// 不用于任何安全场景，只需统计上不可预测、不重复。
+mod rand_ids {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    static KEYS: OnceLock<(RandomState, RandomState)> = OnceLock::new();
+
+    fn random_bits() -> (u64, u64) {
+        let (state_a, state_b) = KEYS.get_or_init(|| (RandomState::new(), RandomState::new()));
+        let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let mut hasher_a = state_a.build_hasher();
+        (counter, nanos, 0xa5u8).hash(&mut hasher_a);
+        let mut hasher_b = state_b.build_hasher();
+        (counter, nanos, 0x5au8).hash(&mut hasher_b);
+        (hasher_a.finish(), hasher_b.finish())
+    }
+
+    /// RFC 9562 UUIDv7：48bit unix 毫秒 + 版本位 + 74bit 随机。
+    /// 真实 codex 的 session/turn id 正是 UUIDv7（时间前缀与请求时刻一致）。
+    pub fn new_uuid_v7() -> String {
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let (rand_a, rand_b) = random_bits();
+        let mut bytes = [0u8; 16];
+        bytes[..6].copy_from_slice(&millis.to_be_bytes()[2..8]);
+        bytes[6..8].copy_from_slice(&(rand_a as u16).to_be_bytes());
+        bytes[8..].copy_from_slice(&rand_b.to_be_bytes());
+        bytes[6] = (bytes[6] & 0x0f) | 0x70; // version 7
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+        format_uuid(&bytes)
+    }
+
+    /// 随机 UUIDv4（installation_id 的真实形态）。
+    pub fn new_uuid_v4() -> String {
+        let (rand_a, rand_b) = random_bits();
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&rand_a.to_be_bytes());
+        bytes[8..].copy_from_slice(&rand_b.to_be_bytes());
+        bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+        bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+        format_uuid(&bytes)
+    }
+
+    fn format_uuid(bytes: &[u8; 16]) -> String {
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+        )
     }
 }
 
@@ -811,28 +903,39 @@ mod tests {
     }
 
     #[test]
-    fn uuid_v7_and_v4_have_correct_shape_and_are_unique() {
-        let v7_a = Uuid::now_v7().to_string();
-        let v7_b = Uuid::now_v7().to_string();
-        let v4 = Uuid::new_v4().to_string();
-        assert_ne!(v7_a, v7_b);
-        // 版本位与变体位。
-        assert_eq!(&v7_a[14..15], "7");
-        assert_eq!(&v4[14..15], "4");
-        for id in [&v7_a, &v7_b, &v4] {
-            assert_eq!(id.len(), 36);
-            assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
-        }
-        // v7 时间前缀：两次连续生成的毫秒前缀单调不减。
-        assert!(v7_b[..8] >= v7_a[..8]);
+    fn stable_passthrough_preserves_session_and_prompt_cache_key() {
+        let original = "01991f14-7580-7a41-8f63-b04ac43f52d1";
+        let config = IdentityConfig {
+            installation_id_seed: "0123456789abcdef0123456789abcdef".to_string(),
+            ..IdentityConfig::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", HeaderValue::from_str(original).unwrap());
+        headers.insert("thread-id", HeaderValue::from_str(original).unwrap());
+        let mut body = format!(
+            r#"{{"prompt_cache_key":"{original}","client_metadata":{{"session_id":"{original}","thread_id":"{original}","x-codex-installation-id":"old"}}}}"#
+        )
+        .into_bytes();
+
+        apply_stable_request_identity(&config, true, 42, &mut headers, &mut body);
+
+        assert_eq!(headers.get("session-id").unwrap(), original);
+        assert_eq!(headers.get("thread-id").unwrap(), original);
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["prompt_cache_key"], original);
+        assert_eq!(value["client_metadata"]["session_id"], original);
+        assert_eq!(value["client_metadata"]["thread_id"], original);
+        assert_eq!(value["client_metadata"]["x-codex-installation-id"], "old");
     }
 
     #[test]
     fn machine_keeps_header_body_and_cache_key_in_one_identity_domain() {
         let original = "01991f14-7580-7a41-8f63-b04ac43f52d1";
-        let mut config = IdentityConfig::default();
-        config.fingerprint_mode = "machine".to_string();
-        config.installation_id_seed = "0123456789abcdef0123456789abcdef".to_string();
+        let config = IdentityConfig {
+            fingerprint_mode: "machine".to_string(),
+            installation_id_seed: "0123456789abcdef0123456789abcdef".to_string(),
+            ..IdentityConfig::default()
+        };
         let mut headers = HeaderMap::new();
         headers.insert(
             "user-agent",
@@ -881,17 +984,39 @@ mod tests {
 
     #[test]
     fn machine_is_stable_per_account_and_distinct_across_accounts() {
-        let mut config = IdentityConfig::default();
-        config.installation_id_seed = "0123456789abcdef0123456789abcdef".to_string();
+        let config = IdentityConfig {
+            installation_id_seed: "0123456789abcdef0123456789abcdef".to_string(),
+            ..IdentityConfig::default()
+        };
         let headers = HeaderMap::new();
-        let a = MachineContext::new(&config, 7, &headers);
-        let a_again = MachineContext::new(&config, 7, &headers);
-        let b = MachineContext::new(&config, 8, &headers);
+        let account_a = MachineContext::new(&config, 7, &headers);
+        let account_a_again = MachineContext::new(&config, 7, &headers);
+        let account_b = MachineContext::new(&config, 8, &headers);
         let source = "01991f14-7580-7a41-8f63-b04ac43f52d1";
-        assert_eq!(a.pseudonym(source), a_again.pseudonym(source));
-        assert_ne!(a.pseudonym(source), b.pseudonym(source));
-        assert_eq!(a.installation_id, a_again.installation_id);
-        assert_ne!(a.installation_id, b.installation_id);
+        assert_eq!(
+            account_a.pseudonym(source),
+            account_a_again.pseudonym(source)
+        );
+        assert_ne!(account_a.pseudonym(source), account_b.pseudonym(source));
+        assert_eq!(account_a.installation_id, account_a_again.installation_id);
+        assert_ne!(account_a.installation_id, account_b.installation_id);
+    }
+
+    #[test]
+    fn uuid_v7_and_v4_have_correct_shape_and_are_unique() {
+        let v7_a = rand_ids::new_uuid_v7();
+        let v7_b = rand_ids::new_uuid_v7();
+        let v4 = rand_ids::new_uuid_v4();
+        assert_ne!(v7_a, v7_b);
+        // 版本位与变体位。
+        assert_eq!(&v7_a[14..15], "7");
+        assert_eq!(&v4[14..15], "4");
+        for id in [&v7_a, &v7_b, &v4] {
+            assert_eq!(id.len(), 36);
+            assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
+        }
+        // v7 时间前缀：两次连续生成的毫秒前缀单调不减。
+        assert!(v7_b[..8] >= v7_a[..8]);
     }
 
     #[test]
@@ -950,9 +1075,11 @@ mod tests {
     #[test]
     fn one_id_per_request_rewrites_body_consistently() {
         let ids = RequestIds::mint();
-        let body = br#"{"model":"gpt-5","stream":true,"client_metadata":{"x-codex-installation-id":"old-inst","session_id":"old-conv","thread_id":"old-conv","x-codex-window-id":"old-conv:0","turn_id":"old-turn","x-codex-turn-metadata":"{\"installation_id\":\"old-inst\",\"session_id\":\"old-conv\"}"}}"#;
+        let body = br#"{"model":"gpt-5","stream":true,"prompt_cache_key":"old-conv","client_metadata":{"root_turn_id":"old-turn","x-codex-installation-id":"old-inst","session_id":"old-conv","thread_id":"old-conv","x-codex-window-id":"old-conv:0","turn_id":"old-turn","x-codex-turn-metadata":"{\"installation_id\":\"old-inst\",\"session_id\":\"old-conv\"}"}}"#;
         let rewritten = apply_one_id_body(body, &ids).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        // 根级 prompt_cache_key 换成新会话 id（真实 codex 恒等于 session_id）。
+        assert_eq!(value["prompt_cache_key"], ids.conversation_id.as_str());
         let metadata = &value["client_metadata"];
         assert_eq!(
             metadata["x-codex-installation-id"],
@@ -961,6 +1088,8 @@ mod tests {
         assert_eq!(metadata["session_id"], ids.conversation_id.as_str());
         assert_eq!(metadata["thread_id"], ids.conversation_id.as_str());
         assert_eq!(metadata["turn_id"], ids.turn_id.as_str());
+        // client_metadata 顶层 root_turn_id 也换新（与 turn_id 一致）。
+        assert_eq!(metadata["root_turn_id"], ids.turn_id.as_str());
         assert_eq!(
             metadata["x-codex-window-id"],
             format!("{}:0", ids.conversation_id).as_str()
@@ -973,7 +1102,13 @@ mod tests {
         let raw = String::from_utf8(rewritten).unwrap();
         assert!(raw.find("model").unwrap() < raw.find("client_metadata").unwrap());
 
-        // 没有 client_metadata 的 body 原样不动。
+        // 只有根级 prompt_cache_key、没有 client_metadata 时也应改写。
+        let only_pck =
+            apply_one_id_body(br#"{"model":"gpt-5","prompt_cache_key":"old-conv"}"#, &ids).unwrap();
+        let v2: serde_json::Value = serde_json::from_slice(&only_pck).unwrap();
+        assert_eq!(v2["prompt_cache_key"], ids.conversation_id.as_str());
+
+        // 既无 client_metadata 又无 prompt_cache_key 的 body 原样不动。
         assert!(apply_one_id_body(br#"{"model":"gpt-5"}"#, &ids).is_none());
     }
 
