@@ -432,7 +432,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         ));
     }
     format!(
-        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"egress_pool_size\":{},\"egress_proxy_api\":{},\"use_account_proxy_after_lock\":{},\"accounts\":[{}]}}",
+        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"refresh_before_expiry_s\":{},\"egress_pool_size\":{},\"egress_proxy_api\":{},\"use_account_proxy_after_lock\":{},\"accounts\":[{}]}}",
         json_string(&config.turn_state_mode),
         json_string(&config.pin_identity_strategy),
         config.canary_enabled,
@@ -447,6 +447,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         config.warming_drain_priority,
         config.pin_giveup_rounds,
         config.pin_max_age_seconds,
+        config.pin_refresh_before_expiry_seconds,
         egress_pool_size,
         config.egress_proxy_api_enabled,
         config.use_account_proxy_after_lock,

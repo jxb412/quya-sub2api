@@ -44,6 +44,9 @@ pub struct PluginConfig {
     /// TurnStatePool::note_injected_reissue），这里只是防止信号迟迟不来时死握脏票的天花板，
     /// 故可设得比旧的 45min 宽（默认 3h）。
     pub pin_max_age_seconds: u32,
+    /// 有效锁票到期前提前探铸的窗口（秒）。0 = 关闭；默认 300（5 分钟）。
+    /// 预刷新成功前保留旧票，只有拿到新的 292/332 可锁定票才替换。
+    pub pin_refresh_before_expiry_seconds: u32,
     /// pin 判失：连续 overload 次数达到该阈值即把该 (account×model) 格标记失效。
     pub pin_fail_threshold: u32,
     /// pin 判失：近窗口内 overload 占比（百分比）达到该阈值也判失效。
@@ -63,7 +66,7 @@ pub struct PluginConfig {
     /// 关掉 = 只有主动养池/手动来源能锁票（生产一般保持开启）。仅在 pin 模式下有意义。
     pub passive_warming_enabled: bool,
     /// 主动养池（默认关）：后台用最小 hi 请求(复用真实模板的 bearer，仅内存)对
-    /// "还没锁到 292"的 (account×model) 不断探铸，走出口池轮换换 IP，锁到 292 即停，
+    /// "还没锁到 292/332"的 (account×model) 不断探铸，走出口池轮换换 IP，锁到有效票即停，
     /// TTL 过期再养。需要该 (account×model) 至少有过一次真实流量以取得可用模板。
     pub active_warming_enabled: bool,
     /// 主动养池两次探铸之间的间隔（秒，≥1）。越小越快锁票但越费 token/额度，也越像机器人流量。
@@ -218,6 +221,7 @@ impl Default for PluginConfig {
             turn_state_mode: "passthrough".to_string(),
             pin_identity_strategy: "pinned".to_string(),
             pin_max_age_seconds: 10800,
+            pin_refresh_before_expiry_seconds: 300,
             pin_fail_threshold: 3,
             pin_fail_ratio_pct: 50,
             pin_persist_path: String::new(),
@@ -433,6 +437,9 @@ impl PluginConfig {
         // 上限放宽到 24h：主判据是换发信号，这里只是兜底天花板，允许设得更宽。
         if !(30..=86400).contains(&self.pin_max_age_seconds) {
             return Err("pin_max_age_seconds must be within 30..=86400".to_string());
+        }
+        if self.pin_refresh_before_expiry_seconds > 86400 {
+            return Err("pin_refresh_before_expiry_seconds must be within 0..=86400".to_string());
         }
         if !(1..=20).contains(&self.pin_fail_threshold) {
             return Err("pin_fail_threshold must be within 1..=20".to_string());
@@ -660,6 +667,7 @@ mod tests {
             assert!(!parsed.identity.installation_id_seed.is_empty());
             assert!(!parsed.force_http11);
             assert_eq!(parsed.max_request_body_mb, 128);
+            assert_eq!(parsed.pin_refresh_before_expiry_seconds, 300);
         }
     }
 
@@ -762,6 +770,7 @@ mod tests {
         assert!(PluginConfig::parse(br#"{"pin_giveup_rounds":101}"#).is_err());
         assert!(PluginConfig::parse(br#"{"pin_giveup_retry_seconds":10}"#).is_err());
         assert_eq!(d.pin_max_age_seconds, 10800);
+        assert_eq!(d.pin_refresh_before_expiry_seconds, 300);
         // 0 = 不休息，合法。
         assert!(
             PluginConfig::parse(br#"{"warming_duty_seconds":0,"warming_rest_seconds":0}"#).is_ok()
@@ -772,6 +781,7 @@ mod tests {
         // pin_max_age 放宽到 24h：旧上限 3600 以上现在合法。
         assert!(PluginConfig::parse(br#"{"pin_max_age_seconds":10800}"#).is_ok());
         assert!(PluginConfig::parse(br#"{"pin_max_age_seconds":90000}"#).is_err());
+        assert!(PluginConfig::parse(br#"{"pin_refresh_before_expiry_seconds":86401}"#).is_err());
     }
 
     #[test]

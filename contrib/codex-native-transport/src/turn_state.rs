@@ -387,6 +387,20 @@ impl Cell {
         self.turn_state.is_some() && now_ms.saturating_sub(self.pinned_at_ms) > params.max_age_ms
     }
 
+    fn refresh_due(&self, now_ms: u64, params: &PinParams, before_expiry_seconds: u32) -> bool {
+        if before_expiry_seconds == 0 || self.failed {
+            return false;
+        }
+        // Only a currently injectable 292/332 ticket can be pre-refreshed. Empty,
+        // expired, and failed cells use the normal mint path instead.
+        if self.injectable(now_ms, params).is_none() {
+            return false;
+        }
+        let window_ms = before_expiry_seconds as u64 * 1000;
+        let refresh_at_ms = params.max_age_ms.saturating_sub(window_ms);
+        now_ms.saturating_sub(self.pinned_at_ms) >= refresh_at_ms
+    }
+
     fn clear_turn_state(&mut self) {
         self.turn_state = None;
         self.pinned_at_ms = 0;
@@ -524,6 +538,45 @@ impl TurnStatePool {
         locked_egress_idx: Option<usize>,
         params: &PinParams,
     ) {
+        self.capture_or_refresh_with_egress(
+            account_id,
+            model,
+            resp_turn_state,
+            locked_egress_idx,
+            false,
+            params,
+        );
+    }
+
+    /// 预刷新路径：只有响应拿到新的 292/332 可锁定票时才替换现有票。
+    /// 312 或其它响应不会触碰旧的有效票。
+    pub fn replace_if_lockable_with_egress(
+        &self,
+        account_id: i64,
+        model: &str,
+        resp_turn_state: Option<&str>,
+        locked_egress_idx: Option<usize>,
+        params: &PinParams,
+    ) {
+        self.capture_or_refresh_with_egress(
+            account_id,
+            model,
+            resp_turn_state,
+            locked_egress_idx,
+            true,
+            params,
+        );
+    }
+
+    fn capture_or_refresh_with_egress(
+        &self,
+        account_id: i64,
+        model: &str,
+        resp_turn_state: Option<&str>,
+        locked_egress_idx: Option<usize>,
+        replace_existing: bool,
+        params: &PinParams,
+    ) {
         let Some(ts) = resp_turn_state else {
             return;
         };
@@ -548,7 +601,8 @@ impl TurnStatePool {
                     cell.degraded = false;
                     cell.fail_streak = 0;
                 }
-                let need = cell.turn_state.is_none() || cell.expired(now, params);
+                let need =
+                    replace_existing || cell.turn_state.is_none() || cell.expired(now, params);
                 if need {
                     cell.turn_state = Some(ts.to_string());
                     cell.pinned_at_ms = now;
@@ -841,6 +895,32 @@ impl TurnStatePool {
     /// 面板/持久化用：导出所有格的快照。
     pub fn export(&self) -> Vec<Cell> {
         self.lock().values().cloned().collect()
+    }
+
+    /// 是否有有效票且进入到期前预刷新窗口。
+    pub fn needs_refresh(
+        &self,
+        account_id: i64,
+        model: &str,
+        params: &PinParams,
+        before_expiry_seconds: u32,
+    ) -> bool {
+        let now = now_ms() as u64;
+        self.lock()
+            .get(&(account_id, model.to_string()))
+            .is_some_and(|cell| cell.refresh_due(now, params, before_expiry_seconds))
+    }
+
+    /// 养池本轮是否应该工作：没有有效票，或有效票即将到期。
+    pub fn needs_warm(
+        &self,
+        account_id: i64,
+        model: &str,
+        params: &PinParams,
+        before_expiry_seconds: u32,
+    ) -> bool {
+        self.needs_mint(account_id, model, params)
+            || self.needs_refresh(account_id, model, params, before_expiry_seconds)
     }
 
     /// 删除宿主已不存在账号的全部模型格。返回删除的格数。
@@ -1422,6 +1502,31 @@ mod tests {
         let fresh = t("fresh");
         pool.capture_if_empty(9, "m", Some(&fresh), &p);
         assert_eq!(pool.injectable(9, "m", &p).as_deref(), Some(fresh.as_str()));
+    }
+
+    #[test]
+    fn pre_refresh_keeps_old_ticket_until_new_292_or_332_arrives() {
+        let pool = TurnStatePool::new();
+        let p = params();
+        let old = t("old");
+        let mut replacement = format!("gAAAAAB{}", "new");
+        while replacement.len() < REAL6_TICKET_LEN_V2 {
+            replacement.push('B');
+        }
+        replacement.truncate(REAL6_TICKET_LEN_V2);
+
+        pool.capture_if_empty(30, "m", Some(&old), &p);
+        assert!(pool.needs_refresh(30, "m", &p, 900));
+
+        let miss = "C".repeat(312);
+        pool.replace_if_lockable_with_egress(30, "m", Some(&miss), None, &p);
+        assert_eq!(pool.injectable(30, "m", &p).as_deref(), Some(old.as_str()));
+
+        pool.replace_if_lockable_with_egress(30, "m", Some(&replacement), Some(4), &p);
+        assert_eq!(
+            pool.injectable(30, "m", &p).as_deref(),
+            Some(replacement.as_str())
+        );
     }
 
     #[test]

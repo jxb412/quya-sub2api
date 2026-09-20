@@ -320,6 +320,8 @@ PYEOF
 | `egress_proxy_api_max_retries` | `3` | 初次尝试后的最大重试次数，允许 `0..=10` |
 | `egress_proxy_api_fallback_to_account_proxy` | `true` | API 失败或重试耗尽后回退账号原代理 |
 
+| `pin_refresh_before_expiry_seconds` | `300` | 有效 292/332 锁票到期前提前探铸；0 = 关闭。只有新响应也是 292 或 332 时替换旧票，失败或 312 时保留旧票 |
+
 插件只对连接阶段错误重试。超时、请求已发送后的 HTTP/TLS/上游响应错误不会自动重放，避免重复提交用户请求。
 启用动态 API 时必须同时保留 `use_account_proxy_after_lock=true`；保存配置会立即热生效，无需重启宿主或容器。
 

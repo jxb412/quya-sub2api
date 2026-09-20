@@ -421,7 +421,13 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
         config.pin_fail_threshold,
         config.pin_fail_ratio_pct,
     );
-    if !state.pool.needs_mint(account_id, model, &params) {
+    let refresh_due = state.pool.needs_refresh(
+        account_id,
+        model,
+        &params,
+        config.pin_refresh_before_expiry_seconds,
+    );
+    if !state.pool.needs_mint(account_id, model, &params) && !refresh_due {
         return WarmReport::AlreadyLocked;
     }
 
@@ -571,6 +577,11 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
     }
 
     if !status.is_success() {
+        // A pre-refresh is best-effort: keep the still-valid old ticket when the
+        // probe gets a 429/5xx. The normal mint path retains its old behavior.
+        if refresh_due {
+            return WarmReport::Error;
+        }
         let outcome = if status.as_u16() == 429 || status.as_u16() == 529 {
             Outcome::Overload
         } else {
@@ -604,18 +615,31 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
     }
 
     if is_real6 {
-        state.pool.capture_if_empty_with_egress(
-            account_id,
-            model,
-            resp_turn_state.as_deref(),
-            use_pool.then_some(pool_slot.saturating_sub(1)),
-            &params,
-        );
+        if refresh_due {
+            state.pool.replace_if_lockable_with_egress(
+                account_id,
+                model,
+                resp_turn_state.as_deref(),
+                use_pool.then_some(pool_slot.saturating_sub(1)),
+                &params,
+            );
+        } else {
+            state.pool.capture_if_empty_with_egress(
+                account_id,
+                model,
+                resp_turn_state.as_deref(),
+                use_pool.then_some(pool_slot.saturating_sub(1)),
+                &params,
+            );
+        }
         state
             .pool
             .record_outcome(account_id, model, Outcome::Success, 0.0, &params);
         state.pool.persist_throttled(&config.pin_persist_path);
         WarmReport::Locked
+    } else if refresh_due {
+        // Keep the old valid 292/332 ticket until a replacement succeeds.
+        WarmReport::Miss
     } else {
         state
             .pool
@@ -674,8 +698,8 @@ pub async fn run_warm_admin(
 }
 
 /// admin 全池养池后台循环：内置 admin key，调 admin API export 枚举全部可调度
-/// openai oauth 号 + 取 bearer，对每个 (号 × warming_models) 没锁 292 的格各探铸一次
-/// （借用真实模板做形状；出口走 egress_pool）。锁到就停，TTL 过期下轮再养。
+/// openai oauth 号 + 取 bearer，对每个 (号 × warming_models) 没锁有效 292/332、或进入
+/// 到期前预刷新窗口的格各探铸一次（借用真实模板做形状；出口走 egress_pool）。
 pub async fn admin_warm_loop(state: Arc<SharedState>) {
     loop {
         let config = state.current_config();
@@ -729,7 +753,12 @@ pub async fn admin_warm_loop(state: Arc<SharedState>) {
             }
             for model in &models {
                 // 已锁到有效 292、或已放弃铸票（直通）的格都不探。
-                if !state.pool.needs_mint(t.account_id, model, &params) {
+                if !state.pool.needs_warm(
+                    t.account_id,
+                    model,
+                    &params,
+                    config.pin_refresh_before_expiry_seconds,
+                ) {
                     skipped += 1;
                     continue;
                 }
@@ -1155,7 +1184,13 @@ pub async fn warm_loop(state: Arc<SharedState>) {
                     .get(*account_id, model)
                     .map(|t| now.saturating_sub(t.updated_ms) < 3 * 3600 * 1000)
                     .unwrap_or(false);
-                fresh && state.pool.needs_mint(*account_id, model, &params)
+                fresh
+                    && state.pool.needs_warm(
+                        *account_id,
+                        model,
+                        &params,
+                        config.pin_refresh_before_expiry_seconds,
+                    )
             })
             .collect();
         // 有界并发探铸。

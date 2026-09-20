@@ -160,6 +160,7 @@
         </select>
       </label>
       <label><span class="k">turn-state 兜底最大存活(秒)</span><input type="number" id="pin_max_age_seconds" min="30" max="86400"></label>
+      <label><span class="k">到期前预刷新(秒，0=关闭)</span><input type="number" id="pin_refresh_before_expiry_seconds" min="0" max="86400"></label>
       <label><span class="k">判失连续 overload 阈</span><input type="number" id="pin_fail_threshold" min="1" max="20"></label>
       <label><span class="k">判失 overload 占比(%)</span><input type="number" id="pin_fail_ratio_pct" min="1" max="100"></label>
     </fieldset>
@@ -285,6 +286,7 @@
     byId("turn_state_mode").value = config.turn_state_mode || "passthrough";
     byId("pin_identity_strategy").value = config.pin_identity_strategy || "pinned";
     byId("pin_max_age_seconds").value = config.pin_max_age_seconds || 10800;
+    byId("pin_refresh_before_expiry_seconds").value = config.pin_refresh_before_expiry_seconds != null ? config.pin_refresh_before_expiry_seconds : 300;
     byId("pin_fail_threshold").value = config.pin_fail_threshold || 3;
     byId("pin_fail_ratio_pct").value = config.pin_fail_ratio_pct || 50;
     byId("pin_persist_path").value = config.pin_persist_path || "";
@@ -333,6 +335,7 @@
       turn_state_mode: byId("turn_state_mode").value,
       pin_identity_strategy: byId("pin_identity_strategy").value,
       pin_max_age_seconds: Number(byId("pin_max_age_seconds").value) || 10800,
+      pin_refresh_before_expiry_seconds: Number(byId("pin_refresh_before_expiry_seconds").value) || 0,
       pin_fail_threshold: Number(byId("pin_fail_threshold").value) || 3,
       pin_fail_ratio_pct: Number(byId("pin_fail_ratio_pct").value) || 50,
       pin_persist_path: byId("pin_persist_path").value.trim(),
