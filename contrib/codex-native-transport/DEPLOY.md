@@ -305,6 +305,30 @@ PYEOF
 
 历史:0.7.0 的「IPv6 轮换代理接口」(`egress_api_*`)与 0.7.1 的 `egress_pool_fresh_client` / `egress_pool_lap_size` 均已移除,升级时自动剥离这些键。
 
+### 4.3 动态代理 API 出口(≥0.7.7)
+
+动态 API 用于替代静态 `egress_pool` 获取铸票出口。它只在 `turn_state_mode=pin` 且当前账号×模型尚未锁定有效票时工作；锁定后仍按
+`use_account_proxy_after_lock` 使用账号原代理，因此不会把每个正常业务请求强制改到新的出口，也不会破坏已有会话缓存亲和。
+
+配置项:
+
+| 键 | 默认 | 含义 |
+|---|---:|---|
+| `egress_proxy_api_enabled` | `false` | 启用动态代理 API；启用后忽略静态 `egress_pool` |
+| `egress_proxy_api_url` | 空 | `http(s)` API 地址；响应第一行必须为 `host:port:username:password` |
+| `egress_proxy_api_retry_enabled` | `true` | API/代理连接阶段失败后重新获取代理 |
+| `egress_proxy_api_max_retries` | `3` | 初次尝试后的最大重试次数，允许 `0..=10` |
+| `egress_proxy_api_fallback_to_account_proxy` | `true` | API 失败或重试耗尽后回退账号原代理 |
+
+插件只对连接阶段错误重试。超时、请求已发送后的 HTTP/TLS/上游响应错误不会自动重放，避免重复提交用户请求。
+启用动态 API 时必须同时保留 `use_account_proxy_after_lock=true`；保存配置会立即热生效，无需重启宿主或容器。
+
+安全注意事项:
+
+- API 地址可能包含供应商凭据，只在受控后台保存，不要写入公开日志或提交到 Git。
+- API 返回值限制为 16 KiB，凭据会 URL 编码后构造成 `socks5h://`，由代理端解析 DNS。
+- “测试连通性”在动态 API 模式下会强制验证 API 代理本身；不会因为回退账号原代理成功而误报 API 可用。
+
 面板(≥0.7.1)新增:`POST /api/unpark?account=&model=` 与 `POST /api/unpark-all`,清除放弃态 / 格级休息 / 卡住轮数并重开一圈;页面上每个停铸格有「解除放弃/休息」按钮,顶部有「全部解除」。诊断 JSONL(≥0.7.1)每行新增 `path`(forward / warm / admin_warm)与 `egress`(本次铸票出口 host:port),养池探铸也会记录,可按出口统计 292 率。
 
 ## 5. 回滚

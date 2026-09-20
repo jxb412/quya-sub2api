@@ -374,6 +374,7 @@ pub struct SharedState {
     pub pool: crate::turn_state::TurnStatePool,
     pub creds: crate::refresh::CredCache,
     pub probe_ids: crate::refresh::ProbeIdentityCache,
+    pub proxy_api: crate::proxy_api::ProxyApiClient,
     pub egress: Arc<EgressRotor>,
     pub acct_rest: AcctRest,
 }
@@ -387,6 +388,7 @@ impl SharedState {
             pool: crate::turn_state::TurnStatePool::new(),
             creds: crate::refresh::CredCache::new(),
             probe_ids: crate::refresh::ProbeIdentityCache::default(),
+            proxy_api: crate::proxy_api::ProxyApiClient::default(),
             egress: Arc::new(EgressRotor::default()),
             acct_rest: AcctRest::default(),
         })
@@ -523,22 +525,45 @@ impl TransportPlugin for TransportService {
             }
         };
 
-        let client = match self.state.clients.client_for(&config, 0, "") {
-            Ok(client) => client,
-            Err(message) => {
-                return Ok(Response::new(TestConfigResponse {
-                    success: false,
-                    message,
-                    latency_ms: 0,
-                }))
+        let began = Instant::now();
+        let result = if config.egress_proxy_api_enabled {
+            // 配置测试必须验证代理 API 本身，不能因“失败回退”而把直连成功误报成 API 成功。
+            let mut test_config = config.clone();
+            test_config.egress_proxy_api_fallback_to_account_proxy = false;
+            crate::proxy_api::send_with_optional_proxy_api(
+                &self.state.proxy_api,
+                &self.state.clients,
+                &test_config,
+                0,
+                true,
+                "",
+                "",
+                0,
+                &reqwest::Method::GET,
+                TEST_URL,
+                &reqwest::header::HeaderMap::new(),
+                &[],
+            )
+            .await
+            .map(|sent| sent.response)
+            .map_err(|err| match err {
+                crate::proxy_api::ProxySendError::Api(message)
+                | crate::proxy_api::ProxySendError::ClientBuild(message) => message,
+                crate::proxy_api::ProxySendError::Upstream(err) => {
+                    transport::full_error_chain(&err)
+                }
+            })
+        } else {
+            match self.state.clients.client_for(&config, 0, "") {
+                Ok(client) => client
+                    .get(TEST_URL)
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await
+                    .map_err(|err| transport::full_error_chain(&err)),
+                Err(message) => Err(message),
             }
         };
-        let began = Instant::now();
-        let result = client
-            .get(TEST_URL)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await;
         let latency_ms = began.elapsed().as_millis() as i64;
         match result {
             Ok(response) => Ok(Response::new(TestConfigResponse {
@@ -550,9 +575,9 @@ impl TransportPlugin for TransportService {
                 ),
                 latency_ms,
             })),
-            Err(err) => Ok(Response::new(TestConfigResponse {
+            Err(message) => Ok(Response::new(TestConfigResponse {
                 success: false,
-                message: transport::full_error_chain(&err),
+                message,
                 latency_ms,
             })),
         }
@@ -735,7 +760,8 @@ async fn run_forward(
         None
     };
     let mint_needed = pin_active && !parked && locked_ticket.is_none();
-    let egress_pool = config.egress_pool_list();
+    let use_proxy_api = mint_needed && config.egress_proxy_api_enabled;
+    let egress_pool = config.effective_egress_pool_list();
     let egress_lap_len = config.egress_lap_len();
     let egress_threshold = config.egress_threshold_effective();
     let mint_index = if !egress_pool.is_empty() {
@@ -772,25 +798,6 @@ async fn run_forward(
     } else {
         start.proxy_url.clone()
     };
-    // 诊断用：本次走的铸票出口（host:port，隐去账密）。
-    let diag_egress: Option<String> = use_pool.then(|| transport::proxy_host(&effective_proxy));
-
-    // 2.2 取 client（按 账号 × 代理 × 出口池行号 × 协议 缓存；cookie jar 按账号隔离）。
-    let client = match state.clients.client_for_slot(
-        &config,
-        start.account_id,
-        effective_proxy.as_str(),
-        pool_slot,
-    ) {
-        Ok(client) => client,
-        Err(message) => {
-            let _ = tx
-                .send(Ok(error_frame("PLUGIN_CLIENT_BUILD", message, false)))
-                .await;
-            return;
-        }
-    };
-
     // 3. 构造请求：方法 + URL + canonical 顺序的请求头 + 定长请求体。
     let method = match reqwest::Method::from_bytes(start.method.as_bytes()) {
         Ok(method) => method,
@@ -919,14 +926,24 @@ async fn run_forward(
     };
 
     let began = Instant::now();
-    let request = client
-        .request(method, &start.url)
-        .headers(headers)
-        .body(body);
-
-    let response = match request.send().await {
-        Ok(response) => response,
-        Err(err) => {
+    let sent = crate::proxy_api::send_with_optional_proxy_api(
+        &state.proxy_api,
+        &state.clients,
+        &config,
+        start.account_id,
+        use_proxy_api,
+        &start.proxy_url,
+        &effective_proxy,
+        pool_slot,
+        &method,
+        &start.url,
+        &headers,
+        &body,
+    )
+    .await;
+    let sent = match sent {
+        Ok(sent) => sent,
+        Err(crate::proxy_api::ProxySendError::Upstream(err)) => {
             // 走代理池铸票时连不上/发送失败：按一次"脏"计入该格，触发游标推进，绕开死代理。
             if mint_via_pool {
                 if let Some(model) = outbound_model.as_deref() {
@@ -949,7 +966,22 @@ async fn run_forward(
                 .await;
             return;
         }
+        Err(crate::proxy_api::ProxySendError::Api(message)) => {
+            let _ = tx
+                .send(Ok(error_frame("PLUGIN_PROXY_API", message, false)))
+                .await;
+            return;
+        }
+        Err(crate::proxy_api::ProxySendError::ClientBuild(message)) => {
+            let _ = tx
+                .send(Ok(error_frame("PLUGIN_CLIENT_BUILD", message, false)))
+                .await;
+            return;
+        }
     };
+    let response = sent.response;
+    // API 回退到账号原代理时不把账号代理标成“专用铸票出口”。
+    let diag_egress = (use_pool || sent.used_api).then(|| transport::proxy_host(&sent.proxy_url));
 
     // 4. 响应头帧。
     let status_code = response.status().as_u16() as i32;

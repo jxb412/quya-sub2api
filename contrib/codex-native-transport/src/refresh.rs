@@ -400,6 +400,8 @@ pub struct WarmSource<'a> {
     pub url: &'a str,
     pub raw_headers: &'a HashMap<String, HeaderValues>,
     pub body: &'a [u8],
+    /// 目标账号自己的代理。动态 API 失败并开启回退时使用；空串表示直连。
+    pub fallback_proxy_url: &'a str,
     /// admin 路径提供目标号的 access_token；模板路径为 None（沿用模板里的 authorization）。
     pub bearer_override: Option<&'a str>,
     /// admin 路径提供目标号的 chatgpt-account-id；模板路径为 None。
@@ -423,9 +425,9 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
         return WarmReport::AlreadyLocked;
     }
 
-    // 铸票出口：egress_pool（轮换游标）。admin 路径没有本号代理可回落，
-    // 池空且非模板路径时直接放弃（养池就是靠干净出口池铸票）。
-    let egress_pool = config.egress_pool_list();
+    // 铸票出口：动态代理 API 优先；未开启时使用静态 egress_pool 轮换。
+    let use_proxy_api = config.egress_proxy_api_enabled;
+    let egress_pool = config.effective_egress_pool_list();
     let egress_lap_len = config.egress_lap_len();
     let egress_threshold = config.egress_threshold_effective();
     let use_pool = !egress_pool.is_empty();
@@ -436,21 +438,13 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
             .current_index(account_id, model, egress_pool.len());
         pool_slot = idx + 1;
         egress_pool[idx].clone()
-    } else if src.bearer_override.is_none() {
-        // 模板路径：可回落到本号真实代理（url 同源）。这里用空串让 client 走默认，
-        // 与 forward 的“宿主原代理”不同，故仅在出口池为空时退化；admin 路径已在上面被排除。
+    } else if use_proxy_api {
         String::new()
+    } else if src.bearer_override.is_none() {
+        // 未配置专用铸票出口时，模板路径退化为账号原代理。
+        src.fallback_proxy_url.to_string()
     } else {
         return WarmReport::Error;
-    };
-
-    // 按出口池行号隔离 client：每行独立连接。
-    let client = match state
-        .clients
-        .client_for_slot(&config, account_id, &proxy, pool_slot)
-    {
-        Ok(client) => client,
-        Err(_) => return WarmReport::Error,
     };
 
     // 忠实复用真实头形状 + 身份改写 + 每次换新会话（铸全新 turn-state）。
@@ -495,14 +489,24 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
         body = rewritten;
     }
 
-    let response = match client
-        .request(reqwest::Method::POST, src.url)
-        .headers(headers)
-        .body(body)
-        .send()
-        .await
-    {
-        Ok(resp) => resp,
+    let method = reqwest::Method::POST;
+    let sent = crate::proxy_api::send_with_optional_proxy_api(
+        &state.proxy_api,
+        &state.clients,
+        &config,
+        account_id,
+        use_proxy_api,
+        src.fallback_proxy_url,
+        &proxy,
+        pool_slot,
+        &method,
+        src.url,
+        &headers,
+        &body,
+    )
+    .await;
+    let sent = match sent {
+        Ok(sent) => sent,
         Err(_) => {
             state
                 .egress
@@ -510,6 +514,9 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
             return WarmReport::Error;
         }
     };
+    let response = sent.response;
+    let actual_proxy = sent.proxy_url;
+    let used_dedicated_egress = sent.used_api || use_pool;
 
     let status = response.status();
     let resp_turn_state = response
@@ -558,7 +565,7 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
                 } else {
                     "warm".to_string()
                 },
-                egress: use_pool.then(|| crate::transport::proxy_host(&proxy)),
+                egress: used_dedicated_egress.then(|| crate::transport::proxy_host(&actual_proxy)),
             },
         );
     }
@@ -630,6 +637,7 @@ pub async fn run_warm(state: &Arc<SharedState>, account_id: i64, model: &str) ->
             url: &template.url,
             raw_headers: &template.raw_headers,
             body: &template.body,
+            fallback_proxy_url: &template.proxy_url,
             bearer_override: None,
             chatgpt_account_id: None,
             override_model: false,
@@ -646,6 +654,7 @@ pub async fn run_warm_admin(
     model: &str,
     bearer: &str,
     chatgpt_account_id: Option<&str>,
+    fallback_proxy_url: &str,
 ) -> WarmReport {
     warm_send(
         state,
@@ -655,6 +664,7 @@ pub async fn run_warm_admin(
             url: &donor.url,
             raw_headers: &donor.raw_headers,
             body: &donor.body,
+            fallback_proxy_url,
             bearer_override: Some(bearer),
             chatgpt_account_id,
             override_model: true,
@@ -708,7 +718,7 @@ pub async fn admin_warm_loop(state: Arc<SharedState>) {
 
         let models = config.warming_models_list();
         // 组装本轮 jobs：跳过已锁到有效 292 的格；其余并发探铸。
-        let mut jobs: Vec<(i64, String, String, Option<String>)> = Vec::new();
+        let mut jobs: Vec<(i64, String, String, Option<String>, String)> = Vec::new();
         let mut skipped = 0u32;
         for t in &targets {
             // 休息中的号（已被摘出调度）不铸票。正常它已不在 schedulable 列表里，
@@ -728,12 +738,13 @@ pub async fn admin_warm_loop(state: Arc<SharedState>) {
                     model.clone(),
                     t.access_token.clone(),
                     t.chatgpt_account_id.clone(),
+                    t.proxy_url.clone(),
                 ));
             }
         }
         // 有界并发探铸（buffer_unordered 在单任务内并发 I/O，控制对上游/出口池压力）。
         let results: Vec<WarmReport> = futures_util::stream::iter(jobs)
-            .map(|(account_id, model, bearer, cgid)| {
+            .map(|(account_id, model, bearer, cgid, proxy_url)| {
                 let state = Arc::clone(&state);
                 let donor = Arc::clone(&donor);
                 async move {
@@ -744,6 +755,7 @@ pub async fn admin_warm_loop(state: Arc<SharedState>) {
                         &model,
                         &bearer,
                         cgid.as_deref(),
+                        &proxy_url,
                     )
                     .await
                 }

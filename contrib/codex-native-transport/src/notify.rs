@@ -240,7 +240,7 @@ fn egress_line(
     account_id: i64,
     model: &str,
 ) -> Option<String> {
-    let pool = cfg.egress_pool_list();
+    let pool = cfg.effective_egress_pool_list();
     if pool.is_empty() {
         return None;
     }

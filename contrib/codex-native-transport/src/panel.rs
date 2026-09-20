@@ -312,7 +312,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         config.pin_fail_ratio_pct,
     );
     let now = crate::turn_state::now_ms() as u64;
-    let egress_pool = config.egress_pool_list();
+    let egress_pool = config.effective_egress_pool_list();
     // 「池大小」= 一圈长度 = 池条目数（每行一个独立出口）。
     let egress_pool_size = config.egress_lap_len();
     // 账号 id → 邮箱标签（可选）：从池目录下的 account-labels.json 读取，
@@ -432,7 +432,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         ));
     }
     format!(
-        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"egress_pool_size\":{},\"use_account_proxy_after_lock\":{},\"accounts\":[{}]}}",
+        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"egress_pool_size\":{},\"egress_proxy_api\":{},\"use_account_proxy_after_lock\":{},\"accounts\":[{}]}}",
         json_string(&config.turn_state_mode),
         json_string(&config.pin_identity_strategy),
         config.canary_enabled,
@@ -448,6 +448,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         config.pin_giveup_rounds,
         config.pin_max_age_seconds,
         egress_pool_size,
+        config.egress_proxy_api_enabled,
         config.use_account_proxy_after_lock,
         accts.join(",")
     )
@@ -572,7 +573,7 @@ async function load(){
     const r=await api('/api/status'); if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
     document.getElementById('err').textContent='';
-    const poolTxt = (d.egress_pool_size>0) ? ` · 代理池 ${d.egress_pool_size} 个出口 · 锁票后${d.use_account_proxy_after_lock?'账号原代理':'保持铸票出口'}` : '';
+    const poolTxt = d.egress_proxy_api ? ' · 动态代理 API · 每次铸票获取新出口 · 锁票后账号原代理' : ((d.egress_pool_size>0) ? ` · 代理池 ${d.egress_pool_size} 个出口 · 锁票后${d.use_account_proxy_after_lock?'账号原代理':'保持铸票出口'}` : '');
     const warmTxt = ` · 主动养池 ${d.active_warming?('on/'+d.warm_interval_s+'s'):'off'} · 被动养池 ${d.passive_warming?'on':'off'}`;
     const adminTxt = d.admin_warming?(` · 全池养池 on/${d.admin_warm_interval_s}s`):' · 全池养池 off';
     const modelsTxt = ` · 关注模型 [${esc(d.warming_model_names||'')}]`;

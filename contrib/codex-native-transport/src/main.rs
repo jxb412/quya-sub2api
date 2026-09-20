@@ -12,6 +12,7 @@ mod goplugin;
 mod identity;
 mod notify;
 mod panel;
+mod proxy_api;
 mod refresh;
 mod service;
 mod transport;

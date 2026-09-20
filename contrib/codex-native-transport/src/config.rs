@@ -115,6 +115,17 @@ pub struct PluginConfig {
     /// 每格独立游标，连续 egress_advance_threshold 次非-292/报错即换池里下一个;出 292 即锁票。
     /// 支持 socks5h:// / socks5:// / http:// / https://，可带账密。空行与 # 注释行忽略。
     pub egress_pool: String,
+    /// 动态代理 API。开启后，未锁票的每次铸票请求都先调用 API 获取一个新的 SOCKS5
+    /// 代理，静态 egress_pool 完全不参与。API 返回格式固定为 host:port:user:password。
+    pub egress_proxy_api_enabled: bool,
+    /// 动态代理 API 完整 URL。URL 中可能含供应商凭据，随插件配置加密存储。
+    pub egress_proxy_api_url: String,
+    /// SOCKS/TLS 建连失败或 API 获取失败时，是否重新调用 API 获取新代理后重试。
+    pub egress_proxy_api_retry_enabled: bool,
+    /// 首次尝试之外的最大重试次数。只重试确认尚未把请求发到上游的连接阶段错误。
+    pub egress_proxy_api_max_retries: u32,
+    /// API 获取失败、格式错误或连接重试耗尽后，是否回退账号原代理。
+    pub egress_proxy_api_fallback_to_account_proxy: bool,
     /// 锁到有效 turn-state 后是否回到账号原本配置的代理。
     /// true（默认）= 锁票后业务流量走账号原代理；
     /// false = 继续走铸出该锁票的代理池出口。
@@ -229,6 +240,11 @@ impl Default for PluginConfig {
             pin_giveup_rounds: 3,
             pin_giveup_retry_seconds: 21600,
             egress_pool: String::new(),
+            egress_proxy_api_enabled: false,
+            egress_proxy_api_url: String::new(),
+            egress_proxy_api_retry_enabled: true,
+            egress_proxy_api_max_retries: 3,
+            egress_proxy_api_fallback_to_account_proxy: true,
             use_account_proxy_after_lock: true,
             tg_bot_token: String::new(),
             tg_chat_id: String::new(),
@@ -324,15 +340,33 @@ impl PluginConfig {
             .collect()
     }
 
+    /// 实际参与轮转的静态池。动态 API 模式优先，开启后静态池被完整忽略。
+    pub fn effective_egress_pool_list(&self) -> Vec<String> {
+        if self.egress_proxy_api_enabled {
+            Vec::new()
+        } else {
+            self.egress_pool_list()
+        }
+    }
+
     /// 是否配置了铸票出口池。决定 pin 模式下未锁票的格走不走专用出口，
     /// 以及休息编排「转满一圈」信号是否存在。
     pub fn egress_enabled(&self) -> bool {
-        !self.egress_pool_list().is_empty()
+        self.egress_proxy_api_enabled || !self.egress_pool_list().is_empty()
     }
 
     /// 出口轮转器的「一圈长度」= 池条目数（每行一个独立出口 / 独立连接）。
     pub fn egress_lap_len(&self) -> usize {
-        self.egress_pool_list().len()
+        self.effective_egress_pool_list().len()
+    }
+
+    /// 动态代理 API 一次业务请求最多尝试几组代理。
+    pub fn egress_proxy_api_max_attempts(&self) -> usize {
+        if self.egress_proxy_api_retry_enabled {
+            self.egress_proxy_api_max_retries.saturating_add(1) as usize
+        } else {
+            1
+        }
     }
 
     /// 换出口门槛 = egress_advance_threshold。
@@ -425,6 +459,32 @@ impl PluginConfig {
         if !(1..=10).contains(&self.egress_advance_threshold) {
             return Err("egress_advance_threshold must be within 1..=10".to_string());
         }
+        if self.egress_proxy_api_max_retries > 10 {
+            return Err("egress_proxy_api_max_retries must be within 0..=10".to_string());
+        }
+        if self.egress_proxy_api_enabled {
+            if self.turn_state_mode != "pin" {
+                return Err(
+                    "egress_proxy_api_enabled 需要 turn_state_mode=pin（动态代理只接管铸票出口）"
+                        .to_string(),
+                );
+            }
+            let raw = self.egress_proxy_api_url.trim();
+            if raw.is_empty() {
+                return Err("egress_proxy_api_enabled 需要填写代理 API URL".to_string());
+            }
+            let url = reqwest::Url::parse(raw)
+                .map_err(|_| "egress_proxy_api_url 必须是有效 URL".to_string())?;
+            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                return Err("egress_proxy_api_url 必须是有效的 http:// 或 https:// URL".to_string());
+            }
+            if !self.use_account_proxy_after_lock {
+                return Err(
+                    "动态代理 API 模式需要开启“锁定后使用账号原代理”（临时代理会话不持久化）"
+                        .to_string(),
+                );
+            }
+        }
         // Telegram 通知：枚举合法 + 冷却上限。token/chat 自由文本，留空即关闭。
         if !VALID_TG_EVENTS.contains(&self.tg_notify_events.as_str()) {
             return Err(format!(
@@ -491,7 +551,7 @@ impl PluginConfig {
             }
             if !self.egress_enabled() {
                 return Err(
-                    "admin_warming_enabled 需要 egress_pool 非空（全池造票靠干净出口池铸 292）"
+                    "admin_warming_enabled 需要静态出口池或动态代理 API（全池造票需要专用出口）"
                         .to_string(),
                 );
             }
@@ -761,6 +821,10 @@ mod tests {
         // 默认空。
         let defaults = PluginConfig::parse(b"{}").unwrap();
         assert!(defaults.egress_pool_list().is_empty());
+        assert!(!defaults.egress_proxy_api_enabled);
+        assert!(defaults.egress_proxy_api_retry_enabled);
+        assert_eq!(defaults.egress_proxy_api_max_retries, 3);
+        assert!(defaults.egress_proxy_api_fallback_to_account_proxy);
         assert!(defaults.use_account_proxy_after_lock);
         assert!(
             !PluginConfig::parse(br#"{"use_account_proxy_after_lock":false}"#)
@@ -791,6 +855,33 @@ mod tests {
             br#"{"turn_state_mode":"pin","egress_pool":"socks5h://1.2.3.4:1080\nhttp://[2a01::1]:8080"}"#
         )
         .is_ok());
+    }
+
+    #[test]
+    fn dynamic_proxy_api_validates_and_overrides_static_pool() {
+        let cfg = PluginConfig::parse(
+            br#"{"turn_state_mode":"pin","egress_proxy_api_enabled":true,"egress_proxy_api_url":"https://proxy.example/api?token=secret","egress_proxy_api_retry_enabled":true,"egress_proxy_api_max_retries":3,"egress_proxy_api_fallback_to_account_proxy":true,"egress_pool":"socks5h://static:1080","use_account_proxy_after_lock":true}"#,
+        )
+        .unwrap();
+        assert!(cfg.egress_enabled());
+        assert!(cfg.effective_egress_pool_list().is_empty());
+        assert_eq!(cfg.egress_proxy_api_max_attempts(), 4);
+
+        let no_retry = PluginConfig::parse(
+            br#"{"turn_state_mode":"pin","egress_proxy_api_enabled":true,"egress_proxy_api_url":"https://proxy.example/api","egress_proxy_api_retry_enabled":false,"egress_proxy_api_max_retries":9,"use_account_proxy_after_lock":true}"#,
+        )
+        .unwrap();
+        assert_eq!(no_retry.egress_proxy_api_max_attempts(), 1);
+
+        for raw in [
+            br#"{"turn_state_mode":"pin","egress_proxy_api_enabled":true,"use_account_proxy_after_lock":true}"#.as_slice(),
+            br#"{"turn_state_mode":"pin","egress_proxy_api_enabled":true,"egress_proxy_api_url":"ftp://proxy.example/api","use_account_proxy_after_lock":true}"#.as_slice(),
+            br#"{"turn_state_mode":"pin","egress_proxy_api_enabled":true,"egress_proxy_api_url":"https://proxy.example/api","use_account_proxy_after_lock":false}"#.as_slice(),
+            br#"{"turn_state_mode":"passthrough","egress_proxy_api_enabled":true,"egress_proxy_api_url":"https://proxy.example/api","use_account_proxy_after_lock":true}"#.as_slice(),
+            br#"{"turn_state_mode":"pin","egress_proxy_api_enabled":true,"egress_proxy_api_url":"https://proxy.example/api","egress_proxy_api_max_retries":11,"use_account_proxy_after_lock":true}"#.as_slice(),
+        ] {
+            assert!(PluginConfig::parse(raw).is_err());
+        }
     }
 
     #[test]
@@ -920,6 +1011,11 @@ mod tests {
             "per_account_cookie_jar",
             "max_request_body_mb",
             "max_cached_clients",
+            "egress_proxy_api_enabled",
+            "egress_proxy_api_url",
+            "egress_proxy_api_retry_enabled",
+            "egress_proxy_api_max_retries",
+            "egress_proxy_api_fallback_to_account_proxy",
             "use_account_proxy_after_lock",
             "identity",
         ] {

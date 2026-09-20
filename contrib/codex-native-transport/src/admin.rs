@@ -20,6 +20,7 @@ pub struct WarmTarget {
     pub account_id: i64,
     pub access_token: String,
     pub chatgpt_account_id: Option<String>,
+    pub proxy_url: String,
 }
 
 /// 直连宿主的 http 客户端（不过代理，短超时）。
@@ -257,9 +258,7 @@ pub async fn fetch_targets(base: &str, key: &str) -> Result<Vec<WarmTarget>, Str
     }
 
     // 2) 导出：name → access_token / chatgpt_account_id（原文凭据）。
-    let url = format!(
-        "{base}/api/v1/admin/accounts/data?platform=openai&type=oauth&include_proxies=false"
-    );
+    let url = format!("{base}/api/v1/admin/accounts/data?platform=openai&type=oauth");
     let resp = client
         .get(&url)
         .header("x-api-key", key)
@@ -279,6 +278,39 @@ pub async fn fetch_targets(base: &str, key: &str) -> Result<Vec<WarmTarget>, Str
         .and_then(|a| a.as_array())
         .cloned()
         .unwrap_or_default();
+    let proxies = body
+        .get("data")
+        .and_then(|d| d.get("proxies"))
+        .and_then(|a| a.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut proxy_by_key: HashMap<String, String> = HashMap::new();
+    for proxy in &proxies {
+        let (Some(proxy_key), Some(protocol), Some(host), Some(port)) = (
+            proxy.get("proxy_key").and_then(serde_json::Value::as_str),
+            proxy.get("protocol").and_then(serde_json::Value::as_str),
+            proxy.get("host").and_then(serde_json::Value::as_str),
+            proxy
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|port| u16::try_from(port).ok()),
+        ) else {
+            continue;
+        };
+        let username = proxy
+            .get("username")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let password = proxy
+            .get("password")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if let Ok(lease) =
+            crate::proxy_api::build_proxy_url(protocol, host, port, username, password)
+        {
+            proxy_by_key.insert(proxy_key.to_string(), lease.proxy_url);
+        }
+    }
 
     let mut out = Vec::new();
     for acc in &accounts {
@@ -302,10 +334,17 @@ pub async fn fetch_targets(base: &str, key: &str) -> Result<Vec<WarmTarget>, Str
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .filter(|s| !s.is_empty());
+        let proxy_url = acc
+            .get("proxy_key")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|key| proxy_by_key.get(key))
+            .cloned()
+            .unwrap_or_default();
         out.push(WarmTarget {
             account_id,
             access_token,
             chatgpt_account_id,
+            proxy_url,
         });
     }
     Ok(out)
