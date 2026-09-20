@@ -139,6 +139,17 @@ impl ClientCache {
             .clear();
     }
 
+    /// 清理已删除账号隔离的连接；account=0 是全局共享 client，始终保留。
+    pub fn retain_accounts(&self, existing: &std::collections::HashSet<i64>) -> usize {
+        let mut clients = self
+            .clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = clients.len();
+        clients.retain(|key, _| key.account == 0 || existing.contains(&key.account));
+        before.saturating_sub(clients.len())
+    }
+
     pub fn client_for(
         &self,
         config: &PluginConfig,

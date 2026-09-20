@@ -125,6 +125,13 @@ impl EgressRotor {
             c.exhausted = false;
         }
     }
+
+    pub fn retain_accounts(&self, existing: &std::collections::HashSet<i64>) -> usize {
+        let mut cells = self.lock();
+        let before = cells.len();
+        cells.retain(|(account_id, _), _| existing.contains(account_id));
+        before.saturating_sub(cells.len())
+    }
 }
 
 /// 选择本次业务请求使用的代理池槽位。
@@ -281,6 +288,20 @@ impl AcctRest {
             phase.last_resumed_ms = now;
         }
         self.save(path);
+    }
+
+    /// 删除宿主已不存在账号的休息/防抖记录，并立即重写休息快照。
+    pub fn retain_accounts(&self, existing: &std::collections::HashSet<i64>, path: &str) -> usize {
+        let removed = {
+            let mut map = self.lock();
+            let before = map.len();
+            map.retain(|account_id, _| existing.contains(account_id));
+            before.saturating_sub(map.len())
+        };
+        if removed > 0 {
+            self.save(path);
+        }
+        removed
     }
 
     /// 从盘载入休息集（插件启动时调用一次）。path 为空则跳过。

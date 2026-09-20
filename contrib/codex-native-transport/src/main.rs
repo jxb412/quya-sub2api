@@ -104,6 +104,8 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(refresh::warm_loop(std::sync::Arc::clone(&state)));
     // 内置 admin key 的全池主动养池：调 admin API 枚举全部可调度 openai oauth 号造票。
     tokio::spawn(refresh::admin_warm_loop(std::sync::Arc::clone(&state)));
+    // 独立同步宿主未删除账号，定期清理面板与持久化池中的历史账号。
+    tokio::spawn(refresh::account_sync_loop(std::sync::Arc::clone(&state)));
     // 每账号休息编排：出口池转满一圈仍无 292 才休息；休息 = 优先级排空（老会话不打散），到点恢复。
     tokio::spawn(refresh::rest_loop(std::sync::Arc::clone(&state)));
     // 智商切换 TG 通知：池投出档位跃迁事件 → 通知任务直连 Telegram 推送。

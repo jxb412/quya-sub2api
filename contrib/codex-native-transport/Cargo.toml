@@ -1,6 +1,6 @@
 [package]
 name = "codex-native-transport"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2021"
 description = "Sub2API OpenAI OAuth outbound transport plugin that reproduces the exact network stack of the official Codex CLI (codex-rs)."
 license = "MIT"

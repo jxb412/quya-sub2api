@@ -11,7 +11,7 @@
 //! access_token 仅内存流转、绝不落盘（与插件既有 bearer 原则一致）。
 //! 直连宿主（127.0.0.1，不过任何代理）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 /// 一个待养的目标号：宿主数字 id（= 插件养池格键）+ bearer + chatgpt 账号头。
@@ -28,6 +28,117 @@ fn admin_client() -> reqwest::Result<reqwest::Client> {
         .no_proxy()
         .timeout(Duration::from_secs(20))
         .build()
+}
+
+#[derive(Debug)]
+struct ExistingAccountPage {
+    ids: Vec<i64>,
+    page: u32,
+    pages: u32,
+    total: usize,
+}
+
+/// 严格解析账号快照页。同步任务会据此删除本地历史状态，因此任何结构异常都必须报错，
+/// 由调用方 fail-open 保留现状，绝不能把异常响应当成“当前没有账号”。
+fn parse_existing_account_page(body: &serde_json::Value) -> Result<ExistingAccountPage, String> {
+    if body.get("code").and_then(serde_json::Value::as_i64) != Some(0) {
+        return Err("list response: code is not 0".to_string());
+    }
+    let data = body
+        .get("data")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "list response: missing data object".to_string())?;
+    let items = data
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "list response: missing data.items array".to_string())?;
+    let page = data
+        .get("page")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .ok_or_else(|| "list response: invalid data.page".to_string())?;
+    let pages = data
+        .get("pages")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .ok_or_else(|| "list response: invalid data.pages".to_string())?;
+    let total = data
+        .get("total")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .ok_or_else(|| "list response: invalid data.total".to_string())?;
+
+    let mut ids = Vec::with_capacity(items.len());
+    for item in items {
+        let id = item
+            .get("id")
+            .and_then(serde_json::Value::as_i64)
+            .filter(|id| *id > 0)
+            .ok_or_else(|| "list response: item missing valid id".to_string())?;
+        ids.push(id);
+    }
+    Ok(ExistingAccountPage {
+        ids,
+        page,
+        pages,
+        total,
+    })
+}
+
+/// 枚举宿主中所有尚未删除的 OpenAI OAuth 账号。
+///
+/// 特意不传 status，也不检查 schedulable：暂停、错误、限流中的账号仍然存在，必须保留其
+/// turn-state 与连接状态。只有仓储层已经排除的软删除账号才会从完整快照中消失。
+pub async fn fetch_existing_oauth_ids(base: &str, key: &str) -> Result<HashSet<i64>, String> {
+    let client = admin_client().map_err(|e| format!("build client: {e}"))?;
+    let base = base.trim_end_matches('/');
+    let mut ids = HashSet::new();
+    let mut expected_total = None;
+    let mut page = 1u32;
+    loop {
+        let url = format!(
+            "{base}/api/v1/admin/accounts?platform=openai&type=oauth&lite=1&page={page}&page_size=1000"
+        );
+        let resp = client
+            .get(&url)
+            .header("x-api-key", key)
+            .send()
+            .await
+            .map_err(|e| format!("list request: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("list status {}", resp.status().as_u16()));
+        }
+        let body: serde_json::Value = resp.json().await.map_err(|e| format!("list decode: {e}"))?;
+        let parsed = parse_existing_account_page(&body)?;
+        if parsed.page != page {
+            return Err(format!(
+                "list response: requested page {page}, got {}",
+                parsed.page
+            ));
+        }
+        match expected_total {
+            Some(total) if total != parsed.total => {
+                return Err("list response: total changed during snapshot".to_string());
+            }
+            None => expected_total = Some(parsed.total),
+            _ => {}
+        }
+        ids.extend(parsed.ids);
+        if page >= parsed.pages {
+            break;
+        }
+        page += 1;
+    }
+    if ids.len() != expected_total.unwrap_or_default() {
+        return Err(format!(
+            "list response: snapshot count {} does not match total {}",
+            ids.len(),
+            expected_total.unwrap_or_default()
+        ));
+    }
+    Ok(ids)
 }
 
 /// 只枚举全部可调度 openai oauth 号的宿主数字 id（不摸凭据）。
@@ -249,4 +360,43 @@ pub async fn set_account_priority(
         return Err(format!("set priority status {}", resp.status().as_u16()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn existing_snapshot_includes_unschedulable_and_error_accounts() {
+        let body = serde_json::json!({
+            "code": 0,
+            "message": "success",
+            "data": {
+                "items": [
+                    {"id": 10, "status": "active", "schedulable": true},
+                    {"id": 11, "status": "error", "schedulable": false},
+                    {"id": 12, "status": "disabled", "schedulable": false}
+                ],
+                "total": 3,
+                "page": 1,
+                "page_size": 1000,
+                "pages": 1
+            }
+        });
+        let page = parse_existing_account_page(&body).unwrap();
+        assert_eq!(page.ids, vec![10, 11, 12]);
+        assert_eq!(page.total, 3);
+    }
+
+    #[test]
+    fn malformed_snapshot_is_rejected_instead_of_treated_as_empty() {
+        for body in [
+            serde_json::json!({"code": 0, "data": {"pages": 1, "page": 1, "total": 0}}),
+            serde_json::json!({"code": 0, "data": {"items": [], "page": 1, "total": 0}}),
+            serde_json::json!({"code": 500, "data": {"items": [], "pages": 1, "page": 1, "total": 0}}),
+            serde_json::json!({"code": 0, "data": {"items": [{"name": "missing-id"}], "pages": 1, "page": 1, "total": 1}}),
+        ] {
+            assert!(parse_existing_account_page(&body).is_err());
+        }
+    }
 }

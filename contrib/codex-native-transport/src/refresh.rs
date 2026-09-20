@@ -1,7 +1,7 @@
 //! 主动刷新 / canary：把每账号×模型最近一次真实出站请求当模板（含 bearer，仅内存，绝不落盘），
 //! 定时用它对上游发一道受控推理题，铸取新 turn-state 并判静默降智，驱动养池状态机。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -83,6 +83,16 @@ impl ProbeIdentityCache {
             context_window_id: conversation.context_window_id.clone(),
         }
     }
+
+    pub fn retain_accounts(&self, existing: &HashSet<i64>) -> usize {
+        let mut identities = self
+            .identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = identities.len();
+        identities.retain(|(account_id, _, _, _), _| existing.contains(account_id));
+        before.saturating_sub(identities.len())
+    }
 }
 
 impl CredCache {
@@ -132,6 +142,13 @@ impl CredCache {
     /// bearer 会被目标号覆写，这里只借 url/头/body 的形状。
     pub fn any_recent(&self) -> Option<Template> {
         self.lock().values().max_by_key(|t| t.updated_ms).cloned()
+    }
+
+    pub fn retain_accounts(&self, existing: &HashSet<i64>) -> usize {
+        let mut templates = self.lock();
+        let before = templates.len();
+        templates.retain(|(account_id, _), _| existing.contains(account_id));
+        before.saturating_sub(templates.len())
     }
 }
 
@@ -768,6 +785,86 @@ fn rest_persist_path(pin_persist_path: &str) -> String {
     }
 }
 
+#[derive(Default)]
+struct AccountPruneStats {
+    pool_cells: usize,
+    templates: usize,
+    probe_identities: usize,
+    egress_cells: usize,
+    rest_accounts: usize,
+    clients: usize,
+}
+
+impl AccountPruneStats {
+    fn total(&self) -> usize {
+        self.pool_cells
+            + self.templates
+            + self.probe_identities
+            + self.egress_cells
+            + self.rest_accounts
+            + self.clients
+    }
+}
+
+/// 应用一次完整账号快照。Err 原样返回且不触碰任何状态，保证宿主 API 异常时 fail-open。
+fn apply_existing_account_snapshot(
+    state: &SharedState,
+    snapshot: Result<HashSet<i64>, String>,
+) -> Result<AccountPruneStats, String> {
+    let existing = snapshot?;
+    let config = state.current_config();
+    let stats = AccountPruneStats {
+        pool_cells: state.pool.retain_accounts(&existing),
+        templates: state.creds.retain_accounts(&existing),
+        probe_identities: state.probe_ids.retain_accounts(&existing),
+        egress_cells: state.egress.retain_accounts(&existing),
+        rest_accounts: state
+            .acct_rest
+            .retain_accounts(&existing, &rest_persist_path(&config.pin_persist_path)),
+        clients: state.clients.retain_accounts(&existing),
+    };
+    if stats.pool_cells > 0 {
+        // 删除后立即覆盖磁盘快照，避免插件重启又把已删账号载回来。
+        state.pool.persist_now(&config.pin_persist_path);
+    }
+    Ok(stats)
+}
+
+/// 独立账号同步：只依赖 admin 凭据，与全池养池开关无关。
+/// API 请求、鉴权、分页或响应结构任一异常都不清理，下一轮重试。
+pub async fn account_sync_loop(state: Arc<SharedState>) {
+    loop {
+        let config = state.current_config();
+        let base = config.admin_api_base.trim();
+        let key = config.admin_api_key.trim();
+        if !base.is_empty() && !key.is_empty() {
+            match apply_existing_account_snapshot(
+                &state,
+                crate::admin::fetch_existing_oauth_ids(base, key).await,
+            ) {
+                Ok(stats) if stats.total() > 0 => {
+                    eprintln!(
+                        "[codex-native-transport] account_sync: removed stale state pool_cells={} templates={} probe_ids={} egress={} rest={} clients={}",
+                        stats.pool_cells,
+                        stats.templates,
+                        stats.probe_identities,
+                        stats.egress_cells,
+                        stats.rest_accounts,
+                        stats.clients
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    eprintln!(
+                        "[codex-native-transport] account_sync: snapshot failed, keeping local state: {err}"
+                    );
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
+}
+
 /// 休息编排后台循环（事件触发，两层）。
 ///
 /// 生效条件（每 15s 巡检）：pin 模式 + 开了任一养池(主动/全池) + 配了 admin API +
@@ -1216,5 +1313,45 @@ mod tests {
         assert_ne!(first.turn_id, second.turn_id);
         let other = cache.request_ids(7, "gpt-6-astra", "canary", 2);
         assert_ne!(first.conversation_id, other.conversation_id);
+    }
+
+    #[test]
+    fn account_snapshot_prunes_deleted_and_keeps_existing_state() {
+        let state = SharedState::new();
+        state.pool.set_turn_state(10, "m", Some(&"a".repeat(292)));
+        state.pool.set_turn_state(11, "m", Some(&"b".repeat(292)));
+        state
+            .creds
+            .record(10, "m", "https://x", "", &HashMap::new(), b"{}");
+        state
+            .creds
+            .record(11, "m", "https://x", "", &HashMap::new(), b"{}");
+        let _ = state.probe_ids.request_ids(10, "m", "warm", 0);
+        let _ = state.probe_ids.request_ids(11, "m", "warm", 0);
+        state.egress.on_result(10, "m", false, 2, 1);
+        state.egress.on_result(11, "m", false, 2, 1);
+        assert!(state.acct_rest.can_rest(10, 100, 0));
+        assert!(state.acct_rest.can_rest(11, 100, 0));
+
+        let stats = apply_existing_account_snapshot(&state, Ok(HashSet::from([11]))).unwrap();
+        assert_eq!(stats.pool_cells, 1);
+        assert_eq!(stats.templates, 1);
+        assert_eq!(stats.probe_identities, 1);
+        assert_eq!(stats.egress_cells, 1);
+        assert_eq!(stats.rest_accounts, 1);
+        assert!(state.pool.get_cell(10, "m").is_none());
+        assert!(state.pool.get_cell(11, "m").is_some());
+        assert!(state.creds.get(10, "m").is_none());
+        assert!(state.creds.get(11, "m").is_some());
+    }
+
+    #[test]
+    fn failed_account_snapshot_never_prunes_state() {
+        let state = SharedState::new();
+        state.pool.set_turn_state(10, "m", Some(&"a".repeat(292)));
+        let result =
+            apply_existing_account_snapshot(&state, Err("admin API unavailable".to_string()));
+        assert!(result.is_err());
+        assert!(state.pool.get_cell(10, "m").is_some());
     }
 }

@@ -843,6 +843,14 @@ impl TurnStatePool {
         self.lock().values().cloned().collect()
     }
 
+    /// 删除宿主已不存在账号的全部模型格。返回删除的格数。
+    pub fn retain_accounts(&self, existing: &std::collections::HashSet<i64>) -> usize {
+        let mut cells = self.lock();
+        let before = cells.len();
+        cells.retain(|(account_id, _), _| existing.contains(account_id));
+        before.saturating_sub(cells.len())
+    }
+
     /// 从持久化恢复：仅导入未过期的格，且丢弃已失效格的 turn-state。
     pub fn import(&self, cells: Vec<Cell>, params: &PinParams) {
         let now = now_ms() as u64;
@@ -1270,6 +1278,41 @@ mod tests {
         pool.capture_if_empty(2, "m", Some(&real6), &p);
         let ev = rx.try_recv().expect("heal event acct2");
         assert_eq!((ev.from, ev.to), (Tier::Degraded, Tier::Ok));
+    }
+
+    #[test]
+    fn retain_accounts_removes_all_models_for_deleted_account() {
+        let pool = TurnStatePool::new();
+        pool.set_turn_state(10, "gpt-a", Some(&"a".repeat(REAL6_TICKET_LEN)));
+        pool.set_turn_state(10, "gpt-b", Some(&"b".repeat(REAL6_TICKET_LEN)));
+        pool.set_turn_state(11, "gpt-a", Some(&"c".repeat(REAL6_TICKET_LEN)));
+
+        let existing = std::collections::HashSet::from([11]);
+        assert_eq!(pool.retain_accounts(&existing), 2);
+        assert!(pool.get_cell(10, "gpt-a").is_none());
+        assert!(pool.get_cell(10, "gpt-b").is_none());
+        assert!(pool.get_cell(11, "gpt-a").is_some());
+    }
+
+    #[test]
+    fn removed_account_does_not_return_after_persist_and_reload() {
+        let path = std::env::temp_dir()
+            .join(format!("cnt-prune-test-{}.json", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&path);
+        let params = params();
+        let pool = TurnStatePool::new();
+        pool.set_turn_state(10, "gpt-a", Some(&"a".repeat(REAL6_TICKET_LEN)));
+        pool.set_turn_state(11, "gpt-a", Some(&"b".repeat(REAL6_TICKET_LEN)));
+        pool.retain_accounts(&std::collections::HashSet::from([11]));
+        pool.persist_now(&path);
+
+        let restored = TurnStatePool::new();
+        restored.load_once(&path, &params);
+        assert!(restored.get_cell(10, "gpt-a").is_none());
+        assert!(restored.get_cell(11, "gpt-a").is_some());
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
