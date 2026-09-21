@@ -21,6 +21,7 @@ pub struct ProxyLease {
 pub struct ProxyApiClient {
     client: reqwest::Client,
     next_slot: std::sync::atomic::AtomicUsize,
+    next_quya_server: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for ProxyApiClient {
@@ -34,6 +35,7 @@ impl Default for ProxyApiClient {
         Self {
             client,
             next_slot: std::sync::atomic::AtomicUsize::new(1),
+            next_quya_server: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -79,6 +81,62 @@ impl ProxyApiClient {
             .max(1);
         Ok(lease)
     }
+
+    /// Build one short-lived Yunqiao IPv6 lease. Every acquisition receives a fresh username;
+    /// gateways are selected round-robin so retries naturally move to the other server.
+    pub fn acquire_quya(&self, servers: &[String], password: &str) -> Result<ProxyLease, String> {
+        if servers.is_empty() {
+            return Err("Yunqiao random IPv6 gateway list is empty".to_string());
+        }
+        let index = self
+            .next_quya_server
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % servers.len();
+        let (host, port) = parse_quya_gateway(&servers[index])?;
+        let username = format!("cnt{}", uuid::Uuid::new_v4().simple());
+        let mut lease = build_proxy_url("http", &host, port, &username, password)?;
+        lease.slot = self
+            .next_slot
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        Ok(lease)
+    }
+}
+
+/// Parse `host:port` or `http://host:port` without accepting embedded credentials or paths.
+pub fn parse_quya_gateway(raw: &str) -> Result<(String, u16), String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("empty Yunqiao gateway".to_string());
+    }
+    let candidate = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("http://{raw}")
+    };
+    let url = reqwest::Url::parse(&candidate)
+        .map_err(|_| "invalid Yunqiao gateway endpoint".to_string())?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.path(), "" | "/")
+    {
+        return Err(
+            "Yunqiao gateway must be http host:port without credentials or path".to_string(),
+        );
+    }
+    let host = url
+        .host_str()
+        .filter(|host| !host.trim().is_empty())
+        .ok_or_else(|| "Yunqiao gateway host is missing".to_string())?
+        .to_string();
+    let port = url
+        .port()
+        .filter(|port| *port > 0)
+        .ok_or_else(|| "Yunqiao gateway port is missing".to_string())?;
+    Ok((host, port))
 }
 
 /// Provider response: `host:port:username:password`. The first non-empty line is used.
@@ -188,7 +246,7 @@ pub async fn send_with_optional_proxy_api(
     clients: &ClientCache,
     config: &PluginConfig,
     account_id: i64,
-    use_api: bool,
+    use_dynamic: bool,
     fallback_proxy_url: &str,
     default_proxy_url: &str,
     default_slot: usize,
@@ -197,7 +255,8 @@ pub async fn send_with_optional_proxy_api(
     headers: &reqwest::header::HeaderMap,
     body: &[u8],
 ) -> Result<ProxySendResult, ProxySendError> {
-    if !use_api {
+    let dynamic_mode = config.egress_mode_value();
+    if !use_dynamic || !matches!(dynamic_mode, "proxy_api" | "quya_random") {
         let response = send_once(
             clients,
             config,
@@ -218,9 +277,15 @@ pub async fn send_with_optional_proxy_api(
     }
 
     let attempts = config.egress_proxy_api_max_attempts().max(1);
-    let mut last_error = ProxySendError::Api("proxy API did not run".to_string());
+    let quya_servers = config.quya_random_servers_list();
+    let mut last_error = ProxySendError::Api("dynamic proxy acquisition did not run".to_string());
     for _ in 0..attempts {
-        let lease = match api.acquire(config.egress_proxy_api_url.trim()).await {
+        let acquired = if dynamic_mode == "proxy_api" {
+            api.acquire(config.egress_proxy_api_url.trim()).await
+        } else {
+            api.acquire_quya(&quya_servers, config.egress_quya_random_password.trim())
+        };
+        let lease = match acquired {
             Ok(lease) => lease,
             Err(message) => {
                 last_error = ProxySendError::Api(message);
@@ -312,5 +377,25 @@ mod tests {
         let lease = build_proxy_url("socks5", "2604:4300:a:f4::2", 1080, "u", "p").unwrap();
         assert_eq!(lease.endpoint, "[2604:4300:a:f4::2]:1080");
         assert_eq!(lease.proxy_url, "socks5://u:p@[2604:4300:a:f4::2]:1080");
+    }
+
+    #[test]
+    fn parses_quya_gateway_and_rejects_credentials_or_paths() {
+        assert_eq!(
+            parse_quya_gateway("142.54.187.42:49000").unwrap(),
+            ("142.54.187.42".to_string(), 49000)
+        );
+        assert_eq!(
+            parse_quya_gateway("http://107.150.62.202:49000").unwrap(),
+            ("107.150.62.202".to_string(), 49000)
+        );
+        for raw in [
+            "https://142.54.187.42:49000",
+            "http://u:p@142.54.187.42:49000",
+            "http://142.54.187.42:49000/path",
+            "142.54.187.42",
+        ] {
+            assert!(parse_quya_gateway(raw).is_err(), "accepted {raw:?}");
+        }
     }
 }

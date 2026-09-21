@@ -331,6 +331,39 @@ PYEOF
 - API 返回值限制为 16 KiB，凭据会 URL 编码后构造成 `socks5h://`，由代理端解析 DNS。
 - “测试连通性”在动态 API 模式下会强制验证 API 代理本身；不会因为回退账号原代理成功而误报 API 可用。
 
+### 4.4 套餐范围与互斥出口模式(≥0.7.9)
+
+`warming_plan_types` 是套餐多选数组，数据直接读取宿主账号的
+`credentials.plan_type`。空数组表示全部账号套餐；非空时只有匹配套餐执行被动捕获、
+Turn-State 注入、主动/全池养池、休息编排和到期前预刷新。暂未同步到套餐的账号按
+passthrough 放行。`chatgpt_pro` 与 `pro` 统一匹配为 `pro`；选择 `unknown` 可显式包含空值或
+未知类型。限定套餐依赖 `admin_api_base` 和 `admin_api_key`，账号快照默认每 60 秒同步一次。
+
+`egress_mode` 使铸票出口四选一，解决多个旧开关同时开启时的歧义：
+
+| 值 | 含义 |
+|---|---|
+| `account_proxy` | 不启用专用铸票出口，使用账号原代理 |
+| `static_pool` | 只使用 `egress_pool` 静态池 |
+| `proxy_api` | 只使用 `egress_proxy_api_url` 第三方动态 API |
+| `quya_random` | 只使用云桥随机 IPv6 网关 |
+
+旧配置没有 `egress_mode` 时自动迁移：原 `egress_proxy_api_enabled=true` 迁移到
+`proxy_api`；否则静态池非空迁移到 `static_pool`；两者都没有迁移到 `account_proxy`。
+未被当前模式选择的静态池/API/云桥字段会保留但不参与请求。
+
+云桥随机 IPv6 配置：
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `egress_quya_random_servers` | 两台主服务器的 `:49000` | 一行一个 `host:port`，每次获取按服务器轮转 |
+| `egress_quya_random_password` | 空 | 共享分配密码，敏感值只保存到宿主加密插件配置 |
+
+每次未锁票或预刷新铸票都会生成新的 `cnt<随机 UUID>` 用户名，经 HTTP 代理获得新的 IPv6
+租约。该模式必须开启 `use_account_proxy_after_lock=true`，避免把临时铸票出口带入已锁定业务
+会话；连接失败重试和回退账号原代理继续复用 `egress_proxy_api_retry_enabled`、
+`egress_proxy_api_max_retries`、`egress_proxy_api_fallback_to_account_proxy` 三个动态出口参数。
+
 面板(≥0.7.1)新增:`POST /api/unpark?account=&model=` 与 `POST /api/unpark-all`,清除放弃态 / 格级休息 / 卡住轮数并重开一圈;页面上每个停铸格有「解除放弃/休息」按钮,顶部有「全部解除」。诊断 JSONL(≥0.7.1)每行新增 `path`(forward / warm / admin_warm)与 `egress`(本次铸票出口 host:port),养池探铸也会记录,可按出口统计 292 率。
 
 ## 5. 回滚

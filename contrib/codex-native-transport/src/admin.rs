@@ -21,6 +21,7 @@ pub struct WarmTarget {
     pub access_token: String,
     pub chatgpt_account_id: Option<String>,
     pub proxy_url: String,
+    pub plan_type: String,
 }
 
 /// 直连宿主的 http 客户端（不过代理，短超时）。
@@ -34,6 +35,7 @@ fn admin_client() -> reqwest::Result<reqwest::Client> {
 #[derive(Debug)]
 struct ExistingAccountPage {
     ids: Vec<i64>,
+    plan_types: HashMap<i64, String>,
     page: u32,
     pages: u32,
     total: usize,
@@ -72,6 +74,7 @@ fn parse_existing_account_page(body: &serde_json::Value) -> Result<ExistingAccou
         .ok_or_else(|| "list response: invalid data.total".to_string())?;
 
     let mut ids = Vec::with_capacity(items.len());
+    let mut plan_types = HashMap::with_capacity(items.len());
     for item in items {
         let id = item
             .get("id")
@@ -79,23 +82,42 @@ fn parse_existing_account_page(body: &serde_json::Value) -> Result<ExistingAccou
             .filter(|id| *id > 0)
             .ok_or_else(|| "list response: item missing valid id".to_string())?;
         ids.push(id);
+        let plan_type = item
+            .get("credentials")
+            .and_then(|credentials| credentials.get("plan_type"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
+        plan_types.insert(id, plan_type);
     }
     Ok(ExistingAccountPage {
         ids,
+        plan_types,
         page,
         pages,
         total,
     })
 }
 
+#[derive(Debug)]
+pub struct ExistingAccountSnapshot {
+    pub ids: HashSet<i64>,
+    pub plan_types: HashMap<i64, String>,
+}
+
 /// 枚举宿主中所有尚未删除的 OpenAI OAuth 账号。
 ///
 /// 特意不传 status，也不检查 schedulable：暂停、错误、限流中的账号仍然存在，必须保留其
 /// turn-state 与连接状态。只有仓储层已经排除的软删除账号才会从完整快照中消失。
-pub async fn fetch_existing_oauth_ids(base: &str, key: &str) -> Result<HashSet<i64>, String> {
+pub async fn fetch_existing_oauth_snapshot(
+    base: &str,
+    key: &str,
+) -> Result<ExistingAccountSnapshot, String> {
     let client = admin_client().map_err(|e| format!("build client: {e}"))?;
     let base = base.trim_end_matches('/');
     let mut ids = HashSet::new();
+    let mut plan_types = HashMap::new();
     let mut expected_total = None;
     let mut page = 1u32;
     loop {
@@ -127,6 +149,7 @@ pub async fn fetch_existing_oauth_ids(base: &str, key: &str) -> Result<HashSet<i
             _ => {}
         }
         ids.extend(parsed.ids);
+        plan_types.extend(parsed.plan_types);
         if page >= parsed.pages {
             break;
         }
@@ -139,7 +162,7 @@ pub async fn fetch_existing_oauth_ids(base: &str, key: &str) -> Result<HashSet<i
             expected_total.unwrap_or_default()
         ));
     }
-    Ok(ids)
+    Ok(ExistingAccountSnapshot { ids, plan_types })
 }
 
 /// 只枚举全部可调度 openai oauth 号的宿主数字 id（不摸凭据）。
@@ -334,6 +357,12 @@ pub async fn fetch_targets(base: &str, key: &str) -> Result<Vec<WarmTarget>, Str
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .filter(|s| !s.is_empty());
+        let plan_type = creds
+            .and_then(|c| c.get("plan_type"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .unwrap_or("")
+            .to_string();
         let proxy_url = acc
             .get("proxy_key")
             .and_then(serde_json::Value::as_str)
@@ -345,6 +374,7 @@ pub async fn fetch_targets(base: &str, key: &str) -> Result<Vec<WarmTarget>, Str
             access_token,
             chatgpt_account_id,
             proxy_url,
+            plan_type,
         });
     }
     Ok(out)
@@ -412,8 +442,8 @@ mod tests {
             "message": "success",
             "data": {
                 "items": [
-                    {"id": 10, "status": "active", "schedulable": true},
-                    {"id": 11, "status": "error", "schedulable": false},
+                    {"id": 10, "status": "active", "schedulable": true, "credentials": {"plan_type": "pro"}},
+                    {"id": 11, "status": "error", "schedulable": false, "credentials": {"plan_type": "self_serve_business_prolite"}},
                     {"id": 12, "status": "disabled", "schedulable": false}
                 ],
                 "total": 3,
@@ -424,6 +454,12 @@ mod tests {
         });
         let page = parse_existing_account_page(&body).unwrap();
         assert_eq!(page.ids, vec![10, 11, 12]);
+        assert_eq!(page.plan_types.get(&10).map(String::as_str), Some("pro"));
+        assert_eq!(
+            page.plan_types.get(&11).map(String::as_str),
+            Some("self_serve_business_prolite")
+        );
+        assert_eq!(page.plan_types.get(&12).map(String::as_str), Some(""));
         assert_eq!(page.total, 3);
     }
 

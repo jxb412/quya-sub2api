@@ -2,6 +2,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 与前端账号套餐展示口径一致：忽略大小写及空格/下划线/连字符，合并已知别名。
+pub fn normalize_plan_type(value: &str) -> String {
+    let compact: String = value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|ch| !matches!(ch, ' ' | '_' | '-'))
+        .collect();
+    match compact.as_str() {
+        "chatgptpro" => "pro".to_string(),
+        "selfservebusinessprolite" => "self_serve_business_prolite".to_string(),
+        "" => String::new(),
+        other => other.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PluginConfig {
@@ -87,6 +103,10 @@ pub struct PluginConfig {
     /// 其它模型的请求在 pin 模式下一律按 passthrough 处理（走账号自己的出口、保留客户端身份、
     /// 不建养池格、不消耗额度）。只填会铸 292 真6票的模型，默认 gpt-6-astra + gpt-5.6-sol。
     pub warming_models: String,
+    /// pin 逻辑关注的 OpenAI OAuth 套餐类型。空数组 = 全部套餐；非空时只处理匹配
+    /// credentials.plan_type 的账号。匹配前会做小写、分隔符归一化，并把 chatgpt_pro
+    /// 视为 pro。"unknown" 可显式选择缺失或程序暂不认识的套餐。
+    pub warming_plan_types: Vec<String>,
     /// 每账号休息编排——两次休息之间的最短活跃时间（秒）。休息**不再按时间触发**：
     /// 只有当该号的养池格没有有效 292 票、且出口池已经整整轮转一圈仍铸不出 292 时才进入
     /// 休息。本值只是防抖：一个号恢复后至少活跃这么久才允许再次休息，避免出口池很小时
@@ -118,6 +138,13 @@ pub struct PluginConfig {
     /// 每格独立游标，连续 egress_advance_threshold 次非-292/报错即换池里下一个;出 292 即锁票。
     /// 支持 socks5h:// / socks5:// / http:// / https://，可带账密。空行与 # 注释行忽略。
     pub egress_pool: String,
+    /// 铸票出口模式（四选一）：
+    /// - account_proxy：账号原代理，不启用专用出口；
+    /// - static_pool：静态 egress_pool；
+    /// - proxy_api：第三方动态代理 API；
+    /// - quya_random：云桥随机 IPv6 网关。
+    /// None 只用于兼容旧配置，normalize 后会迁移成明确值。
+    pub egress_mode: Option<String>,
     /// 动态代理 API。开启后，未锁票的每次铸票请求都先调用 API 获取一个新的 SOCKS5
     /// 代理，静态 egress_pool 完全不参与。API 返回格式固定为 host:port:user:password。
     pub egress_proxy_api_enabled: bool,
@@ -129,6 +156,11 @@ pub struct PluginConfig {
     pub egress_proxy_api_max_retries: u32,
     /// API 获取失败、格式错误或连接重试耗尽后，是否回退账号原代理。
     pub egress_proxy_api_fallback_to_account_proxy: bool,
+    /// 云桥随机 IPv6 网关列表，一行一个 host:port（也接受 http://host:port）。
+    /// 每次需要铸票时轮转选择网关并生成全新随机用户名。
+    pub egress_quya_random_servers: String,
+    /// 云桥随机 IPv6 网关的共享分配密码。属于敏感配置，由宿主加密保存。
+    pub egress_quya_random_password: String,
     /// 锁到有效 turn-state 后是否回到账号原本配置的代理。
     /// true（默认）= 锁票后业务流量走账号原代理；
     /// false = 继续走铸出该锁票的代理池出口。
@@ -237,6 +269,7 @@ impl Default for PluginConfig {
             admin_api_key: String::new(),
             admin_warming_interval_seconds: 60,
             warming_models: "gpt-6-astra\ngpt-5.6-sol".to_string(),
+            warming_plan_types: Vec::new(),
             egress_advance_threshold: 3,
             warming_duty_seconds: 1800,
             warming_rest_seconds: 600,
@@ -244,11 +277,14 @@ impl Default for PluginConfig {
             pin_giveup_rounds: 3,
             pin_giveup_retry_seconds: 21600,
             egress_pool: String::new(),
+            egress_mode: None,
             egress_proxy_api_enabled: false,
             egress_proxy_api_url: String::new(),
             egress_proxy_api_retry_enabled: true,
             egress_proxy_api_max_retries: 3,
             egress_proxy_api_fallback_to_account_proxy: true,
+            egress_quya_random_servers: "142.54.187.42:49000\n107.150.62.202:49000".to_string(),
+            egress_quya_random_password: String::new(),
             use_account_proxy_after_lock: true,
             tg_bot_token: String::new(),
             tg_chat_id: String::new(),
@@ -280,6 +316,7 @@ const LEGACY_KEYS: &[&str] = &[
 
 const VALID_TURN_STATE_MODES: &[&str] = &["passthrough", "strip", "pin"];
 const VALID_PIN_STRATEGIES: &[&str] = &["rotate", "pinned"];
+const VALID_EGRESS_MODES: &[&str] = &["account_proxy", "static_pool", "proxy_api", "quya_random"];
 const VALID_FINGERPRINT_MODES: &[&str] = &["passthrough", "machine"];
 const VALID_TG_EVENTS: &[&str] = &["degrade_only", "degrade_recover", "all"];
 const VALID_TG_MODES: &[&str] = &["immediate", "digest"];
@@ -317,6 +354,34 @@ impl PluginConfig {
 
     /// 补齐系统管理字段。
     fn normalize(&mut self) {
+        // 0.7.8 及更早版本只有动态 API 布尔开关；首次读取旧配置时迁移为互斥模式。
+        let egress_mode = self
+            .egress_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|mode| !mode.is_empty())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_else(|| {
+                if self.egress_proxy_api_enabled {
+                    "proxy_api".to_string()
+                } else if self.egress_pool_list().is_empty() {
+                    "account_proxy".to_string()
+                } else {
+                    "static_pool".to_string()
+                }
+            });
+        self.egress_proxy_api_enabled = egress_mode == "proxy_api";
+        self.egress_mode = Some(egress_mode);
+
+        let mut plans = Vec::new();
+        for plan in &self.warming_plan_types {
+            let plan = normalize_plan_type(plan);
+            if !plan.is_empty() && !plans.contains(&plan) {
+                plans.push(plan);
+            }
+        }
+        self.warming_plan_types = plans;
+
         // 指纹总开关：默认关闭（统一指纹）。在设置里打开后变为"一账号一指纹"。
         let master = self.per_account_fingerprint.unwrap_or(false);
         self.per_account_fingerprint = Some(master);
@@ -344,19 +409,36 @@ impl PluginConfig {
             .collect()
     }
 
-    /// 实际参与轮转的静态池。动态 API 模式优先，开启后静态池被完整忽略。
+    /// 当前明确选择的出口模式。
+    pub fn egress_mode_value(&self) -> &str {
+        self.egress_mode.as_deref().unwrap_or("account_proxy")
+    }
+
+    pub fn uses_proxy_api(&self) -> bool {
+        self.egress_mode_value() == "proxy_api"
+    }
+
+    pub fn uses_quya_random(&self) -> bool {
+        self.egress_mode_value() == "quya_random"
+    }
+
+    /// 实际参与轮转的静态池。只有 static_pool 模式会返回条目，其它模式完整忽略。
     pub fn effective_egress_pool_list(&self) -> Vec<String> {
-        if self.egress_proxy_api_enabled {
-            Vec::new()
-        } else {
+        if self.egress_mode_value() == "static_pool" {
             self.egress_pool_list()
+        } else {
+            Vec::new()
         }
     }
 
     /// 是否配置了铸票出口池。决定 pin 模式下未锁票的格走不走专用出口，
     /// 以及休息编排「转满一圈」信号是否存在。
     pub fn egress_enabled(&self) -> bool {
-        self.egress_proxy_api_enabled || !self.egress_pool_list().is_empty()
+        match self.egress_mode_value() {
+            "static_pool" => !self.egress_pool_list().is_empty(),
+            "proxy_api" | "quya_random" => true,
+            _ => false,
+        }
     }
 
     /// 出口轮转器的「一圈长度」= 池条目数（每行一个独立出口 / 独立连接）。
@@ -407,6 +489,28 @@ impl PluginConfig {
         out
     }
 
+    /// 套餐范围匹配。空范围表示全部；配置了范围但账号套餐尚未同步时返回 false，
+    /// 使请求 fail-open 为 passthrough，而不是误把未知账号纳入 pin。
+    pub fn is_warming_plan_type(&self, plan_type: Option<&str>) -> bool {
+        if self.warming_plan_types.is_empty() {
+            return true;
+        }
+        let normalized = plan_type
+            .map(normalize_plan_type)
+            .filter(|plan| !plan.is_empty())
+            .unwrap_or_else(|| "unknown".to_string());
+        self.warming_plan_types.contains(&normalized)
+    }
+
+    pub fn quya_random_servers_list(&self) -> Vec<String> {
+        self.egress_quya_random_servers
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Telegram 通知是否启用：填了 token + chat_id 即开启（“填了就通知”）。
     pub fn tg_notify_enabled(&self) -> bool {
         !self.tg_bot_token.trim().is_empty() && !self.tg_chat_id.trim().is_empty()
@@ -432,6 +536,12 @@ impl PluginConfig {
             return Err(format!(
                 "pin_identity_strategy must be one of {}",
                 VALID_PIN_STRATEGIES.join("/")
+            ));
+        }
+        if !VALID_EGRESS_MODES.contains(&self.egress_mode_value()) {
+            return Err(format!(
+                "egress_mode must be one of {}",
+                VALID_EGRESS_MODES.join("/")
             ));
         }
         // 上限放宽到 24h：主判据是换发信号，这里只是兜底天花板，允许设得更宽。
@@ -469,7 +579,14 @@ impl PluginConfig {
         if self.egress_proxy_api_max_retries > 10 {
             return Err("egress_proxy_api_max_retries must be within 0..=10".to_string());
         }
-        if self.egress_proxy_api_enabled {
+        if matches!(
+            self.egress_mode_value(),
+            "static_pool" | "proxy_api" | "quya_random"
+        ) && self.turn_state_mode != "pin"
+        {
+            return Err("专用铸票出口需要 turn_state_mode=pin".to_string());
+        }
+        if self.uses_proxy_api() {
             if self.turn_state_mode != "pin" {
                 return Err(
                     "egress_proxy_api_enabled 需要 turn_state_mode=pin（动态代理只接管铸票出口）"
@@ -488,6 +605,25 @@ impl PluginConfig {
             if !self.use_account_proxy_after_lock {
                 return Err(
                     "动态代理 API 模式需要开启“锁定后使用账号原代理”（临时代理会话不持久化）"
+                        .to_string(),
+                );
+            }
+        }
+        if self.uses_quya_random() {
+            let servers = self.quya_random_servers_list();
+            if servers.is_empty() {
+                return Err("云桥随机 IPv6 模式需要至少填写一台代理服务器".to_string());
+            }
+            for server in &servers {
+                crate::proxy_api::parse_quya_gateway(server)
+                    .map_err(|_| format!("云桥代理服务器格式无效：{server}"))?;
+            }
+            if self.egress_quya_random_password.trim().is_empty() {
+                return Err("云桥随机 IPv6 模式需要填写共享分配密码".to_string());
+            }
+            if !self.use_account_proxy_after_lock {
+                return Err(
+                    "云桥随机 IPv6 模式需要开启“锁定后使用账号原代理”（随机租约只用于铸票）"
                         .to_string(),
                 );
             }
@@ -513,6 +649,14 @@ impl PluginConfig {
         }
         if self.canary_enabled && !(30..=86400).contains(&self.canary_interval_seconds) {
             return Err("canary_interval_seconds must be within 30..=86400".to_string());
+        }
+        if !self.warming_plan_types.is_empty()
+            && (self.admin_api_base.trim().is_empty() || self.admin_api_key.trim().is_empty())
+        {
+            return Err(
+                "限定账号套餐范围需要配置 admin_api_base 和 admin_api_key（用于读取 credentials.plan_type）"
+                    .to_string(),
+            );
         }
         if self.active_warming_enabled {
             if self.turn_state_mode != "pin" {
@@ -558,7 +702,7 @@ impl PluginConfig {
             }
             if !self.egress_enabled() {
                 return Err(
-                    "admin_warming_enabled 需要静态出口池或动态代理 API（全池造票需要专用出口）"
+                    "admin_warming_enabled 需要选择静态池、动态代理 API 或云桥随机 IPv6 出口"
                         .to_string(),
                 );
             }
@@ -569,13 +713,10 @@ impl PluginConfig {
                     .to_string(),
             );
         }
-        let pool = self.egress_pool_list();
-        if !pool.is_empty() {
-            if self.turn_state_mode != "pin" {
-                return Err(
-                    "egress_pool 需要 turn_state_mode=pin（按养池锁票状态决定走不走代理池）"
-                        .to_string(),
-                );
+        if self.egress_mode_value() == "static_pool" {
+            let pool = self.egress_pool_list();
+            if pool.is_empty() {
+                return Err("egress_mode=static_pool 需要至少一个静态代理地址".to_string());
             }
             for entry in &pool {
                 if !(entry.starts_with("socks5://")
@@ -895,6 +1036,47 @@ mod tests {
     }
 
     #[test]
+    fn plan_scope_normalizes_aliases_and_unknown_is_explicit() {
+        let cfg = PluginConfig::parse(
+            br#"{"admin_api_key":"k","warming_plan_types":[" Pro ","chatgpt_pro","self-serve-business-prolite","unknown"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.warming_plan_types,
+            vec![
+                "pro".to_string(),
+                "self_serve_business_prolite".to_string(),
+                "unknown".to_string()
+            ]
+        );
+        assert!(cfg.is_warming_plan_type(Some("CHATGPT_PRO")));
+        assert!(cfg.is_warming_plan_type(Some("self_serve_business_prolite")));
+        assert!(cfg.is_warming_plan_type(None));
+        assert!(!cfg.is_warming_plan_type(Some("plus")));
+        assert!(PluginConfig::parse(br#"{"warming_plan_types":["pro"]}"#).is_err());
+    }
+
+    #[test]
+    fn quya_random_is_mutually_exclusive_and_requires_account_proxy_after_lock() {
+        let cfg = PluginConfig::parse(
+            br#"{"turn_state_mode":"pin","egress_mode":"quya_random","egress_quya_random_servers":"142.54.187.42:49000\n107.150.62.202:49000","egress_quya_random_password":"secret","egress_pool":"not-a-proxy","egress_proxy_api_url":"not-a-url","use_account_proxy_after_lock":true}"#,
+        )
+        .unwrap();
+        assert!(cfg.uses_quya_random());
+        assert!(!cfg.uses_proxy_api());
+        assert!(cfg.effective_egress_pool_list().is_empty());
+        assert_eq!(cfg.quya_random_servers_list().len(), 2);
+
+        for raw in [
+            br#"{"turn_state_mode":"pin","egress_mode":"quya_random","egress_quya_random_servers":"142.54.187.42:49000","use_account_proxy_after_lock":true}"#.as_slice(),
+            br#"{"turn_state_mode":"pin","egress_mode":"quya_random","egress_quya_random_servers":"142.54.187.42:49000","egress_quya_random_password":"secret","use_account_proxy_after_lock":false}"#.as_slice(),
+            br#"{"turn_state_mode":"pin","egress_mode":"quya_random","egress_quya_random_servers":"bad","egress_quya_random_password":"secret","use_account_proxy_after_lock":true}"#.as_slice(),
+        ] {
+            assert!(PluginConfig::parse(raw).is_err());
+        }
+    }
+
+    #[test]
     fn admin_warming_defaults_and_validate() {
         // 默认：关，基址给了本地后端，key 空，间隔 60，模型 gpt-6-astra。
         let d = PluginConfig::parse(b"{}").unwrap();
@@ -1021,11 +1203,15 @@ mod tests {
             "per_account_cookie_jar",
             "max_request_body_mb",
             "max_cached_clients",
+            "warming_plan_types",
+            "egress_mode",
             "egress_proxy_api_enabled",
             "egress_proxy_api_url",
             "egress_proxy_api_retry_enabled",
             "egress_proxy_api_max_retries",
             "egress_proxy_api_fallback_to_account_proxy",
+            "egress_quya_random_servers",
+            "egress_quya_random_password",
             "use_account_proxy_after_lock",
             "identity",
         ] {

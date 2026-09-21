@@ -416,6 +416,9 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
     let account_id = src.account_id;
     let model = src.model;
     let config = state.current_config();
+    if !state.account_in_warming_scope(&config, account_id) {
+        return WarmReport::AlreadyLocked;
+    }
     let params = PinParams::from_config(
         config.pin_max_age_seconds,
         config.pin_fail_threshold,
@@ -431,8 +434,8 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
         return WarmReport::AlreadyLocked;
     }
 
-    // 铸票出口：动态代理 API 优先；未开启时使用静态 egress_pool 轮换。
-    let use_proxy_api = config.egress_proxy_api_enabled;
+    // 铸票出口由互斥 egress_mode 决定：第三方 API / 云桥随机 IPv6 / 静态池 / 账号原代理。
+    let use_dynamic_proxy = config.uses_proxy_api() || config.uses_quya_random();
     let egress_pool = config.effective_egress_pool_list();
     let egress_lap_len = config.egress_lap_len();
     let egress_threshold = config.egress_threshold_effective();
@@ -444,7 +447,7 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
             .current_index(account_id, model, egress_pool.len());
         pool_slot = idx + 1;
         egress_pool[idx].clone()
-    } else if use_proxy_api {
+    } else if use_dynamic_proxy {
         String::new()
     } else if src.bearer_override.is_none() {
         // 未配置专用铸票出口时，模板路径退化为账号原代理。
@@ -501,7 +504,7 @@ pub async fn warm_send(state: &Arc<SharedState>, src: WarmSource<'_>) -> WarmRep
         &state.clients,
         &config,
         account_id,
-        use_proxy_api,
+        use_dynamic_proxy,
         src.fallback_proxy_url,
         &proxy,
         pool_slot,
@@ -739,12 +742,21 @@ pub async fn admin_warm_loop(state: Arc<SharedState>) {
                 continue;
             }
         };
+        for target in &targets {
+            state
+                .account_plans
+                .insert(target.account_id, target.plan_type.clone());
+        }
 
         let models = config.warming_models_list();
         // 组装本轮 jobs：跳过已锁到有效 292 的格；其余并发探铸。
         let mut jobs: Vec<(i64, String, String, Option<String>, String)> = Vec::new();
         let mut skipped = 0u32;
         for t in &targets {
+            if !config.is_warming_plan_type(Some(&t.plan_type)) {
+                skipped = skipped.saturating_add(models.len() as u32);
+                continue;
+            }
             // 休息中的号（已被摘出调度）不铸票。正常它已不在 schedulable 列表里，
             // 这里再兜一层，防暂停与下一次枚举之间的竞态。
             if state.acct_rest.is_resting(t.account_id) {
@@ -850,9 +862,11 @@ impl AccountPruneStats {
 /// 应用一次完整账号快照。Err 原样返回且不触碰任何状态，保证宿主 API 异常时 fail-open。
 fn apply_existing_account_snapshot(
     state: &SharedState,
-    snapshot: Result<HashSet<i64>, String>,
+    snapshot: Result<crate::admin::ExistingAccountSnapshot, String>,
 ) -> Result<AccountPruneStats, String> {
-    let existing = snapshot?;
+    let snapshot = snapshot?;
+    let existing = snapshot.ids;
+    state.account_plans.replace(snapshot.plan_types);
     let config = state.current_config();
     let stats = AccountPruneStats {
         pool_cells: state.pool.retain_accounts(&existing),
@@ -881,7 +895,7 @@ pub async fn account_sync_loop(state: Arc<SharedState>) {
         if !base.is_empty() && !key.is_empty() {
             match apply_existing_account_snapshot(
                 &state,
-                crate::admin::fetch_existing_oauth_ids(base, key).await,
+                crate::admin::fetch_existing_oauth_snapshot(base, key).await,
             ) {
                 Ok(stats) if stats.total() > 0 => {
                     eprintln!(
@@ -973,10 +987,10 @@ pub async fn rest_loop(state: Arc<SharedState>) {
         let rest_ms = rest * 1000;
         let retry_ms = config.pin_giveup_retry_seconds as u64 * 1000;
 
-        // 1) 到点恢复：休息期满的号写回原优先级，并给它的养池格重开一圈出口池轮转。
+        // 1) 到点或套餐被排除时恢复：写回原优先级，并给它的养池格重开一圈出口池轮转。
         let mut resumed = 0u32;
         for (id, rest_until, orig) in state.acct_rest.paused_list() {
-            if now < rest_until {
+            if now < rest_until && state.account_in_warming_scope(&config, id) {
                 continue;
             }
             match crate::admin::set_account_priority(base, key, id, orig).await {
@@ -1007,6 +1021,9 @@ pub async fn rest_loop(state: Arc<SharedState>) {
         match crate::admin::fetch_schedulable_ids(base, key).await {
             Ok(ids) => {
                 for id in ids {
+                    if !state.account_in_warming_scope(&config, id) {
+                        continue;
+                    }
                     let mut rested_here = 0u32;
                     for m in &models {
                         if !state.egress.lap_exhausted(id, m)
@@ -1175,6 +1192,9 @@ pub async fn warm_loop(state: Arc<SharedState>) {
                 if !warming.contains(model) {
                     return false;
                 }
+                if !state.account_in_warming_scope(&config, *account_id) {
+                    return false;
+                }
                 // 休息中的号不铸票（已被摘出调度，真正休息）。
                 if state.acct_rest.is_resting(*account_id) {
                     return false;
@@ -1231,6 +1251,9 @@ pub async fn canary_loop(state: Arc<SharedState>) {
                 break;
             }
             if !warming.contains(&model) {
+                continue;
+            }
+            if !state.account_in_warming_scope(&config, account_id) {
                 continue;
             }
             // 跳过 bearer 极可能已失效的陈旧模板（>3h 无真实流量）。
@@ -1380,7 +1403,14 @@ mod tests {
         assert!(state.acct_rest.can_rest(10, 100, 0));
         assert!(state.acct_rest.can_rest(11, 100, 0));
 
-        let stats = apply_existing_account_snapshot(&state, Ok(HashSet::from([11]))).unwrap();
+        let stats = apply_existing_account_snapshot(
+            &state,
+            Ok(crate::admin::ExistingAccountSnapshot {
+                ids: HashSet::from([11]),
+                plan_types: HashMap::from([(11, "pro".to_string())]),
+            }),
+        )
+        .unwrap();
         assert_eq!(stats.pool_cells, 1);
         assert_eq!(stats.templates, 1);
         assert_eq!(stats.probe_identities, 1);
@@ -1390,6 +1420,7 @@ mod tests {
         assert!(state.pool.get_cell(11, "m").is_some());
         assert!(state.creds.get(10, "m").is_none());
         assert!(state.creds.get(11, "m").is_some());
+        assert_eq!(state.account_plans.get(11).as_deref(), Some("pro"));
     }
 
     #[test]

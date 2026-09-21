@@ -15,13 +15,16 @@
   legend { font-weight: 600; padding: 0 6px; }
   label { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
   label span.k { min-width: 200px; }
-  input[type=text], input[type=number], select { flex: 1; min-width: 160px; padding: 4px 8px; border: 1px solid rgba(128,128,128,.4); border-radius: 6px; background: transparent; color: inherit; }
+  input[type=text], input[type=password], input[type=number], select { flex: 1; min-width: 160px; padding: 4px 8px; border: 1px solid rgba(128,128,128,.4); border-radius: 6px; background: transparent; color: inherit; }
   .row { display: flex; gap: 10px; margin-top: 14px; align-items: center; }
   button { padding: 6px 18px; border-radius: 6px; border: 1px solid rgba(128,128,128,.4); background: rgba(128,128,128,.12); color: inherit; cursor: pointer; }
   button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
   #status { margin-left: 6px; opacity: .85; }
   .hint { font-size: 12px; opacity: .6; margin: 2px 0 0; }
-  .custom-only, .machine-only, .proxy-api-only { display: none; }
+  .custom-only, .machine-only, .proxy-api-only, .quya-random-only, .dynamic-egress-only { display: none; }
+  .scope-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px 10px; margin: 8px 0; }
+  .scope-grid label { margin: 0; padding: 6px 8px; border: 1px solid rgba(128,128,128,.3); border-radius: 6px; flex-wrap: nowrap; }
+  .scope-grid label.all { grid-column: 1 / -1; font-weight: 600; }
   details { border: 1px solid rgba(128,128,128,.35); border-radius: 8px; margin: 0 0 14px; padding: 0 14px; }
   details > summary { cursor: pointer; font-weight: 600; padding: 10px 4px; }
   details[open] { padding-bottom: 6px; }
@@ -60,6 +63,17 @@
     <label><span class="k">休息·排空优先级</span><input type="number" id="warming_drain_priority" min="0" max="1000000"></label>
     <label><span class="k">放弃铸票·卡住轮数(0=永不放弃)</span><input type="number" id="pin_giveup_rounds" min="0" max="100"></label>
     <label><span class="k">放弃铸票·重试间隔(秒)</span><input type="number" id="pin_giveup_retry_seconds" min="60" max="604800"></label>
+    <div class="scope-grid" id="warming-plan-types">
+      <label class="all"><input type="checkbox" id="warming_plan_all">全部账号套餐类型</label>
+      <label><input type="checkbox" data-plan-type="plus">Plus</label>
+      <label><input type="checkbox" data-plan-type="pro">Pro / ChatGPT Pro</label>
+      <label><input type="checkbox" data-plan-type="prolite">Pro Lite</label>
+      <label><input type="checkbox" data-plan-type="team">Team / Business Standard</label>
+      <label><input type="checkbox" data-plan-type="self_serve_business_prolite">Business Premium</label>
+      <label><input type="checkbox" data-plan-type="free">Free</label>
+      <label><input type="checkbox" data-plan-type="unknown">空值 / 未知套餐</label>
+    </div>
+    <p class="hint">默认“全部”。取消全部后可单选或多选；只有选中套餐会养池、捕获/注入锁票和到期前预刷新。套餐来自账号 <code>credentials.plan_type</code>，读取不到时按直通处理。限定套餐需填写下面的宿主 admin API 配置。</p>
     <p class="hint">被动=靠用户请求，上游出现 292/332 有效票就锁进池（默认开）。主动=对<b>已有过真实流量</b>的（账号×型号）、还没锁到有效票的格，后台用最小 hi 补票（走出口池轮换换 IP），锁到即停、TTL 过期再养。均需 turn_state_mode=pin。<br><b>休息机制（事件触发 + 优先级排空）</b>：休息<b>不按时间触发</b>。只有当某个号在养池模型上<b>没有任何有效票</b>、且出口池已经<b>整整轮转一圈仍铸不出有效票</b> 时才休息；手里有有效票的号、票过期后一圈内就能重新铸出的号永远不休息。休息 = 通过 admin API 把该号的调度<b>优先级</b>临时改成“排空优先级”：宿主只在分配<b>新会话</b>时看优先级，已粘住的老会话继续留在原号（不打散、提示缓存不丢），闲置满宿主粘性 TTL 自然脱落；期间不探铸。休息到点写回原优先级、重新开始轮转出口池铸票。“最短间隔”只是防抖。连续“转满一圈→休息”达“卡住轮数”的格进入<b>放弃铸票</b>：真实流量退回直通（走账号自己的出口、保留客户端会话身份、不换身份），养池不再探它，“重试间隔”后再给一圈机会。<b>需配 admin API + 开启任一养池 + 出口池非空</b>；建议配 pin 持久化路径（休息集含原优先级落盘，重启/关停都能写回，不会卡在低优先级）。</p>
   </fieldset>
 
@@ -182,16 +196,26 @@
     <fieldset>
       <legend>出口代理池（铸票出口）</legend>
       <label><span class="k">锁定后使用账号原代理</span><input type="checkbox" id="use_account_proxy_after_lock"></label>
-      <label><span class="k">使用代理 API（忽略静态池）</span><input type="checkbox" id="egress_proxy_api_enabled"></label>
+      <label><span class="k">铸票出口模式</span>
+        <select id="egress_mode">
+          <option value="account_proxy">账号原代理（关闭专用出口）</option>
+          <option value="static_pool">静态代理池</option>
+          <option value="proxy_api">第三方代理 API</option>
+          <option value="quya_random">云桥随机 IPv6</option>
+        </select>
+      </label>
       <label class="proxy-api-only"><span class="k">代理 API 地址</span><input type="text" id="egress_proxy_api_url" placeholder="https://provider.example/api?...&amp;responseType=txt"></label>
-      <label class="proxy-api-only"><span class="k">连接失败获取新代理重试</span><input type="checkbox" id="egress_proxy_api_retry_enabled"></label>
-      <label class="proxy-api-only"><span class="k">最大重试次数</span><input type="number" id="egress_proxy_api_max_retries" min="0" max="10"></label>
-      <label class="proxy-api-only"><span class="k">API/代理失败回退账号原代理</span><input type="checkbox" id="egress_proxy_api_fallback_to_account_proxy"></label>
+      <label class="quya-random-only" style="display:block"><span class="k">云桥代理服务器（一行一个）</span></label>
+      <textarea class="quya-random-only" id="egress_quya_random_servers" rows="3" style="width:100%;box-sizing:border-box;font-family:monospace" placeholder="142.54.187.42:49000&#10;107.150.62.202:49000"></textarea>
+      <label class="quya-random-only"><span class="k">云桥共享分配密码</span><input type="password" id="egress_quya_random_password" autocomplete="new-password"></label>
+      <label class="dynamic-egress-only"><span class="k">连接失败获取新代理重试</span><input type="checkbox" id="egress_proxy_api_retry_enabled"></label>
+      <label class="dynamic-egress-only"><span class="k">最大重试次数</span><input type="number" id="egress_proxy_api_max_retries" min="0" max="10"></label>
+      <label class="dynamic-egress-only"><span class="k">动态出口失败回退账号原代理</span><input type="checkbox" id="egress_proxy_api_fallback_to_account_proxy"></label>
       <div id="static-egress-fields">
         <label style="display:block"><span class="k">静态代理池（一行一个）</span></label>
         <textarea id="egress_pool" rows="6" style="width:100%;box-sizing:border-box;font-family:monospace" placeholder="socks5h://user:pass@1.2.3.4:1080&#10;http://user:pass@5.6.7.8:8080&#10;socks5h://[2a01:abc::1]:1080"></textarea>
       </div>
-      <p class="hint"><b>代理 API 模式</b>：每次未锁票的铸票请求先调用 API，读取首行 <code>host:port:user:password</code> 并以 SOCKS5H 出站；开启后不调用静态循环池。只有确认 SOCKS/TLS 尚未建连成功时才重新获取代理，避免已发送的 POST 被重复执行。重试耗尽或 API 失败时，可按开关回退账号原代理。动态代理是临时会话，因此必须开启“锁定后使用账号原代理”。<br><b>静态池模式</b>：每一行独立一条连接；每格独立游标，连续达到设置次数仍未获得 292/332 就换下一行。支持 socks5h:// / socks5:// / http:// / https://，空行与 # 注释行忽略。</p>
+      <p class="hint"><b>四种模式互斥</b>，未选模式的配置不会参与请求。<b>第三方代理 API</b>：每次铸票先读取 <code>host:port:user:password</code> 并以 SOCKS5H 出站。<b>云桥随机 IPv6</b>：每次铸票在两台网关间轮转并生成全新随机用户名，以 HTTP 代理分配新的 IPv6 出口；密码只保存在加密插件配置中。两种动态模式只在未锁票或预刷新时工作，并强制“锁定后使用账号原代理”。<br><b>静态池</b>：每行独立连接，每格连续达到门槛仍未获得 292/332 才换下一行。</p>
     </fieldset>
 
   </details>
@@ -260,6 +284,25 @@
     return Array.prototype.map.call(a, function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
   }
 
+  function planTypeBoxes() {
+    return Array.prototype.slice.call(document.querySelectorAll("[data-plan-type]"));
+  }
+
+  function setPlanTypes(types) {
+    var selected = Array.isArray(types) ? types : [];
+    byId("warming_plan_all").checked = selected.length === 0;
+    planTypeBoxes().forEach(function (box) {
+      box.checked = selected.indexOf(box.getAttribute("data-plan-type")) >= 0;
+    });
+  }
+
+  function collectPlanTypes() {
+    if (byId("warming_plan_all").checked) return [];
+    return planTypeBoxes().filter(function (box) { return box.checked; }).map(function (box) {
+      return box.getAttribute("data-plan-type");
+    });
+  }
+
   function fillForm(config) {
     config = config || {};
     var identity = config.identity || {};
@@ -295,11 +338,13 @@
     byId("canary_enabled").checked = config.canary_enabled === true;
     byId("canary_interval_seconds").value = config.canary_interval_seconds || 600;
     byId("egress_pool").value = config.egress_pool || "";
-    byId("egress_proxy_api_enabled").checked = config.egress_proxy_api_enabled === true;
+    byId("egress_mode").value = config.egress_mode || (config.egress_proxy_api_enabled === true ? "proxy_api" : ((config.egress_pool || "").trim() ? "static_pool" : "account_proxy"));
     byId("egress_proxy_api_url").value = config.egress_proxy_api_url || "";
     byId("egress_proxy_api_retry_enabled").checked = config.egress_proxy_api_retry_enabled !== false;
     byId("egress_proxy_api_max_retries").value = config.egress_proxy_api_max_retries != null ? config.egress_proxy_api_max_retries : 3;
     byId("egress_proxy_api_fallback_to_account_proxy").checked = config.egress_proxy_api_fallback_to_account_proxy !== false;
+    byId("egress_quya_random_servers").value = config.egress_quya_random_servers || "142.54.187.42:49000\n107.150.62.202:49000";
+    byId("egress_quya_random_password").value = config.egress_quya_random_password || "";
     byId("use_account_proxy_after_lock").checked = config.use_account_proxy_after_lock !== false;
     byId("passive_warming_enabled").checked = config.passive_warming_enabled !== false;
     byId("active_warming_enabled").checked = config.active_warming_enabled === true;
@@ -309,6 +354,7 @@
     byId("admin_api_key").value = config.admin_api_key || "";
     byId("admin_warming_interval_seconds").value = config.admin_warming_interval_seconds || 60;
     byId("warming_models").value = config.warming_models || "gpt-6-astra\ngpt-5.6-sol";
+    setPlanTypes(config.warming_plan_types);
     byId("warming_duty_seconds").value = config.warming_duty_seconds != null ? config.warming_duty_seconds : 1800;
     byId("warming_rest_seconds").value = config.warming_rest_seconds != null ? config.warming_rest_seconds : 600;
     byId("warming_drain_priority").value = config.warming_drain_priority != null ? config.warming_drain_priority : 9999;
@@ -344,11 +390,14 @@
       canary_enabled: byId("canary_enabled").checked,
       canary_interval_seconds: Number(byId("canary_interval_seconds").value) || 600,
       egress_pool: byId("egress_pool").value,
-      egress_proxy_api_enabled: byId("egress_proxy_api_enabled").checked,
+      egress_mode: byId("egress_mode").value,
+      egress_proxy_api_enabled: byId("egress_mode").value === "proxy_api",
       egress_proxy_api_url: byId("egress_proxy_api_url").value.trim(),
       egress_proxy_api_retry_enabled: byId("egress_proxy_api_retry_enabled").checked,
       egress_proxy_api_max_retries: Number(byId("egress_proxy_api_max_retries").value) || 0,
       egress_proxy_api_fallback_to_account_proxy: byId("egress_proxy_api_fallback_to_account_proxy").checked,
+      egress_quya_random_servers: byId("egress_quya_random_servers").value,
+      egress_quya_random_password: byId("egress_quya_random_password").value,
       use_account_proxy_after_lock: byId("use_account_proxy_after_lock").checked,
       passive_warming_enabled: byId("passive_warming_enabled").checked,
       active_warming_enabled: byId("active_warming_enabled").checked,
@@ -358,6 +407,7 @@
       admin_api_key: byId("admin_api_key").value.trim(),
       admin_warming_interval_seconds: Number(byId("admin_warming_interval_seconds").value) || 60,
       warming_models: byId("warming_models").value,
+      warming_plan_types: collectPlanTypes(),
       warming_duty_seconds: Number(byId("warming_duty_seconds").value) || 0,
       warming_rest_seconds: Number(byId("warming_rest_seconds").value) || 0,
       warming_drain_priority: Number(byId("warming_drain_priority").value) || 0,
@@ -396,12 +446,22 @@
     document.querySelectorAll(".machine-only").forEach(function (el) {
       el.style.display = isMachine ? "flex" : "none";
     });
-    var apiMode = byId("egress_proxy_api_enabled").checked;
+    var egressMode = byId("egress_mode").value;
+    var apiMode = egressMode === "proxy_api";
+    var quyaMode = egressMode === "quya_random";
+    var dynamicMode = apiMode || quyaMode;
     document.querySelectorAll(".proxy-api-only").forEach(function (el) {
       el.style.display = apiMode ? "flex" : "none";
     });
-    byId("static-egress-fields").style.display = apiMode ? "none" : "block";
-    if (apiMode) byId("use_account_proxy_after_lock").checked = true;
+    document.querySelectorAll(".quya-random-only").forEach(function (el) {
+      el.style.display = quyaMode ? (el.tagName === "TEXTAREA" ? "block" : "flex") : "none";
+    });
+    document.querySelectorAll(".dynamic-egress-only").forEach(function (el) {
+      el.style.display = dynamicMode ? "flex" : "none";
+    });
+    byId("static-egress-fields").style.display = egressMode === "static_pool" ? "block" : "none";
+    if (dynamicMode) byId("use_account_proxy_after_lock").checked = true;
+    byId("use_account_proxy_after_lock").disabled = dynamicMode;
     resize();
   }
 
@@ -411,7 +471,18 @@
 
   byId("profile").addEventListener("change", toggleConditional);
   byId("fingerprint_mode").addEventListener("change", toggleConditional);
-  byId("egress_proxy_api_enabled").addEventListener("change", toggleConditional);
+  byId("egress_mode").addEventListener("change", toggleConditional);
+  byId("warming_plan_all").addEventListener("change", function () {
+    if (this.checked) planTypeBoxes().forEach(function (box) { box.checked = false; });
+  });
+  planTypeBoxes().forEach(function (box) {
+    box.addEventListener("change", function () {
+      if (this.checked) byId("warming_plan_all").checked = false;
+      if (!planTypeBoxes().some(function (item) { return item.checked; })) {
+        byId("warming_plan_all").checked = true;
+      }
+    });
+  });
   document.querySelectorAll("details").forEach(function (d) {
     d.addEventListener("toggle", resize);
   });

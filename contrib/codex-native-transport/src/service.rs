@@ -375,6 +375,7 @@ pub struct SharedState {
     pub creds: crate::refresh::CredCache,
     pub probe_ids: crate::refresh::ProbeIdentityCache,
     pub proxy_api: crate::proxy_api::ProxyApiClient,
+    pub account_plans: AccountPlanCache,
     pub egress: Arc<EgressRotor>,
     pub acct_rest: AcctRest,
 }
@@ -389,6 +390,7 @@ impl SharedState {
             creds: crate::refresh::CredCache::new(),
             probe_ids: crate::refresh::ProbeIdentityCache::default(),
             proxy_api: crate::proxy_api::ProxyApiClient::default(),
+            account_plans: AccountPlanCache::default(),
             egress: Arc::new(EgressRotor::default()),
             acct_rest: AcctRest::default(),
         })
@@ -409,6 +411,40 @@ impl SharedState {
             }
         }
         config.identity.pinned_version.trim().to_string()
+    }
+
+    pub fn account_in_warming_scope(&self, config: &PluginConfig, account_id: i64) -> bool {
+        let plan_type = self.account_plans.get(account_id);
+        config.is_warming_plan_type(plan_type.as_deref())
+    }
+}
+
+#[derive(Default)]
+pub struct AccountPlanCache {
+    inner: RwLock<std::collections::HashMap<i64, String>>,
+}
+
+impl AccountPlanCache {
+    pub fn get(&self, account_id: i64) -> Option<String> {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&account_id)
+            .cloned()
+    }
+
+    pub fn replace(&self, plans: std::collections::HashMap<i64, String>) {
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = plans;
+    }
+
+    pub fn insert(&self, account_id: i64, plan_type: String) {
+        self.inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(account_id, plan_type);
     }
 }
 
@@ -493,6 +529,27 @@ impl TransportPlugin for TransportService {
                     );
                     self.state.pool.load_once(&config.pin_persist_path, &params);
                 }
+                // 套餐范围依赖宿主账号快照。配置保存后立即异步同步一次，避免等待后台
+                // 60 秒周期；失败时保持 fail-open passthrough，由后台循环继续重试。
+                {
+                    let config = self.state.current_config();
+                    if !config.warming_plan_types.is_empty()
+                        && !config.admin_api_base.trim().is_empty()
+                        && !config.admin_api_key.trim().is_empty()
+                    {
+                        let state = Arc::clone(&self.state);
+                        let base = config.admin_api_base;
+                        let key = config.admin_api_key;
+                        tokio::spawn(async move {
+                            match crate::admin::fetch_existing_oauth_snapshot(&base, &key).await {
+                                Ok(snapshot) => state.account_plans.replace(snapshot.plan_types),
+                                Err(err) => eprintln!(
+                                    "[codex-native-transport] plan scope sync after config failed, keeping passthrough: {err}"
+                                ),
+                            }
+                        });
+                    }
+                }
                 Ok(Response::new(ApplyConfigResponse {
                     applied: true,
                     message: String::new(),
@@ -526,8 +583,8 @@ impl TransportPlugin for TransportService {
         };
 
         let began = Instant::now();
-        let result = if config.egress_proxy_api_enabled {
-            // 配置测试必须验证代理 API 本身，不能因“失败回退”而把直连成功误报成 API 成功。
+        let result = if config.uses_proxy_api() || config.uses_quya_random() {
+            // 配置测试必须验证动态出口本身，不能因“失败回退”而把直连成功误报成出口成功。
             let mut test_config = config.clone();
             test_config.egress_proxy_api_fallback_to_account_proxy = false;
             crate::proxy_api::send_with_optional_proxy_api(
@@ -733,6 +790,7 @@ async fn run_forward(
     // pin 模式下也按 passthrough 处理：不走出口池、不换身份、不注入、不建格、不扫 SSE。
     let pin_active = ts_mode == "pin"
         && codex_backend
+        && state.account_in_warming_scope(&config, start.account_id)
         && outbound_model
             .as_deref()
             .is_some_and(|model| config.is_warming_model(model));
@@ -760,7 +818,7 @@ async fn run_forward(
         None
     };
     let mint_needed = pin_active && !parked && locked_ticket.is_none();
-    let use_proxy_api = mint_needed && config.egress_proxy_api_enabled;
+    let use_dynamic_proxy = mint_needed && (config.uses_proxy_api() || config.uses_quya_random());
     let egress_pool = config.effective_egress_pool_list();
     let egress_lap_len = config.egress_lap_len();
     let egress_threshold = config.egress_threshold_effective();
@@ -814,7 +872,10 @@ async fn run_forward(
     };
     let mut headers = transport::ordered_headers(&start.headers, codex_backend);
     // 采集 canary 模板（忠实快照：真实 URL/头/代理/体，含 bearer，仅内存不落盘）。
-    if let Some(model) = outbound_model.as_deref() {
+    if pin_active {
+        let model = outbound_model
+            .as_deref()
+            .expect("pin_active requires model");
         state.creds.record(
             start.account_id,
             model,
@@ -931,7 +992,7 @@ async fn run_forward(
         &state.clients,
         &config,
         start.account_id,
-        use_proxy_api,
+        use_dynamic_proxy,
         &start.proxy_url,
         &effective_proxy,
         pool_slot,
@@ -981,7 +1042,8 @@ async fn run_forward(
     };
     let response = sent.response;
     // API 回退到账号原代理时不把账号代理标成“专用铸票出口”。
-    let diag_egress = (use_pool || sent.used_api).then(|| transport::proxy_host(&sent.proxy_url));
+    let diag_egress = (use_pool || (use_dynamic_proxy && sent.used_api))
+        .then(|| transport::proxy_host(&sent.proxy_url));
 
     // 4. 响应头帧。
     let status_code = response.status().as_u16() as i32;

@@ -328,6 +328,9 @@ fn status_json(state: &Arc<SharedState>) -> String {
         if !warming.contains(&c.model) {
             continue;
         }
+        if !state.account_in_warming_scope(&config, c.account_id) {
+            continue;
+        }
         by_acct.entry(c.account_id).or_default().push(c);
     }
     let mut accts = Vec::with_capacity(by_acct.len());
@@ -431,8 +434,13 @@ fn status_json(state: &Arc<SharedState>) -> String {
             mrows.join(",")
         ));
     }
+    let warming_plan_names = if config.warming_plan_types.is_empty() {
+        "全部".to_string()
+    } else {
+        config.warming_plan_types.join(", ")
+    };
     format!(
-        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"refresh_before_expiry_s\":{},\"egress_pool_size\":{},\"egress_proxy_api\":{},\"use_account_proxy_after_lock\":{},\"accounts\":[{}]}}",
+        "{{\"mode\":{},\"strategy\":{},\"canary_enabled\":{},\"active_warming\":{},\"passive_warming\":{},\"warm_interval_s\":{},\"admin_warming\":{},\"admin_warm_interval_s\":{},\"warming_models\":{},\"warming_model_names\":{},\"warming_plan_types\":{},\"rest_s_cfg\":{},\"drain_priority\":{},\"giveup_rounds\":{},\"max_age_s\":{},\"refresh_before_expiry_s\":{},\"egress_pool_size\":{},\"egress_mode\":{},\"egress_proxy_api\":{},\"use_account_proxy_after_lock\":{},\"accounts\":[{}]}}",
         json_string(&config.turn_state_mode),
         json_string(&config.pin_identity_strategy),
         config.canary_enabled,
@@ -443,13 +451,15 @@ fn status_json(state: &Arc<SharedState>) -> String {
         config.admin_warming_interval_seconds,
         config.warming_models_list().len(),
         json_string(&config.warming_models_list().join(", ")),
+        json_string(&warming_plan_names),
         config.warming_rest_seconds,
         config.warming_drain_priority,
         config.pin_giveup_rounds,
         config.pin_max_age_seconds,
         config.pin_refresh_before_expiry_seconds,
         egress_pool_size,
-        config.egress_proxy_api_enabled,
+        json_string(config.egress_mode_value()),
+        config.uses_proxy_api(),
         config.use_account_proxy_after_lock,
         accts.join(",")
     )
@@ -574,10 +584,10 @@ async function load(){
     const r=await api('/api/status'); if(!r.ok) throw new Error('HTTP '+r.status);
     const d=await r.json();
     document.getElementById('err').textContent='';
-    const poolTxt = d.egress_proxy_api ? ' · 动态代理 API · 每次铸票获取新出口 · 锁票后账号原代理' : ((d.egress_pool_size>0) ? ` · 代理池 ${d.egress_pool_size} 个出口 · 锁票后${d.use_account_proxy_after_lock?'账号原代理':'保持铸票出口'}` : '');
+    const poolTxt = d.egress_mode==='proxy_api' ? ' · 第三方代理 API · 每次铸票获取新出口 · 锁票后账号原代理' : (d.egress_mode==='quya_random' ? ' · 云桥随机 IPv6 · 每次铸票新租约 · 锁票后账号原代理' : ((d.egress_pool_size>0) ? ` · 代理池 ${d.egress_pool_size} 个出口 · 锁票后${d.use_account_proxy_after_lock?'账号原代理':'保持铸票出口'}` : ''));
     const warmTxt = ` · 主动养池 ${d.active_warming?('on/'+d.warm_interval_s+'s'):'off'} · 被动养池 ${d.passive_warming?'on':'off'}`;
     const adminTxt = d.admin_warming?(` · 全池养池 on/${d.admin_warm_interval_s}s`):' · 全池养池 off';
-    const modelsTxt = ` · 关注模型 [${esc(d.warming_model_names||'')}]`;
+    const modelsTxt = ` · 关注模型 [${esc(d.warming_model_names||'')}] · 套餐 [${esc(d.warming_plan_types||'全部')}]`;
     const restTxt = (d.rest_s_cfg>0) ? ` · 休息 ${d.rest_s_cfg}s/排空优先级 ${d.drain_priority}/放弃 ${d.giveup_rounds}轮` : ' · 休息 off';
     document.getElementById('meta').textContent=`模式 ${d.mode} · 策略 ${d.strategy}${modelsTxt} · canary ${d.canary_enabled?'on':'off'}${warmTxt}${adminTxt}${restTxt} · TTL ${d.max_age_s}s${poolTxt}`;
     const box=document.getElementById('accts'); box.innerHTML='';
