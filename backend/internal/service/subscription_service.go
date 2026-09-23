@@ -56,6 +56,7 @@ type SubscriptionService struct {
 	subCacheJitter int // 抖动百分比
 
 	maintenanceQueue *SubscriptionMaintenanceQueue
+	autoResetEnabled bool
 	now              func() time.Time
 }
 
@@ -68,6 +69,9 @@ func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscript
 		entClient:           entClient,
 		now:                 time.Now,
 	}
+	if cfg != nil {
+		svc.autoResetEnabled = cfg.SubscriptionMaintenance.AutoResetEnabled
+	}
 	svc.initSubCache(cfg)
 	svc.initMaintenanceQueue(cfg)
 	svc.StartSubCacheInvalidationSubscriber(context.Background())
@@ -75,7 +79,7 @@ func NewSubscriptionService(groupRepo GroupRepository, userSubRepo UserSubscript
 }
 
 func (s *SubscriptionService) initMaintenanceQueue(cfg *config.Config) {
-	if cfg == nil {
+	if cfg == nil || !s.autoResetEnabled {
 		return
 	}
 	mc := cfg.SubscriptionMaintenance
@@ -785,7 +789,7 @@ func (s *SubscriptionService) ListUserSubscriptions(ctx context.Context, userID 
 	if err != nil {
 		return nil, err
 	}
-	normalizeExpiredWindows(subs)
+	s.prepareSubscriptionsForDisplay(subs)
 	normalizeSubscriptionStatus(subs)
 	return subs, nil
 }
@@ -796,7 +800,7 @@ func (s *SubscriptionService) ListActiveUserSubscriptions(ctx context.Context, u
 	if err != nil {
 		return nil, err
 	}
-	normalizeExpiredWindows(subs)
+	s.prepareSubscriptionsForDisplay(subs)
 	return subs, nil
 }
 
@@ -807,7 +811,7 @@ func (s *SubscriptionService) ListGroupSubscriptions(ctx context.Context, groupI
 	if err != nil {
 		return nil, nil, err
 	}
-	normalizeExpiredWindows(subs)
+	s.prepareSubscriptionsForDisplay(subs)
 	normalizeSubscriptionStatus(subs)
 	return subs, pag, nil
 }
@@ -819,9 +823,24 @@ func (s *SubscriptionService) List(ctx context.Context, page, pageSize int, user
 	if err != nil {
 		return nil, nil, err
 	}
-	normalizeExpiredWindows(subs)
+	s.prepareSubscriptionsForDisplay(subs)
 	normalizeSubscriptionStatus(subs)
 	return subs, pag, nil
+}
+
+func (s *SubscriptionService) prepareSubscriptionsForDisplay(subs []UserSubscription) {
+	if s.autoResetEnabled {
+		normalizeExpiredWindows(subs)
+		return
+	}
+	for i := range subs {
+		// Window timestamps only drive automatic-reset countdowns in the UI.
+		// Keep the accumulated usage visible while suppressing a reset that will
+		// never happen when automatic maintenance is disabled.
+		subs[i].DailyWindowStart = nil
+		subs[i].WeeklyWindowStart = nil
+		subs[i].MonthlyWindowStart = nil
+	}
 }
 
 // normalizeExpiredWindows 将已过期窗口的数据清零（仅影响返回数据，不影响数据库）
@@ -911,6 +930,9 @@ func (s *SubscriptionService) AdminResetQuota(ctx context.Context, subscriptionI
 
 // CheckAndResetWindows 检查并重置过期的窗口
 func (s *SubscriptionService) CheckAndResetWindows(ctx context.Context, sub *UserSubscription) error {
+	if s == nil || !s.autoResetEnabled {
+		return nil
+	}
 	now := s.now()
 	needsInvalidateCache := false
 
@@ -965,6 +987,9 @@ func (s *SubscriptionService) EnsureWindowMaintenance(ctx context.Context, sub *
 	if sub == nil {
 		return nil, ErrSubscriptionNilInput
 	}
+	if !s.autoResetEnabled {
+		return sub, nil
+	}
 	if !sub.IsWindowActivated() {
 		if err := s.CheckAndActivateWindow(ctx, sub); err != nil {
 			return nil, err
@@ -1015,22 +1040,24 @@ func (s *SubscriptionService) ValidateAndCheckLimits(sub *UserSubscription, grou
 		return false, ErrSubscriptionExpired
 	}
 
-	// 2. 内存中修正过期窗口的用量，确保预检查不会误拒绝用户。
-	//    调用方随后同步推进 DB 窗口，并用回读快照重新校验。
-	if sub.canAutomaticallyResetDailyAt(now) {
-		sub.DailyUsageUSD = 0
-		needsMaintenance = true
-	}
-	if sub.canAutomaticallyResetWeeklyAt(now) {
-		sub.WeeklyUsageUSD = 0
-		needsMaintenance = true
-	}
-	if sub.canAutomaticallyResetMonthlyAt(now) {
-		sub.MonthlyUsageUSD = 0
-		needsMaintenance = true
-	}
-	if !sub.IsWindowActivated() {
-		needsMaintenance = true
+	// 2. 自动维护开启时，在内存中修正过期窗口的用量，并由调用方同步推进 DB 窗口。
+	//    关闭时历史用量持续累计，达到限额后保持拒绝，直到管理员手动重置或创建新订阅。
+	if s.autoResetEnabled {
+		if sub.canAutomaticallyResetDailyAt(now) {
+			sub.DailyUsageUSD = 0
+			needsMaintenance = true
+		}
+		if sub.canAutomaticallyResetWeeklyAt(now) {
+			sub.WeeklyUsageUSD = 0
+			needsMaintenance = true
+		}
+		if sub.canAutomaticallyResetMonthlyAt(now) {
+			sub.MonthlyUsageUSD = 0
+			needsMaintenance = true
+		}
+		if !sub.IsWindowActivated() {
+			needsMaintenance = true
+		}
 	}
 
 	// 3. 检查用量限额
@@ -1053,7 +1080,7 @@ func (s *SubscriptionService) ValidateAndCheckLimits(sub *UserSubscription, grou
 // 而 IsExpired()=true 的订阅在 ValidateAndCheckLimits 中已被拦截返回错误，
 // 因此进入此方法的订阅一定未过期，无需处理过期状态同步。
 func (s *SubscriptionService) DoWindowMaintenance(sub *UserSubscription) {
-	if s == nil {
+	if s == nil || !s.autoResetEnabled {
 		return
 	}
 	if s.maintenanceQueue != nil {
