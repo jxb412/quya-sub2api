@@ -89,8 +89,9 @@ func TestSimpleModeBypassesQuotaCheck(t *testing.T) {
 		},
 	}
 
-	t.Run("standard_mode_completes_maintenance_before_request", func(t *testing.T) {
+		t.Run("standard_mode_completes_maintenance_before_request", func(t *testing.T) {
 		cfg := &config.Config{RunMode: config.RunModeStandard}
+		cfg.SubscriptionMaintenance.AutoResetEnabled = true
 		cfg.SubscriptionMaintenance.WorkerCount = 1
 		cfg.SubscriptionMaintenance.QueueSize = 1
 
