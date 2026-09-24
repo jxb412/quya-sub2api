@@ -6,9 +6,14 @@
 //! reqwest/native-tls/hyper/h2 栈发出。依赖版本按 Codex 参考版本固定；是否
 //! 与某个官方客户端版本完全一致，仍需通过对应版本的抓包和回归测试确认。
 
+mod admin;
+mod bps;
 mod config;
+mod donor;
 mod goplugin;
 mod identity;
+mod intel;
+mod panel;
 mod service;
 mod transport;
 mod version_sync;
@@ -97,6 +102,13 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     let state = service::SharedState::new();
     // 后台版本自动同步（配置热更新后自动生效，无需重启任务）。
     tokio::spawn(version_sync::run(std::sync::Arc::clone(&state)));
+    // 账号智力巡检自动循环（intel_enabled && intel_loop_enabled 时才真正跑）。
+    tokio::spawn(intel::intel_loop(std::sync::Arc::clone(&state)));
+    // 内嵌管理面板（配置 panel_addr + panel_token 后才会绑定端口）。
+    panel::spawn(
+        std::sync::Arc::clone(&state),
+        tokio::runtime::Handle::current(),
+    );
     let transport_service = service::TransportService::new(state);
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);

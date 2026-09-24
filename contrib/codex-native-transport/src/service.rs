@@ -1,5 +1,6 @@
 //! Sub2API TransportPlugin gRPC 服务实现。
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -10,7 +11,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::config::PluginConfig;
+use crate::donor::TemplateCache;
 use crate::identity;
+use crate::intel::{DegradeStore, IntelStore};
 use crate::proto::sub2api::plugin::v1::{
     forward_request, forward_response, transport_plugin_server::TransportPlugin,
     ApplyConfigRequest, ApplyConfigResponse, ForwardRequest, ForwardRequestStart, ForwardResponse,
@@ -30,10 +33,102 @@ const CAPABILITY: &str = "openai.oauth.outbound_transport.v1";
 
 const TEST_URL: &str = "https://chatgpt.com/robots.txt";
 
+/// 会话级通道粘滞 + 账号级 BPS 失败冷却。
+///
+/// 目的是让「换通道」对客户端尽量透明：
+/// * 同一个会话一旦走过 BPS，就继续走 BPS 直到它空闲超过
+///   `bps_session_sticky_seconds`，避免会话中途换端点把上游 prompt cache 亲和打断；
+/// * BPS 出站失败回退过的会话，本会话内不再试 BPS，同时给该号一个冷却期，
+///   避免每个请求都先撞一次失败再回退（那会让客户端明显变慢）。
+#[derive(Default)]
+pub struct ChannelSticky {
+    inner: std::sync::Mutex<StickyInner>,
+}
+
+#[derive(Default)]
+struct StickyInner {
+    /// 会话键 -> (是否走 BPS, 最后使用时间 ms)
+    sessions: HashMap<String, (bool, u64)>,
+    /// 账号 -> BPS 失败冷却截止时间 ms
+    cooldown: HashMap<i64, u64>,
+}
+
+const STICKY_MAX_SESSIONS: usize = 8192;
+
+impl ChannelSticky {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StickyInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// 这个会话上一次是不是走的 BPS（超出粘滞窗口则视为过期）。
+    pub fn session_wants_bps(&self, key: &str, now: u64, ttl_ms: u64) -> bool {
+        if ttl_ms == 0 {
+            return false;
+        }
+        let mut guard = self.lock();
+        guard
+            .sessions
+            .retain(|_, (_, last)| now.saturating_sub(*last) <= ttl_ms);
+        guard
+            .sessions
+            .get(key)
+            .map(|(bps, _)| *bps)
+            .unwrap_or(false)
+    }
+
+    pub fn mark_session(&self, key: &str, bps: bool, now: u64) {
+        let mut guard = self.lock();
+        if guard.sessions.len() >= STICKY_MAX_SESSIONS {
+            guard.sessions.clear();
+        }
+        guard.sessions.insert(key.to_string(), (bps, now));
+    }
+
+    pub fn cooldown_active(&self, account_id: i64, now: u64) -> bool {
+        self.lock()
+            .cooldown
+            .get(&account_id)
+            .map(|until| now < *until)
+            .unwrap_or(false)
+    }
+
+    pub fn set_cooldown(&self, account_id: i64, until_ms: u64) {
+        self.lock().cooldown.insert(account_id, until_ms);
+    }
+}
+
+/// BPS 出站失败：本会话退回正常通道，并给这个号一个冷却期，
+/// 避免每个请求都先撞一次失败再回退（那会让客户端明显变慢）。
+fn note_bps_failure(
+    state: &Arc<SharedState>,
+    account_id: i64,
+    sticky_key: Option<&str>,
+    config: &PluginConfig,
+) {
+    let now = crate::donor::now_ms();
+    if let Some(key) = sticky_key {
+        state.channels.mark_session(key, false, now);
+    }
+    let cooldown_ms = config.bps_fallback_cooldown_seconds as u64 * 1000;
+    if cooldown_ms > 0 {
+        state.channels.set_cooldown(account_id, now + cooldown_ms);
+    }
+}
+
 pub struct SharedState {
     pub config: RwLock<PluginConfig>,
     pub clients: ClientCache,
     pub version: VersionCache,
+    /// 最近一条真实 Codex 流量形状（巡检 / BPS 自检借形状用）。
+    pub template: TemplateCache,
+    /// 账号智力巡检结论仓。
+    pub intel: IntelStore,
+    /// 每账号「自动降智处理」开关。
+    pub degrade: DegradeStore,
+    /// 会话级通道粘滞 + BPS 失败冷却。
+    pub channels: ChannelSticky,
 }
 
 impl SharedState {
@@ -42,6 +137,10 @@ impl SharedState {
             config: RwLock::new(PluginConfig::default()),
             clients: ClientCache::default(),
             version: VersionCache::default(),
+            template: TemplateCache::default(),
+            intel: IntelStore::default(),
+            degrade: DegradeStore::default(),
+            channels: ChannelSticky::default(),
         })
     }
 
@@ -332,6 +431,22 @@ async fn run_forward(
         }
     };
 
+    // 2.1 留一条真实流量形状给巡检 / BPS 自检复用（只记形状，不落盘）。
+    if identity::is_codex_backend_request(&start.url) && start.url.contains("/responses") {
+        let template_headers: Vec<(String, Vec<String>)> = start
+            .headers
+            .iter()
+            .map(|(name, values)| (name.clone(), values.values.clone()))
+            .collect();
+        state.template.record(
+            &start.url,
+            template_headers,
+            &body,
+            crate::donor::now_ms(),
+            2 * 1024 * 1024,
+        );
+    }
+
     // 3. 构造请求：方法 + URL + canonical 顺序的请求头 + 定长请求体。
     let method = match reqwest::Method::from_bytes(start.method.as_bytes()) {
         Ok(method) => method,
@@ -391,26 +506,175 @@ async fn run_forward(
         }
     }
 
+    // 3.2 降智账号 BPS 通道（默认关）：仅对勾了「自动降智处理」的账号、且仅对
+    //     bps_models 列出的模型生效。改写后出站 URL 换成 BPS 端点，
+    //     请求体剥掉客户端 tools，响应流再把载体工具翻译回真实 function_call。
+    let mut bps_stream: Option<crate::bps::BpsStream> = None;
+    // 追踪用：这条请求的账号 / 模型（面板 `/api/bps/stream` 显示）。
+    let bps_trace_account = start.account_id;
+    let mut bps_trace_model = String::new();
+    // BPS 出站失败（4xx/5xx 或传输错误）时用来立刻回退到正常 Codex 通道的原始请求，
+    // 保证这条实验通道永远不会把客户端卡死。
+    let mut bps_fallback: Option<(String, reqwest::header::HeaderMap, Vec<u8>)> = None;
+    let mut request_url = start.url.clone();
+    // 本会话（账号 + 会话键）的通道粘滞键：避免同一会话中途换端点撕裂上游缓存。
+    let mut sticky_key: Option<String> = None;
+    if codex_backend && config.bps_enabled {
+        state.degrade.ensure_loaded(&config.degrade_state_file());
+        let now = crate::donor::now_ms();
+        let decision = state.degrade.decision(start.account_id, &config, now);
+        let sticky_ms = config.bps_session_sticky_seconds as u64 * 1000;
+        let conversation_key = bps_conversation_key(&start.headers, &body);
+        sticky_key = conversation_key
+            .as_ref()
+            .map(|key| format!("{}:{key}", start.account_id));
+        let sticky_bps = sticky_key
+            .as_deref()
+            .map(|key| state.channels.session_wants_bps(key, now, sticky_ms))
+            .unwrap_or(false);
+        let cooling = state.channels.cooldown_active(start.account_id, now);
+        // 不合格 → 立刻走 BPS；已恢复 → 进行中的会话继续留在 BPS（缓存亲和），
+        // 只有新会话才用正常通道；BPS 刚失败过 → 冷却期内直接用正常通道。
+        let use_bps = decision.enabled && !cooling && (decision.use_bps || sticky_bps);
+        if use_bps {
+            if let Some(key) = sticky_key.as_deref() {
+                state.channels.mark_session(key, true, now);
+            }
+            let model = body_model(&body);
+            if let Some(model) = model {
+                bps_trace_model = model.clone();
+                if crate::bps::is_bps_model(&config.bps_model_list(), &model) {
+                    let bridge = crate::bps::BridgeOptions::from_config(&config);
+                    if let Some(rewritten) =
+                        crate::bps::prepare_request(&body, conversation_key.as_deref(), &bridge)
+                    {
+                        state.degrade.mark_bps_used(start.account_id, now);
+                        // 诊断留痕：这条请求原样带了哪些客户端工具、桥接是否把目录写进提示词。
+                        crate::bps::remember_last_rewrite(crate::bps::rewrite_note(
+                            start.account_id,
+                            &model,
+                            bridge.mode,
+                            &body,
+                            config.bps_endpoint.trim(),
+                        ));
+                        let targets = crate::bps::call_targets(&body);
+                        bps_fallback = Some((request_url.clone(), headers.clone(), body.clone()));
+                        body = rewritten;
+                        request_url = config.bps_endpoint.trim().to_string();
+                        if let Ok(value) = reqwest::header::HeaderValue::from_str("chatgpt") {
+                            headers.insert("x-basispoints-auth-mode", value);
+                        }
+                        // 与 Excel 插件真实出站对齐的两个头。
+                        if let Ok(value) =
+                            reqwest::header::HeaderValue::from_str("https://bps.openai.com")
+                        {
+                            headers.insert("origin", value);
+                        }
+                        if let Ok(value) = reqwest::header::HeaderValue::from_str("identity") {
+                            headers.insert("accept-encoding", value);
+                        }
+                        bps_stream = Some(crate::bps::BpsStream::with_targets(&bridge, targets));
+                    }
+                }
+            }
+        } else if let Some(key) = sticky_key.as_deref() {
+            // 本会话改走正常通道：记下来，避免它下一轮又被粘回 BPS。
+            state.channels.mark_session(key, false, now);
+        }
+    }
+    let bps_active = bps_stream.is_some();
+
     let began = Instant::now();
     let request = client
-        .request(method, &start.url)
+        .request(method.clone(), &request_url)
         .headers(headers)
         .body(body);
 
-    let response = match request.send().await {
+    let mut response = match request.send().await {
         Ok(response) => response,
         Err(err) => {
-            let classified = transport::classify_reqwest_error(&err);
-            let _ = tx
-                .send(Ok(error_frame(
-                    classified.code,
-                    classified.message,
-                    classified.request_sent,
-                )))
-                .await;
-            return;
+            // BPS 连接层失败：直接回退原通道，别把错误丢给客户端。
+            if let Some((url, fallback_headers, original_body)) = bps_fallback.take() {
+                note_bps_failure(&state, start.account_id, sticky_key.as_deref(), &config);
+                eprintln!(
+                    "[codex-native-transport] bps transport error ({}), falling back to {url}",
+                    transport::classify_reqwest_error(&err).message
+                );
+                match client
+                    .request(method.clone(), &url)
+                    .headers(fallback_headers)
+                    .body(original_body)
+                    .send()
+                    .await
+                {
+                    Ok(retry) => {
+                        bps_stream = None;
+                        retry
+                    }
+                    Err(err) => {
+                        let classified = transport::classify_reqwest_error(&err);
+                        let _ = tx
+                            .send(Ok(error_frame(
+                                classified.code,
+                                classified.message,
+                                classified.request_sent,
+                            )))
+                            .await;
+                        return;
+                    }
+                }
+            } else {
+                let classified = transport::classify_reqwest_error(&err);
+                let _ = tx
+                    .send(Ok(error_frame(
+                        classified.code,
+                        classified.message,
+                        classified.request_sent,
+                    )))
+                    .await;
+                return;
+            }
         }
     };
+    if let Some((url, headers, original_body)) = bps_fallback {
+        if !response.status().is_success() {
+            note_bps_failure(&state, start.account_id, sticky_key.as_deref(), &config);
+            let status = response.status().as_u16();
+            let snippet = response
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect::<String>();
+            eprintln!(
+                "[codex-native-transport] bps rejected with {status} ({snippet}), falling back to {url}"
+            );
+            match client
+                .request(method, &url)
+                .headers(headers)
+                .body(original_body)
+                .send()
+                .await
+            {
+                Ok(retry) => {
+                    response = retry;
+                    bps_stream = None;
+                }
+                Err(err) => {
+                    let classified = transport::classify_reqwest_error(&err);
+                    let _ = tx
+                        .send(Ok(error_frame(
+                            classified.code,
+                            format!("bps {status} 且回退原通道失败: {}", classified.message),
+                            classified.request_sent,
+                        )))
+                        .await;
+                    return;
+                }
+            }
+        }
+    }
 
     // 4. 响应头帧。
     let status_code = response.status().as_u16() as i32;
@@ -443,7 +707,8 @@ async fn run_forward(
                 protocol_major,
                 protocol_minor,
                 headers: header_map,
-                content_length,
+                // BPS 通道会重写 SSE 分帧，长度不再等于上游值，交给宿主按流读取。
+                content_length: if bps_active { -1 } else { content_length },
             })),
         }))
         .await
@@ -455,13 +720,21 @@ async fn run_forward(
     // 5. 流式转发响应体（SSE 逐块低延迟回传）。
     let mut stream = response.bytes_stream();
     let mut bytes_received: i64 = 0;
+    let mut bps = bps_stream;
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(bytes) => {
-                bytes_received += bytes.len() as i64;
+                let payload = match bps.as_mut() {
+                    Some(rewriter) => rewriter.push(&bytes),
+                    None => bytes.to_vec(),
+                };
+                if payload.is_empty() {
+                    continue;
+                }
+                bytes_received += payload.len() as i64;
                 if tx
                     .send(Ok(ForwardResponse {
-                        frame: Some(forward_response::Frame::BodyChunk(bytes.to_vec())),
+                        frame: Some(forward_response::Frame::BodyChunk(payload)),
                     }))
                     .await
                     .is_err()
@@ -483,6 +756,27 @@ async fn run_forward(
         }
     }
 
+    // BPS 通道：吐出末尾未成行/未完整分帧的残留字节。
+    if let Some(rewriter) = bps.as_mut() {
+        let rest = rewriter.finish();
+        if !rest.is_empty() {
+            bytes_received += rest.len() as i64;
+            if tx
+                .send(Ok(ForwardResponse {
+                    frame: Some(forward_response::Frame::BodyChunk(rest)),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+    // 诊断留痕：这条响应流的原始帧与改写结果（面板 `/api/bps/stream`）。
+    if let Some(rewriter) = bps.as_ref() {
+        crate::bps::remember_stream_trace(rewriter.trace(bps_trace_account, &bps_trace_model));
+    }
+
     let _ = tx
         .send(Ok(ForwardResponse {
             frame: Some(forward_response::Frame::End(ForwardResponseEnd {
@@ -491,4 +785,42 @@ async fn run_forward(
             })),
         }))
         .await;
+}
+/// 从请求体里取模型名（BPS 通道的路由判据）。
+fn body_model(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// BPS 通道的会话键：优先请求体里的 `prompt_cache_key`，其次 `session_id` /
+/// `thread-id` 头；用它派生稳定的 `metadata.task_id` / `metadata.turn_id`，
+/// 让同一会话的多轮请求在上游落在同一条缓存/路由亲和上。
+fn bps_conversation_key(headers: &HashMap<String, HeaderValues>, body: &[u8]) -> Option<String> {
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(key) = value
+            .get("prompt_cache_key")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Some(key.to_string());
+        }
+    }
+    for name in ["session_id", "thread-id", "x-codex-window-id"] {
+        if let Some(values) = headers.get(name) {
+            if let Some(value) = values
+                .values
+                .first()
+                .map(|item| item.trim().to_string())
+                .filter(|item| !item.is_empty())
+            {
+                return Some(value);
+            }
+        }
+    }
+    None
 }

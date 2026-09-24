@@ -84,6 +84,73 @@
     <label><span class="k">Client 缓存上限</span><input type="number" id="max_cached_clients" min="8" max="4096"></label>
   </fieldset>
 
+  <fieldset>
+    <legend>管理面板</legend>
+    <label><span class="k">面板监听地址</span><input type="text" id="panel_addr" placeholder="127.0.0.1:8848（空=关闭面板）"></label>
+    <label><span class="k">面板 token</span><input type="text" id="panel_token" placeholder="强随机串，绝不无鉴权暴露"></label>
+    <p class="hint">填 <code>127.0.0.1:8848</code> 只能本机访问；需要远程查看就填 <code>0.0.0.0:8848</code>（同时要在防火墙/安全组放行该端口）并务必使用强 token。面板只展示账号列表与巡检结论，不含任何凭据。</p>
+    <div class="row">
+      <button id="gen-token">生成随机 token</button>
+      <button id="open-intel">打开智力巡检页</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>宿主管理 API</legend>
+    <label><span class="k">admin API 基址</span><input type="text" id="admin_api_base" placeholder="http://127.0.0.1:8080"></label>
+    <label><span class="k">admin API key</span><input type="text" id="admin_api_key" placeholder="后台设置的 admin_api_key（仅内存流转）"></label>
+    <p class="hint warn">智力巡检与降智通道都要靠它枚举账号、取 access_token、暂停/恢复调度。插件与宿主同容器时用 <code>http://127.0.0.1:8080</code>。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>账号智力巡检（降智检测 + 自动暂停）</legend>
+    <label><span class="k">开启智力巡检</span><input type="checkbox" id="intel_enabled"></label>
+    <p class="hint">总开关。关掉后连面板里的手动「检测」也不能用。</p>
+    <label><span class="k">自动循环巡检</span><input type="checkbox" id="intel_loop_enabled"></label>
+    <p class="hint">只控制「按间隔自动跑」。与总开关不冲突：总开关关 = 全停；总开关开 + 本项关 = 只能手动检测；两项都开 = 手动可用且按间隔自动跑。</p>
+    <label><span class="k">循环间隔(秒)</span><input type="number" id="intel_loop_interval_seconds" min="60" max="86400"></label>
+    <label><span class="k">不合格自动暂停 / 合格自动开启</span><input type="checkbox" id="intel_auto_pause"></label>
+    <p class="hint">面板里对单个账号开启了「降智处理」的，自动暂停会跳过它（改走降智通道）。</p>
+    <label><span class="k">巡检模型</span><input type="text" id="intel_model" placeholder="gpt-6-astra"></label>
+    <label><span class="k">巡检提问</span><input type="text" id="intel_prompt" placeholder="你在知识库日期 不允许联网快速回答"></label>
+    <label><span class="k">不合格标记（可多个，逗号分隔）</span><input type="text" id="intel_fail_marker" placeholder="2024, 无法确认, 没有提供"></label>
+    <p class="hint">回答里命中任意一个关键词即判「不合格」。建议除了 <code>2024</code> 再加上「无法确认 / 没有提供 / 无法确定」这类拒答措辞：降智号有时不提 2024，只说「我不知道自己的知识截止日期」，只用单一关键词会被误判成合格。</p>
+    <label><span class="k">巡检并发(1-16)</span><input type="number" id="intel_concurrency" min="1" max="16"></label>
+    <label><span class="k">单次提问超时(秒, 5-600)</span><input type="number" id="intel_prompt_timeout_seconds" min="5" max="600"></label>
+    <label><span class="k">提问失败重试次数(0-5)</span><input type="number" id="intel_prompt_retries" min="0" max="5"></label>
+    <label><span class="k">超时判定为不合格</span><input type="checkbox" id="intel_timeout_is_failed"></label>
+    <label><span class="k">连续合格几次才切回正常通道(1-10)</span><input type="number" id="intel_confirmations" min="1" max="10"></label>
+    <label><span class="k">回答里必须出现年份</span><input type="checkbox" id="intel_require_year"></label>
+    <p class="hint">勾上后：回答里没有 19xx/20xx 年份就判「不合格」。降智号除了答 2024，还会答「我不知道自己的知识截止日期」这种不含任何关键词的敷衍话，只靠关键词会把这种号误判成合格、又切回正常通道。</p>
+    <p class="hint">超时＝等满「单次提问超时」仍拿不到可判定内容（含重试全部用完）；勾上后按不合格处理（默认勾选，避免巡检卡住时把坏号当好人）。每次失败会重试「提问失败重试次数」次，间隔 0.8 秒。连续合格次数＝巡检连续 N 次判「合格」才算真的恢复（防抖动）。</p>
+    <label><span class="k">巡检覆盖套餐（逗号分隔，空=全部）</span><input type="text" id="intel_plan_types" placeholder="pro, plus, free"></label>
+    <label><span class="k">结论落盘路径</span><input type="text" id="intel_state_path" placeholder="/app/data/codex-native-transport/intel-state.json"></label>
+    <p class="hint">巡检借一条真实 Codex 流量做请求形状，因此需要先有真实业务流量经过插件。</p>
+  </fieldset>
+
+  <fieldset>
+    <legend>降智账号 BPS 通道（实验，默认关）</legend>
+    <label><span class="k">开启 BPS 降智通道</span><input type="checkbox" id="bps_enabled"></label>
+    <label><span class="k">BPS 端点</span><input type="text" id="bps_endpoint" placeholder="https://bps.openai.com/basispoints/api/responses"></label>
+    <label><span class="k">走 BPS 的模型（逗号分隔）</span><input type="text" id="bps_models" placeholder="gpt-6-astra, gpt-5.6-sol"></label>
+    <label><span class="k">工具桥接方案</span>
+      <select id="bps_tool_mode">
+        <option value="text">text：一行 JSON 文本协议（默认，实测最稳）</option>
+        <option value="native">native：历史工具项原生回放（ghcp_proxy 路线）</option>
+        <option value="officejs">officejs：原生回放 + run_officejs 运货卡车</option>
+      </select>
+    </label>
+    <label><span class="k">工具目录放到提示词末尾</span><input type="checkbox" id="bps_catalog_at_prompt_end"></label>
+    <label><span class="k">转发 prompt_cache_key</span><input type="checkbox" id="bps_forward_prompt_cache_key"></label>
+    <label><span class="k">context_management 阈值(0=不发)</span><input type="number" id="bps_context_management_threshold" min="0" max="2000000" placeholder="0"></label>
+    <label><span class="k">智力恢复后继续走 BPS(秒, 0=立即切回)</span><input type="number" id="bps_hold_after_healthy_seconds" min="0" max="86400"></label>
+    <label><span class="k">同会话粘滞时长(秒, 0=关)</span><input type="number" id="bps_session_sticky_seconds" min="0" max="86400"></label>
+    <label><span class="k">BPS 失败后冷却(秒, 0=关)</span><input type="number" id="bps_fallback_cooldown_seconds" min="0" max="3600"></label>
+    <p class="hint">切换节奏（让客户端不掉缓存）：<br>1) <b>恢复后保持期</b>：巡检连续「连续合格次数」次判合格后，账号不会立刻切回，而是继续走 BPS 直到保持期结束，避免在临界点来回跳；填 0 = 一合格就切回。<br>2) <b>同会话粘滞</b>：同一个会话（按 prompt_cache_key / 会话 id 派生）在粘滞时长内固定走同一条通道，一轮对话中途不会换上游，prompt cache 不会断；填 0 = 每个请求重新判定。<br>3) <b>BPS 失败冷却</b>：走 BPS 建连/HTTP 失败时，本次请求立刻改用原通道补发（客户端无感），并在冷却时间内不再尝试 BPS，避免每个请求都先撞一次失败。</p>
+    <label><span class="k">降智处理开关落盘路径</span><input type="text" id="degrade_state_path" placeholder="（空=与巡检结论同目录）"></label>
+    <p class="hint warn">面板里对单个账号点「降智处理」后：该号智力不合格**不再被自动暂停**，而是把上面这些模型的请求改走 BPS 端点，直到该号恢复合格。出站按上游白名单重写请求体（剥掉 tools / tool_choice / text / include / temperature / previous_response_id 等，store 固定 false，metadata 只留 task_id + turn_id），客户端工具目录与调用协议写成一条 developer 消息；模型按协议输出的一行 JSON 会被回程翻译成标准 function_call。<br>三种桥接方案（随时可切换，不用改客户端）：<br>• <b>text</b>：历史里的工具调用/结果转成文本消息，模型用一行 JSON 协议请求工具（默认，实测最稳）。<br>• <b>native</b>：历史里的 function_call / function_call_output 按原生 Responses item 形状回放，调用载体仍是一行 JSON 协议（ghcp_proxy 的 native 路线，工具状态机更自然）。<br>• <b>officejs</b>：在 native 基础上，让模型调用上游 Excel 插件的 run_officejs，把真正的工具请求写进它的 code 字段，代理拦截还原（上游当前未声明 run_officejs 时会自动退化成一行 JSON 协议）。<br>同一会话按 prompt_cache_key 派生稳定 task_id / turn_id，第二轮起命中上游缓存（实测 cached_tokens ≈ 99%）。⚠️ 单次请求输入开销约 17k token，建议只对确实被限流的账号开启；先用每行的「BPS自检」确认能拿到 2xx。</p>
+  </fieldset>
+
   <div class="row">
     <button class="primary" id="save">保存</button>
     <button id="test">测试连通性</button>
@@ -136,6 +203,13 @@
   });
 
   function byId(id) { return document.getElementById(id); }
+  // 数字输入：空串 / 非数字回落到默认值（避免清空输入框把配置写成 null）。
+  function numOr(value, fallback) {
+    var raw = String(value == null ? "" : value).trim();
+    if (raw === "") return fallback;
+    var n = Number(raw);
+    return isNaN(n) ? fallback : n;
+  }
   function setStatus(text, ok) {
     var status = byId("status");
     status.textContent = text;
@@ -164,6 +238,36 @@
     byId("connect_timeout_seconds").value = config.connect_timeout_seconds || 0;
     byId("max_request_body_mb").value = config.max_request_body_mb || 128;
     byId("max_cached_clients").value = config.max_cached_clients || 256;
+    byId("panel_addr").value = config.panel_addr || "";
+    byId("panel_token").value = config.panel_token || "";
+    byId("admin_api_base").value = config.admin_api_base || "http://127.0.0.1:8080";
+    byId("admin_api_key").value = config.admin_api_key || "";
+    byId("intel_enabled").checked = config.intel_enabled === true;
+    byId("intel_loop_enabled").checked = config.intel_loop_enabled === true;
+    byId("intel_auto_pause").checked = config.intel_auto_pause === true;
+    byId("intel_loop_interval_seconds").value = config.intel_loop_interval_seconds != null ? config.intel_loop_interval_seconds : 3600;
+    byId("intel_model").value = config.intel_model || "gpt-6-astra";
+    byId("intel_prompt").value = config.intel_prompt || "你在知识库日期 不允许联网快速回答";
+    byId("intel_fail_marker").value = config.intel_fail_marker || "2024";
+    byId("intel_concurrency").value = config.intel_concurrency != null ? config.intel_concurrency : 4;
+    byId("intel_prompt_timeout_seconds").value = config.intel_prompt_timeout_seconds != null ? config.intel_prompt_timeout_seconds : 45;
+    byId("intel_prompt_retries").value = config.intel_prompt_retries != null ? config.intel_prompt_retries : 1;
+    byId("intel_timeout_is_failed").checked = config.intel_timeout_is_failed !== false;
+    byId("intel_confirmations").value = config.intel_confirmations != null ? config.intel_confirmations : 1;
+    byId("intel_require_year").checked = config.intel_require_year !== false;
+    byId("intel_plan_types").value = (config.intel_plan_types || []).join(", ");
+    byId("intel_state_path").value = config.intel_state_path || "";
+    byId("bps_enabled").checked = config.bps_enabled === true;
+    byId("bps_endpoint").value = config.bps_endpoint || "https://bps.openai.com/basispoints/api/responses";
+    byId("bps_models").value = (config.bps_models || []).join(", ");
+    byId("bps_tool_mode").value = config.bps_tool_mode || "text";
+    byId("bps_catalog_at_prompt_end").checked = config.bps_catalog_at_prompt_end === true;
+    byId("bps_forward_prompt_cache_key").checked = config.bps_forward_prompt_cache_key !== false;
+    byId("bps_context_management_threshold").value = config.bps_context_management_threshold != null ? config.bps_context_management_threshold : 0;
+    byId("bps_hold_after_healthy_seconds").value = config.bps_hold_after_healthy_seconds != null ? config.bps_hold_after_healthy_seconds : 900;
+    byId("bps_session_sticky_seconds").value = config.bps_session_sticky_seconds != null ? config.bps_session_sticky_seconds : 1800;
+    byId("bps_fallback_cooldown_seconds").value = config.bps_fallback_cooldown_seconds != null ? config.bps_fallback_cooldown_seconds : 120;
+    byId("degrade_state_path").value = config.degrade_state_path || "";
     toggleConditional();
   }
 
@@ -175,6 +279,36 @@
       one_id_per_request: byId("one_id_per_request").checked,
       max_request_body_mb: Number(byId("max_request_body_mb").value) || 128,
       max_cached_clients: Number(byId("max_cached_clients").value) || 256,
+      panel_addr: byId("panel_addr").value.trim(),
+      panel_token: byId("panel_token").value.trim(),
+      admin_api_base: byId("admin_api_base").value.trim(),
+      admin_api_key: byId("admin_api_key").value.trim(),
+      intel_enabled: byId("intel_enabled").checked,
+      intel_loop_enabled: byId("intel_loop_enabled").checked,
+      intel_auto_pause: byId("intel_auto_pause").checked,
+      intel_loop_interval_seconds: Number(byId("intel_loop_interval_seconds").value) || 3600,
+      intel_model: byId("intel_model").value.trim() || "gpt-6-astra",
+      intel_prompt: byId("intel_prompt").value.trim() || "你在知识库日期 不允许联网快速回答",
+      intel_fail_marker: byId("intel_fail_marker").value.trim() || "2024",
+      intel_concurrency: Number(byId("intel_concurrency").value) || 4,
+      intel_prompt_timeout_seconds: numOr(byId("intel_prompt_timeout_seconds").value, 45),
+      intel_prompt_retries: numOr(byId("intel_prompt_retries").value, 1),
+      intel_timeout_is_failed: byId("intel_timeout_is_failed").checked,
+      intel_confirmations: numOr(byId("intel_confirmations").value, 1),
+      intel_require_year: byId("intel_require_year").checked,
+      intel_plan_types: byId("intel_plan_types").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
+      intel_state_path: byId("intel_state_path").value.trim(),
+      bps_enabled: byId("bps_enabled").checked,
+      bps_endpoint: byId("bps_endpoint").value.trim(),
+      bps_models: byId("bps_models").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
+      bps_tool_mode: byId("bps_tool_mode").value,
+      bps_catalog_at_prompt_end: byId("bps_catalog_at_prompt_end").checked,
+      bps_forward_prompt_cache_key: byId("bps_forward_prompt_cache_key").checked,
+      bps_context_management_threshold: Number(byId("bps_context_management_threshold").value) || 0,
+      bps_hold_after_healthy_seconds: numOr(byId("bps_hold_after_healthy_seconds").value, 900),
+      bps_session_sticky_seconds: numOr(byId("bps_session_sticky_seconds").value, 1800),
+      bps_fallback_cooldown_seconds: numOr(byId("bps_fallback_cooldown_seconds").value, 120),
+      degrade_state_path: byId("degrade_state_path").value.trim(),
       identity: {
         fingerprint_mode: byId("fingerprint_mode").value,
         profile: byId("profile").value,
@@ -211,6 +345,49 @@
 
   byId("profile").addEventListener("change", toggleConditional);
   byId("fingerprint_mode").addEventListener("change", toggleConditional);
+
+  function genToken() {
+    var bytes = new Uint8Array(24);
+    if (window.crypto && window.crypto.getRandomValues) {
+      window.crypto.getRandomValues(bytes);
+    } else {
+      for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    return Array.prototype.map.call(bytes, function (b) {
+      return ("0" + b.toString(16)).slice(-2);
+    }).join("");
+  }
+
+  byId("gen-token").addEventListener("click", function () {
+    byId("panel_token").value = genToken();
+    if (!byId("panel_addr").value.trim()) byId("panel_addr").value = "127.0.0.1:8848";
+    setStatus("已生成面板 token，记得点「保存」", true);
+  });
+
+  // 单独打开智力巡检页：用当前填写的面板监听地址 + token 拼 URL。
+  // 监听地址是 0.0.0.0/127.0.0.1 这类通配地址时，回退到当前浏览器的主机名。
+  byId("open-intel").addEventListener("click", function () {
+    var addr = byId("panel_addr").value.trim();
+    var tok = byId("panel_token").value.trim();
+    if (!addr) {
+      setStatus("先填「面板监听地址」（例 127.0.0.1:8848 或 0.0.0.0:8848）再保存", false);
+      return;
+    }
+    if (!tok) {
+      setStatus("先填「面板 token」（可点『生成随机 token』）再保存", false);
+      return;
+    }
+    var host = location.hostname;
+    var port = "";
+    var parts = addr.split(":");
+    if (parts.length >= 2) {
+      port = parts[parts.length - 1];
+      var head = parts[0];
+      if (head && head !== "0.0.0.0" && head !== "127.0.0.1" && head !== "localhost") host = head;
+    }
+    window.open("http://" + host + (port ? ":" + port : "") + "/accounts?token=" + encodeURIComponent(tok), "_blank");
+    setStatus("已尝试打开面板；没反应请确认端口已放行、插件配置已保存", true);
+  });
 
   byId("save").addEventListener("click", function () {
     setStatus("保存中…");
