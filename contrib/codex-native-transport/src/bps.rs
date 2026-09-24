@@ -267,6 +267,9 @@ fn normalize_reasoning_effort(obj: &serde_json::Map<String, serde_json::Value>) 
         .trim()
         .to_ascii_lowercase();
     let normalized = match raw.as_str() {
+        // 上游只认 low/medium/high/xhigh，没有 max 挡位：max 折算成最接近的
+        // xhigh，而不是掉到 medium，避免把高质量请求静默降级。
+        "max" | "maximum" | "x-max" => "xhigh",
         "x-high" | "extra-high" | "extra_high" => "xhigh",
         other => other,
     };
@@ -2805,6 +2808,13 @@ mod tests {
         assert_eq!(value["reasoning_effort"], serde_json::json!("medium"));
 
         let value = body(serde_json::json!({"reasoning": {"effort": "extra_high"}}));
+        assert_eq!(value["reasoning_effort"], serde_json::json!("xhigh"));
+
+        // 上游没有 max 挡位：max 要折算成 xhigh，不能降级成 medium。
+        let value = body(serde_json::json!({"reasoning": {"effort": "max"}}));
+        assert_eq!(value["reasoning_effort"], serde_json::json!("xhigh"));
+
+        let value = body(serde_json::json!({"reasoning_effort": "MAX"}));
         assert_eq!(value["reasoning_effort"], serde_json::json!("xhigh"));
 
         let value = body(serde_json::json!({"reasoning_effort": "HIGH"}));
