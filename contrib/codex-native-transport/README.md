@@ -45,6 +45,10 @@
   `store: true`、metadata 里多出的任何键、图片附件；
 - `input` 里的 `reasoning` 项（encrypted_content 不是它的）会 400，会被剥掉。
 
+推理档位只能走顶层 `reasoning_effort`（`low` / `medium` / `high` / `xhigh`）：客户端发来的
+`reasoning.effort` 会被折算过去，`max`（含 `maximum` / `x-max`）折成 `xhigh` 而不是掉到
+`medium`，避免把高质量请求静默降级；上游没有 `max` 挡位，实测直发会 422。
+
 因此这里把「客户端工具目录 + 调用协议」写成一条 developer 输入项：模型需要调用客户端工具时
 只输出一行 JSON `{"__tool_call__":{"name":...,"arguments":{...}}}`，回程再把它翻成标准
 `function_call`（含 `output_item.added` / `function_call_arguments.delta|done` /
