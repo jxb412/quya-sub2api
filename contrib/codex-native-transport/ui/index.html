@@ -138,19 +138,47 @@
         <option value="text">text：一行 JSON 文本协议（默认，实测最稳）</option>
         <option value="native">native：历史工具项原生回放（ghcp_proxy 路线）</option>
         <option value="officejs">officejs：原生回放 + run_officejs 运货卡车</option>
+        <option value="declared">declared：把客户端工具写进请求原生注册（additional_tools，模型直接发 function_call）</option>
       </select>
     </label>
     <label><span class="k">工具目录放到提示词末尾</span><input type="checkbox" id="bps_catalog_at_prompt_end"></label>
     <label><span class="k">转发 prompt_cache_key</span><input type="checkbox" id="bps_forward_prompt_cache_key"></label>
+    <label><span class="k">https 图片地址透传（网关自取）</span><input type="checkbox" id="bps_keep_https_images"></label>
+    <label><span class="k">带附件请求跳过 BPS（走正常通道）</span><input type="checkbox" id="bps_skip_on_media"></label>
+<label><span class="k">带动态工具（tool_search）请求跳过 BPS</span><input type="checkbox" id="bps_skip_on_dynamic_tools"></label>
+<label><span class="k">BPS 仅对官方 Codex 客户端生效（第三方客户端走正常通道；判定用宿主透传的客户端原始身份）</span><input type="checkbox" id="bps_official_client_only"></label>
+<label><span class="k">带 previous_response_id 请求跳过 BPS（续写客户端）</span><input type="checkbox" id="bps_skip_on_previous_response_id"></label>
+    <label><span class="k">命中后整条会话钉正常通道(秒, 0=只跳本条)</span><input type="number" id="bps_previous_response_pin_seconds" min="0" max="86400"></label>
+    <label><span class="k">回程清洗（换掉网关回显的 Excel 提示与工具）</span><input type="checkbox" id="bps_scrub_echo"></label>
+    <label><span class="k">用量归一化（删掉 cache_write_tokens）</span><input type="checkbox" id="bps_normalize_usage"></label>
     <label><span class="k">context_management 阈值(0=不发)</span><input type="number" id="bps_context_management_threshold" min="0" max="2000000" placeholder="0"></label>
     <label><span class="k">智力恢复后继续走 BPS(秒, 0=立即切回)</span><input type="number" id="bps_hold_after_healthy_seconds" min="0" max="86400"></label>
     <label><span class="k">同会话粘滞时长(秒, 0=关)</span><input type="number" id="bps_session_sticky_seconds" min="0" max="86400"></label>
-    <label><span class="k">BPS 失败后冷却(秒, 0=关)</span><input type="number" id="bps_fallback_cooldown_seconds" min="0" max="3600"></label>
-    <p class="hint">切换节奏（让客户端不掉缓存）：<br>1) <b>恢复后保持期</b>：巡检连续「连续合格次数」次判合格后，账号不会立刻切回，而是继续走 BPS 直到保持期结束，避免在临界点来回跳；填 0 = 一合格就切回。<br>2) <b>同会话粘滞</b>：同一个会话（按 prompt_cache_key / 会话 id 派生）在粘滞时长内固定走同一条通道，一轮对话中途不会换上游，prompt cache 不会断；填 0 = 每个请求重新判定。<br>3) <b>BPS 失败冷却</b>：走 BPS 建连/HTTP 失败时，本次请求立刻改用原通道补发（客户端无感），并在冷却时间内不再尝试 BPS，避免每个请求都先撞一次失败。</p>
+    <label><span class="k">BPS 冷却：超时/连接失败(秒, 0=关)</span><input type="number" id="bps_cooldown_timeout_seconds" min="0" max="86400"></label>
+    <label><span class="k">BPS 冷却：400(秒, 0=关)</span><input type="number" id="bps_cooldown_400_seconds" min="0" max="86400"></label>
+    <label><span class="k">BPS 冷却：401(秒, 0=关)</span><input type="number" id="bps_cooldown_401_seconds" min="0" max="86400"></label>
+    <label><span class="k">BPS 冷却：403(秒, 0=关)</span><input type="number" id="bps_cooldown_403_seconds" min="0" max="86400"></label>
+    <label><span class="k">BPS 冷却：429(秒, 0=关)</span><input type="number" id="bps_cooldown_429_seconds" min="0" max="86400"></label>
+    <label><span class="k">BPS 冷却：其它状态码(秒, 0=关)</span><input type="number" id="bps_fallback_cooldown_seconds" min="0" max="86400"></label>
+    <label><span class="k">BPS 403 自动摘除模型</span><input type="checkbox" id="bps_403_drop_models_enabled"></label>
+    <label><span class="k">摘除的模型（逗号分隔）</span><input type="text" id="bps_403_drop_models" placeholder="gpt-6-astra, gpt-5.6-sol"></label>
+    <label><span class="k">摘除保持时长(秒, 0=跟随403冷却)</span><input type="number" id="bps_403_drop_models_seconds" min="0" max="86400"></label>
+    <p class="hint">BPS 端点回 403（账号被上游拦截）时，把这个账号上配置的这几个模型从后台账号的模型名单里摘掉，同分组其它账号照常接；时间到自动加回。默认开，默认 gpt-6-astra, gpt-5.6-sol。</p>
+    <label><span class="k">每账号每日 BPS 次数上限(0=不限)</span><input type="number" id="bps_daily_limit_per_account" min="0" max="100000" placeholder="0"></label>
+    <p class="hint">切换节奏（让客户端不掉缓存）：<br>1) <b>恢复后保持期</b>：巡检连续「连续合格次数」次判合格后，账号不会立刻切回，而是继续走 BPS 直到保持期结束，避免在临界点来回跳；填 0 = 一合格就切回。<br>2) <b>同会话粘滞</b>：同一个会话（按 prompt_cache_key / 会话 id 派生）在粘滞时长内固定走同一条通道，一轮对话中途不会换上游，prompt cache 不会断；填 0 = 每个请求重新判定。<br>3) <b>BPS 失败冷却</b>：走 BPS 建连/HTTP 失败时，本次请求立刻改用原通道补发（客户端无感），并按错误类别给该号设一段不同的冷却时间（可分别设置 超时/连接失败、400、401、403、429，其它状态码用最后一项兜底；填 0 = 该类错误不冷却）。这样偶发 400 不会像 403 那样长时间禁掉一个号。<br>4) <b>每账号每日 BPS 次数上限</b>：该号每自然日（UTC）最多能真的打多少次 BPS 端点，超了就从下一条起走正常通道，只在巡检页留一条原因；填 0 = 不限。用于防止某个号一天内把上游配额打爆。</p>
     <label><span class="k">降智处理开关落盘路径</span><input type="text" id="degrade_state_path" placeholder="（空=与巡检结论同目录）"></label>
-    <p class="hint warn">面板里对单个账号点「降智处理」后：该号智力不合格**不再被自动暂停**，而是把上面这些模型的请求改走 BPS 端点，直到该号恢复合格。出站按上游白名单重写请求体（剥掉 tools / tool_choice / text / include / temperature / previous_response_id 等，store 固定 false，metadata 只留 task_id + turn_id），客户端工具目录与调用协议写成一条 developer 消息；模型按协议输出的一行 JSON 会被回程翻译成标准 function_call。<br>三种桥接方案（随时可切换，不用改客户端）：<br>• <b>text</b>：历史里的工具调用/结果转成文本消息，模型用一行 JSON 协议请求工具（默认，实测最稳）。<br>• <b>native</b>：历史里的 function_call / function_call_output 按原生 Responses item 形状回放，调用载体仍是一行 JSON 协议（ghcp_proxy 的 native 路线，工具状态机更自然）。<br>• <b>officejs</b>：在 native 基础上，让模型调用上游 Excel 插件的 run_officejs，把真正的工具请求写进它的 code 字段，代理拦截还原（上游当前未声明 run_officejs 时会自动退化成一行 JSON 协议）。<br>同一会话按 prompt_cache_key 派生稳定 task_id / turn_id，第二轮起命中上游缓存（实测 cached_tokens ≈ 99%）。⚠️ 单次请求输入开销约 17k token，建议只对确实被限流的账号开启；先用每行的「BPS自检」确认能拿到 2xx。</p>
+    <p class="hint warn">面板里对单个账号点「降智处理」后：该号智力不合格**不再被自动暂停**，而是把上面这些模型的请求改走 BPS 端点，直到该号恢复合格。出站按上游白名单重写请求体（剥掉 tools / tool_choice / text / include / temperature / previous_response_id 等，store 固定 false，metadata 只留 task_id + turn_id），客户端工具目录与调用协议写成一条 developer 消息；模型按协议输出的一行 JSON 会被回程翻译成标准 function_call。<br>三种桥接方案（随时可切换，不用改客户端）：<br>• <b>text</b>：历史里的工具调用/结果转成文本消息，模型用一行 JSON 协议请求工具（默认，实测最稳）。<br>• <b>native</b>：历史里的 function_call / function_call_output 按原生 Responses item 形状回放，调用载体仍是一行 JSON 协议（ghcp_proxy 的 native 路线，工具状态机更自然）。<br>• <b>officejs</b>：在 native 基础上，让模型调用上游 Excel 插件的 run_officejs，把真正的工具请求写进它的 code 字段，代理拦截还原（上游当前未声明 run_officejs 时会自动退化成一行 JSON 协议）。<br>同一会话按 prompt_cache_key 派生稳定 task_id / turn_id，第二轮起命中上游缓存（实测 cached_tokens ≈ 99%）。⚠️ 单次请求输入开销约 17k token，建议只对确实被限流的账号开启；先用每行的「BPS自检」确认能拿到 2xx。（<b>Business Premium</b> 类型账号在这个总开关打开时默认勾选降智处理，新增账号约 1 分钟内自动套上；手动关掉的账号不会被自动打开。）</p>
   </fieldset>
 
+  <fieldset>
+    <legend>跨机状态同步（多台服务器共用同一批账号）</legend>
+    <label><span class="k">开启跨机同步</span><input type="checkbox" id="sync_enabled"></label>
+    <label><span class="k">对端面板地址（逗号分隔）</span><input type="text" id="sync_peers" placeholder="http://142.54.187.42:8848, http://107.150.62.202:8848"></label>
+    <label><span class="k">同步密钥（空 = 复用面板 token）</span><input type="text" id="sync_token"></label>
+    <label><span class="k">对账周期(秒, 0=只推不对账)</span><input type="number" id="sync_interval_seconds" min="0" max="3600" placeholder="30"></label>
+    <label><span class="k">允许推送（关 = 只接收，跟随主服务器）</span><input type="checkbox" id="sync_push"></label>
+    <p class="hint">两台服务器如果共用同一批账号（同一份数据库），同一个账号在两台上是同一个上游身份，面板里那个「降智处理」开关理应两台一致。<br>开启后：本机改动立刻推给对端，并按「对账周期」定期全量对齐；对端收到后只落自己的状态、不再回推，所以不会来回震荡。<br>每个账号按改动时间取新（last-write-wins）——两台都是旧数据时以「勾上降智处理」的那台为准。<br>只同步开关本身；线路统计（成功/失败次数）是每台自己的流量，不参与同步。对端不可达只影响这条同步链路，客户端请求不受影响；失败原因在 <code>/api/status</code> 的 <code>sync</code> 字段里。</p>
+  </fieldset>
   <div class="row">
     <button class="primary" id="save">保存</button>
     <button id="test">测试连通性</button>
@@ -263,11 +291,33 @@
     byId("bps_tool_mode").value = config.bps_tool_mode || "text";
     byId("bps_catalog_at_prompt_end").checked = config.bps_catalog_at_prompt_end === true;
     byId("bps_forward_prompt_cache_key").checked = config.bps_forward_prompt_cache_key !== false;
+    byId("bps_keep_https_images").checked = config.bps_keep_https_images !== false;
+    byId("bps_skip_on_media").checked = config.bps_skip_on_media !== false;
+byId("bps_skip_on_dynamic_tools").checked = config.bps_skip_on_dynamic_tools !== false;
+byId("bps_official_client_only").checked = config.bps_official_client_only !== false;
+byId("bps_skip_on_previous_response_id").checked = config.bps_skip_on_previous_response_id !== false;
+    byId("bps_previous_response_pin_seconds").value = config.bps_previous_response_pin_seconds != null ? config.bps_previous_response_pin_seconds : 21600;
+    byId("bps_scrub_echo").checked = config.bps_scrub_echo !== false;
+    byId("bps_normalize_usage").checked = config.bps_normalize_usage !== false;
     byId("bps_context_management_threshold").value = config.bps_context_management_threshold != null ? config.bps_context_management_threshold : 0;
     byId("bps_hold_after_healthy_seconds").value = config.bps_hold_after_healthy_seconds != null ? config.bps_hold_after_healthy_seconds : 900;
     byId("bps_session_sticky_seconds").value = config.bps_session_sticky_seconds != null ? config.bps_session_sticky_seconds : 1800;
+    byId("bps_cooldown_timeout_seconds").value = config.bps_cooldown_timeout_seconds != null ? config.bps_cooldown_timeout_seconds : 120;
+    byId("bps_cooldown_400_seconds").value = config.bps_cooldown_400_seconds != null ? config.bps_cooldown_400_seconds : 120;
+    byId("bps_cooldown_401_seconds").value = config.bps_cooldown_401_seconds != null ? config.bps_cooldown_401_seconds : 600;
+    byId("bps_cooldown_403_seconds").value = config.bps_cooldown_403_seconds != null ? config.bps_cooldown_403_seconds : 3600;
+    byId("bps_cooldown_429_seconds").value = config.bps_cooldown_429_seconds != null ? config.bps_cooldown_429_seconds : 600;
     byId("bps_fallback_cooldown_seconds").value = config.bps_fallback_cooldown_seconds != null ? config.bps_fallback_cooldown_seconds : 120;
+    byId("bps_403_drop_models_enabled").checked = config.bps_403_drop_models_enabled !== false;
+    byId("bps_403_drop_models").value = (config.bps_403_drop_models || []).join(", ");
+    byId("bps_403_drop_models_seconds").value = config.bps_403_drop_models_seconds != null ? config.bps_403_drop_models_seconds : 0;
+    byId("bps_daily_limit_per_account").value = config.bps_daily_limit_per_account != null ? config.bps_daily_limit_per_account : 0;
     byId("degrade_state_path").value = config.degrade_state_path || "";
+    byId("sync_enabled").checked = config.sync_enabled === true;
+    byId("sync_peers").value = (config.sync_peers || []).join(", ");
+    byId("sync_token").value = config.sync_token || "";
+    byId("sync_interval_seconds").value = config.sync_interval_seconds != null ? config.sync_interval_seconds : 30;
+    byId("sync_push").checked = config.sync_push !== false;
     toggleConditional();
   }
 
@@ -304,11 +354,33 @@
       bps_tool_mode: byId("bps_tool_mode").value,
       bps_catalog_at_prompt_end: byId("bps_catalog_at_prompt_end").checked,
       bps_forward_prompt_cache_key: byId("bps_forward_prompt_cache_key").checked,
+      bps_keep_https_images: byId("bps_keep_https_images").checked,
+      bps_skip_on_media: byId("bps_skip_on_media").checked,
+bps_skip_on_dynamic_tools: byId("bps_skip_on_dynamic_tools").checked,
+bps_official_client_only: byId("bps_official_client_only").checked,
+bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").checked,
+      bps_previous_response_pin_seconds: numOr(byId("bps_previous_response_pin_seconds").value, 21600),
+      bps_scrub_echo: byId("bps_scrub_echo").checked,
+      bps_normalize_usage: byId("bps_normalize_usage").checked,
       bps_context_management_threshold: Number(byId("bps_context_management_threshold").value) || 0,
       bps_hold_after_healthy_seconds: numOr(byId("bps_hold_after_healthy_seconds").value, 900),
       bps_session_sticky_seconds: numOr(byId("bps_session_sticky_seconds").value, 1800),
+      bps_cooldown_timeout_seconds: numOr(byId("bps_cooldown_timeout_seconds").value, 120),
+      bps_cooldown_400_seconds: numOr(byId("bps_cooldown_400_seconds").value, 120),
+      bps_cooldown_401_seconds: numOr(byId("bps_cooldown_401_seconds").value, 600),
+      bps_cooldown_403_seconds: numOr(byId("bps_cooldown_403_seconds").value, 3600),
+      bps_cooldown_429_seconds: numOr(byId("bps_cooldown_429_seconds").value, 600),
       bps_fallback_cooldown_seconds: numOr(byId("bps_fallback_cooldown_seconds").value, 120),
+      bps_403_drop_models_enabled: byId("bps_403_drop_models_enabled").checked,
+      bps_403_drop_models: byId("bps_403_drop_models").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
+      bps_403_drop_models_seconds: numOr(byId("bps_403_drop_models_seconds").value, 0),
+      bps_daily_limit_per_account: numOr(byId("bps_daily_limit_per_account").value, 0),
       degrade_state_path: byId("degrade_state_path").value.trim(),
+      sync_enabled: byId("sync_enabled").checked,
+      sync_peers: byId("sync_peers").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
+      sync_token: byId("sync_token").value.trim(),
+      sync_interval_seconds: numOr(byId("sync_interval_seconds").value, 30),
+      sync_push: byId("sync_push").checked,
       identity: {
         fingerprint_mode: byId("fingerprint_mode").value,
         profile: byId("profile").value,

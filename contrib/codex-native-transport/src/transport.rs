@@ -288,6 +288,10 @@ pub fn ordered_headers(
         HashMap::with_capacity(raw.len());
     for (name, values) in raw {
         let name = name.to_ascii_lowercase();
+        // 宿主私有透传头（x-sub2api-client-* 等）：只给插件做判定用，任何通道都不得出站。
+        if name.starts_with(crate::identity::HOST_PRIVATE_HEADER_PREFIX) {
+            continue;
+        }
         if codex_backend
             && (CODEX_ALWAYS_STRIP_HEADERS.contains(&name.as_str())
                 || strict_native_headers && CODEX_STRICT_STRIP_HEADERS.contains(&name.as_str()))
@@ -447,6 +451,28 @@ mod tests {
         HeaderValues {
             values: items.iter().map(|value| value.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn host_private_headers_never_go_upstream() {
+        let mut raw = std::collections::HashMap::new();
+        raw.insert("User-Agent".to_string(), values(&["codex_cli_rs/0.153.4"]));
+        raw.insert(
+            "x-sub2api-client-user-agent".to_string(),
+            values(&["WorkBuddy/5.6.2 CLI/2.147.0"]),
+        );
+        raw.insert(
+            "X-Sub2API-Client-Originator".to_string(),
+            values(&["workbuddy"]),
+        );
+        let out = ordered_headers(&raw, true, false);
+        assert!(out.get("x-sub2api-client-user-agent").is_none());
+        assert!(out.get("x-sub2api-client-originator").is_none());
+        assert_eq!(out.get("user-agent").unwrap(), "codex_cli_rs/0.153.4");
+
+        // 非 Codex 后端路径同样不得透传宿主私有头。
+        let out = ordered_headers(&raw, false, false);
+        assert!(out.get("x-sub2api-client-user-agent").is_none());
     }
 
     #[test]

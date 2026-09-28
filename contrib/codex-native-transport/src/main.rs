@@ -13,8 +13,10 @@ mod donor;
 mod goplugin;
 mod identity;
 mod intel;
+mod model_drop;
 mod panel;
 mod service;
+mod sync;
 mod transport;
 mod version_sync;
 
@@ -104,6 +106,12 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(version_sync::run(std::sync::Arc::clone(&state)));
     // 账号智力巡检自动循环（intel_enabled && intel_loop_enabled 时才真正跑）。
     tokio::spawn(intel::intel_loop(std::sync::Arc::clone(&state)));
+    // 套餐默认降智处理（Business Premium 在 BPS 总开关打开时默认开启）。
+    tokio::spawn(intel::plan_default_loop(std::sync::Arc::clone(&state)));
+    // BPS 403 自动摘除模型（到点把模型加回宿主账号）。
+    tokio::spawn(model_drop::run(std::sync::Arc::clone(&state)));
+    // 跨机状态同步（sync_enabled 时才真正推）。
+    tokio::spawn(sync::run(std::sync::Arc::clone(&state)));
     // 内嵌管理面板（配置 panel_addr + panel_token 后才会绑定端口）。
     panel::spawn(
         std::sync::Arc::clone(&state),

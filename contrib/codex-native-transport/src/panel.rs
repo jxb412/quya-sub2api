@@ -53,6 +53,10 @@ struct Request {
     path: String,
     query: String,
     token: Option<String>,
+    /// 跨机同步用的共享密钥（请求头 `x-cnt-sync-token`）。
+    sync_token: Option<String>,
+    /// 请求体（只给 /api/state/push 用；面板其它端点都是 GET/无体）。
+    body: Vec<u8>,
 }
 
 fn handle_conn(
@@ -71,7 +75,12 @@ fn handle_conn(
     if want.is_empty() {
         return write_response(&mut stream, 503, "text/plain", b"panel disabled");
     }
-    if req.token.as_deref() != Some(want.as_str()) {
+    // 对端推送走独立密钥（sync_token，空则复用 panel_token），不要求带面板 token。
+    let sync_want = config.sync_auth_token();
+    let via_sync = req.path == "/api/state/push"
+        && !sync_want.is_empty()
+        && req.sync_token.as_deref() == Some(sync_want.as_str());
+    if req.token.as_deref() != Some(want.as_str()) && !via_sync {
         return write_response(&mut stream, 401, "text/plain", b"unauthorized");
     }
 
@@ -155,6 +164,8 @@ fn handle_conn(
                     state
                         .degrade
                         .set(account_id, enabled, &cfg.degrade_state_file());
+                    // 本地改动立刻同步给对端（sync_enabled 时才真正推）。
+                    crate::sync::notify();
                     write_response(&mut stream, 200, "application/json", b"{\"ok\":true}")
                 }
                 None => write_response(
@@ -164,6 +175,20 @@ fn handle_conn(
                     b"{\"error\":\"id required\"}",
                 ),
             }
+        }
+        ("POST", "/api/state/push") => {
+            let cfg = state.current_config();
+            let body = if !cfg.sync_enabled {
+                "{\"ok\":false,\"error\":\"本机未开启 sync_enabled\"}".to_string()
+            } else {
+                crate::sync::apply_remote_json(state, &req.body)
+            };
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
+        }
+        ("GET", "/api/state/snapshot") => {
+            let cfg = state.current_config();
+            let body = crate::sync::snapshot_json(state, &cfg).to_string();
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("POST", "/api/bps/check") => {
             let account_id = query_get(&req.query, "id").and_then(|v| v.parse::<i64>().ok());
@@ -180,6 +205,30 @@ fn handle_conn(
                     b"{\"error\":\"id required\"}",
                 ),
             }
+        }
+        // BPS 403 自动摘除模型的「立刻恢复」：摘除记录的到点恢复由后台循环做，
+        // 这里给面板一个手动按钮（也能在配置关掉后用来提前放行）。
+        ("POST", "/api/models/restore") => {
+            let account_id = query_get(&req.query, "id").and_then(|v| v.parse::<i64>().ok());
+            let cfg = state.current_config();
+            let path = cfg.model_drop_state_file();
+            state.model_drop.ensure_loaded(&path);
+            let record = account_id.and_then(|id| state.model_drop.get(id));
+            let body = match (account_id, record) {
+                (Some(_), Some(record)) => {
+                    let base = cfg.admin_api_base.trim().to_string();
+                    let key = cfg.admin_api_key.trim().to_string();
+                    match handle.block_on(crate::model_drop::restore_one(
+                        state, &cfg, &base, &key, &path, &record,
+                    )) {
+                        Ok(()) => "{\"ok\":true}".to_string(),
+                        Err(err) => format!("{{\"ok\":false,\"error\":{}}}", json_string(&err)),
+                    }
+                }
+                (Some(_), None) => "{\"ok\":true,\"note\":\"没有待恢复的模型\"}".to_string(),
+                (None, _) => json_error("id required"),
+            };
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("GET", "/api/channel") => {
             let account_id = query_get(&req.query, "id").and_then(|v| v.parse::<i64>().ok());
@@ -230,6 +279,7 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
     };
 
     let mut token_hdr: Option<String> = None;
+    let mut sync_hdr: Option<String> = None;
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
@@ -250,12 +300,17 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
                     .map(str::to_string);
             } else if name == "content-length" {
                 content_length = value.parse().unwrap_or(0);
+            } else if name == crate::sync::SYNC_TOKEN_HEADER {
+                sync_hdr = Some(value.to_string());
             }
         }
     }
+    let mut body = Vec::new();
     if content_length > 0 {
-        let mut buf = vec![0u8; content_length.min(64 * 1024)];
-        let _ = reader.read_exact(&mut buf);
+        let mut buf = vec![0u8; content_length.min(crate::sync::MAX_SNAPSHOT_BYTES)];
+        if reader.read_exact(&mut buf).is_ok() {
+            body = buf;
+        }
     }
 
     let token = token_hdr.or_else(|| query_get(&query, "token"));
@@ -264,6 +319,8 @@ fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Request>> {
         path,
         query,
         token,
+        sync_token: sync_hdr,
+        body,
     }))
 }
 
@@ -351,8 +408,25 @@ fn status_json(state: &Arc<SharedState>) -> String {
         "bps_enabled": config.bps_enabled,
         "bps_endpoint": config.bps_endpoint,
         "bps_models": config.bps_model_list(),
+        "bps_official_client_only": config.bps_official_client_only,
+        "bps_origin": config.bps_origin,
+        "bps_user_agent": config.bps_user_agent,
+        "bps_pseudonym_prompt_cache_key": config.bps_pseudonym_prompt_cache_key,
+        "bps_metadata_agent_iteration": config.bps_metadata_agent_iteration,
+        "bps_cooldown_timeout_seconds": config.bps_cooldown_timeout_seconds,
+        "bps_cooldown_400_seconds": config.bps_cooldown_400_seconds,
+        "bps_cooldown_401_seconds": config.bps_cooldown_401_seconds,
+        "bps_cooldown_403_seconds": config.bps_cooldown_403_seconds,
+        "bps_cooldown_429_seconds": config.bps_cooldown_429_seconds,
+        "bps_fallback_cooldown_seconds": config.bps_fallback_cooldown_seconds,
+        "bps_daily_limit_per_account": config.bps_daily_limit_per_account,
+        "effort_retry_enabled": config.effort_retry_enabled,
         "admin_api_base": config.admin_api_base,
         "admin_api_key_configured": !config.admin_api_key.trim().is_empty(),
+                "sync_enabled": config.sync_enabled,
+                "sync_peers": config.sync_peer_list(),
+                "sync_push": config.sync_push,
+        "sync": crate::sync::status_json(),
         "degrade_accounts": state.degrade.snapshot(),
         "channels": channel_summary(state, &config),
         "template_ready": donor.is_some(),
@@ -403,7 +477,6 @@ fn intel_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
     state.intel.ensure_loaded(&config.intel_state_path);
     state.degrade.ensure_loaded(&config.degrade_state_file());
     let (results, run) = state.intel.snapshot();
-    let degrade = state.degrade.snapshot();
     let base = config.admin_api_base.trim().to_string();
     let key = config.admin_api_key.trim().to_string();
     let master = config.intel_enabled;
@@ -423,13 +496,45 @@ fn intel_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
             }
         }
     };
+    // 打开页面就先把套餐默认开关套上：页面看到的即真实生效的。
+    crate::intel::apply_target_plan_defaults(state, &config, &targets);
+    let degrade = state.degrade.snapshot();
     let accounts = crate::intel::merge_rows(
         &targets,
         &results,
         &degrade,
+        &state.channels,
         &config,
         crate::donor::now_ms(),
     );
+    // BPS 403 自动摘除模型：面板按账号展示「已摘模型 + 剩余恢复时间」。
+    let drop_path = config.model_drop_state_file();
+    state.model_drop.ensure_loaded(&drop_path);
+    let drop_now = crate::donor::now_ms();
+    let drops = state.model_drop.snapshot();
+    let mut accounts = accounts;
+    for row in accounts.iter_mut() {
+        let Some(id) = row.get("id").and_then(serde_json::Value::as_i64) else {
+            continue;
+        };
+        let Some(record) = drops.iter().find(|record| record.account_id == id) else {
+            continue;
+        };
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            "models_dropped".to_string(),
+            serde_json::json!({
+                "models": record.models,
+                "form": record.form,
+                "until_ms": record.until_ms,
+                "remaining_ms": record.until_ms.saturating_sub(drop_now),
+                "dropped_at_ms": record.dropped_at_ms,
+                "last_error": record.last_error,
+            }),
+        );
+    }
     let plans: Vec<serde_json::Value> = crate::intel::plan_type_counts(&targets)
         .into_iter()
         .map(|(value, count)| {
@@ -457,7 +562,18 @@ fn intel_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
         "intel_require_year": config.intel_require_year,
         "bps_hold_after_healthy_seconds": config.bps_hold_after_healthy_seconds,
         "bps_session_sticky_seconds": config.bps_session_sticky_seconds,
+        "bps_skip_on_previous_response_id": config.bps_skip_on_previous_response_id,
+        "bps_previous_response_pin_seconds": config.bps_previous_response_pin_seconds,
+        "bps_cooldown_timeout_seconds": config.bps_cooldown_timeout_seconds,
+        "bps_cooldown_400_seconds": config.bps_cooldown_400_seconds,
+        "bps_cooldown_401_seconds": config.bps_cooldown_401_seconds,
+        "bps_cooldown_403_seconds": config.bps_cooldown_403_seconds,
+        "bps_cooldown_429_seconds": config.bps_cooldown_429_seconds,
         "bps_fallback_cooldown_seconds": config.bps_fallback_cooldown_seconds,
+        "bps_daily_limit_per_account": config.bps_daily_limit_per_account,
+        "bps_403_drop_models_enabled": config.bps_403_drop_models_enabled,
+        "bps_403_drop_models": config.bps_403_drop_model_list(),
+        "bps_403_drop_seconds": config.bps_403_drop_seconds(),
         "bps_enabled": config.bps_enabled,
         "bps_endpoint": config.bps_endpoint,
         "bps_models": config.bps_model_list(),
@@ -578,7 +694,7 @@ const ACCOUNTS_HTML: &str = r##"<!DOCTYPE html>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
   body { font: 14px/1.55 -apple-system, "PingFang SC", system-ui, sans-serif; margin:0; background:#f4f5f7; color:#1f2430; }
-  .wrap { max-width: 1240px; margin: 0 auto; padding: 20px 16px 60px; }
+  .wrap { max-width: 1920px; margin: 0 auto; padding: 20px 16px 60px; }
   .top { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   .top h1 { font-size:19px; margin:0; font-weight:700; margin-right:auto; }
   .card { background:#fff; border:1px solid #e5e7eb; border-radius:12px; padding:12px 14px; margin-bottom:14px; box-shadow:0 1px 2px rgba(16,24,40,.04); }
@@ -592,7 +708,8 @@ const ACCOUNTS_HTML: &str = r##"<!DOCTYPE html>
   .chips { display:flex; gap:8px; flex-wrap:wrap; margin:10px 0 4px; }
   .chip { border:1px solid #dfe3ea; background:#fff; border-radius:999px; padding:4px 12px; font-size:12.5px; cursor:pointer; user-select:none; }
   .chip.on { background:#eaf1ff; border-color:#2b6cff; color:#1d4ed8; font-weight:600; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
+  .tablewrap { overflow-x:auto; }
+  table { width:100%; min-width:1800px; border-collapse:collapse; font-size:13px; }
   th, td { text-align:left; padding:8px 8px; border-bottom:1px solid #eef0f4; vertical-align:top; }
   th { color:#6b7280; font-weight:600; font-size:12.5px; background:#fafbfc; }
   tr.off td { background:#fcfcfd; color:#6b7280; }
@@ -606,9 +723,11 @@ const ACCOUNTS_HTML: &str = r##"<!DOCTYPE html>
   .badge.bps { background:#f3ecff; color:#6d28d9; }
   .badge.normal { background:#e9f9ef; color:#0f7a3d; }
   .badge.off { background:#f1f2f4; color:#6b7280; }
-  .ans { color:#4b5563; max-width:360px; word-break:break-all; font-size:12.5px; }
+  .badge.warn { background:#fff4e5; color:#b45309; }
+  .ans { color:#4b5563; max-width:460px; word-break:break-all; font-size:12.5px; }
   .id { color:#9aa4b6; font-size:12px; }
-  .name { word-break:break-all; }
+  .id.err { color:#c0392b; }
+  .name { word-break:break-all; overflow-wrap:anywhere; }
   .err { color:#c0392b; font-size:12.5px; }
   .empty { color:#9aa4b6; padding:22px 0; text-align:center; }
 </style>
@@ -628,29 +747,35 @@ const ACCOUNTS_HTML: &str = r##"<!DOCTYPE html>
   </div>
   <div class="card">
     <div class="meta" id="meta">加载中…</div>
+  <p class="hint">Business Premium（self_serve_business_prolite）类型账号：插件配置里「降智账号 BPS 通道」总开关打开时，默认就勾上「降智处理」（新增账号约 1 分钟内自动套上）；手动关掉的账号不会被自动打开。</p>
     <div class="chips" id="chips"></div>
   </div>
   <div class="card" id="errbox" style="display:none"></div>
   <div class="card">
+    <div class="tablewrap">
     <table>
       <thead>
         <tr>
           <th style="width:34px"><input type="checkbox" id="check-all"></th>
-          <th style="width:74px">ID</th>
-          <th>账号</th>
-          <th style="width:110px">套餐</th>
-          <th style="width:104px">调度</th>
-          <th style="width:118px">智力</th>
-          <th style="width:78px">耗时</th>
+          <th style="width:64px">ID</th>
+          <th style="width:240px">账号</th>
+          <th style="width:118px">套餐</th>
+          <th style="width:100px">调度</th>
+          <th style="width:108px">智力</th>
+          <th style="width:66px">耗时</th>
           <th>回答 / 错误</th>
-          <th style="width:120px">降智处理</th>
-          <th style="width:158px">当前通道</th>
-          <th style="width:170px">操作</th>
+          <th style="width:110px">降智处理</th>
+          <th style="width:122px">当前通道</th>
+          <th style="width:140px">线路统计</th>
+          <th style="width:112px">当前线路</th>
+          <th style="width:152px">BPS 冷却 / 今日</th>
+          <th style="width:188px">操作</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
     </table>
     <div class="empty" id="empty" style="display:none">没有匹配的账号</div>
+    </div>
   </div>
 </div>
 <script>
@@ -665,6 +790,12 @@ function fmtAgo(ms){
   if(d < 3600000) return Math.round(d/60000) + ' 分钟前';
   if(d < 86400000) return Math.round(d/3600000) + ' 小时前';
   return Math.round(d/86400000) + ' 天前';
+}
+function fmtLeft(ms){
+  const s = Math.round(Math.max(0, ms) / 1000);
+  if(s < 60) return s + 's';
+  if(s < 3600) return Math.round(s/60) + ' 分钟';
+  return (s/3600).toFixed(1) + ' 小时';
 }
 let data = null;
 let selected = new Set();
@@ -689,7 +820,55 @@ function channelCell(r){
   return `<span class="badge off">—</span>${r.degrade ? '<div class="id">等待巡检结论</div>' : ''}`;
 }
 
+function routeStatsCell(r){
+  const nOk = r.normal_ok || 0, nBad = r.normal_fail || 0;
+  const bOk = r.bps_ok || 0, bBad = r.bps_fail || 0;
+  const ok = nOk + bOk, bad = nBad + bBad, total = ok + bad;
+  if(!total) return '<span class="badge off">暂无请求</span>';
+  const rate = Math.round(ok * 100 / total);
+  const cls = bad === 0 ? 'good' : (rate >= 95 ? 'active' : (rate >= 80 ? 'warn' : 'bad'));
+  return `<span class="badge ${cls}">成功 ${ok} · 失败 ${bad}</span>` +
+         `<div class="id">正常 ${nOk}/${nBad} · BPS ${bOk}/${bBad}（成功/失败）</div>` +
+         `<div class="id">成功率 ${rate}% · 共 ${total} 次</div>`;
+}
+
+function routeNowCell(r){
+  if(!r.last_route) return '<span class="badge off">未走流量</span>';
+  const isBps = r.last_route === 'bps';
+  const st = r.last_status || 0;
+  const ok = st >= 200 && st < 400;
+  const stTxt = st ? ('HTTP ' + st) : '连接失败';
+  return `<span class="badge ${isBps ? 'bps' : 'normal'}">${isBps ? 'BPS' : '正常'}</span>` +
+         `<div class="${ok ? 'id' : 'id err'}">${stTxt}</div>` +
+         `<div class="id">${fmtAgo(r.last_route_at_ms)}</div>`;
+}
+
+function bpsCooldownCell(r){
+  const left = r.bps_cooldown_remaining_ms || 0;
+  const limit = r.bps_daily_limit || 0;
+  const today = r.bps_today || 0;
+  const limitTxt = limit ? ('今日 ' + today + '/' + limit) : ('今日 ' + today + ' 次（不限）');
+  const badge = left > 0
+    ? ('<span class="badge warn">冷却 ' + fmtLeft(left) + '</span>')
+    : '<span class="badge off">不在冷却</span>';
+  const reason = r.bps_cooldown_reason ? ('<div class="id' + (left > 0 ? ' err' : '') + '">' + esc(r.bps_cooldown_reason) + '</div>') : '';
+  const at = (!left && r.bps_cooldown_at_ms) ? ('<div class="id">' + fmtAgo(r.bps_cooldown_at_ms) + '</div>') : '';
+  return badge + '<div class="id">' + limitTxt + '</div>' + reason + at + dropLine(r);
+}
+
+// BPS 403 自动摘除模型：显示这个号当前被摘掉的模型与剩余恢复时间。
+function dropLine(r){
+  const d = r.models_dropped;
+  if(!d || !d.models || !d.models.length) return '';
+  const left = d.remaining_ms || 0;
+  return '<div class="id err">已摘模型 ' + esc(d.models.join(', ')) +
+         (left > 0 ? ('（' + fmtLeft(left) + '后恢复）') : '（待恢复）') + '</div>' +
+         (d.last_error ? ('<div class="id err">恢复失败：' + esc(d.last_error) + '</div>') : '');
+}
+
 function renderMeta(){
+  const allRows = data.accounts || [];
+  const bpsTodayMax = allRows.reduce((a, r) => Math.max(a, r.bps_today || 0), 0);
   const d = data;
   const interval = d.loop_interval_seconds >= 3600 ? (d.loop_interval_seconds/3600).toFixed(1) + ' 小时' : d.loop_interval_seconds + ' 秒';
   const run = d.run || {};
@@ -698,9 +877,21 @@ function renderMeta(){
     `总开关 <b>${d.enabled ? '开' : '关'}</b> · 自动循环 <b>${d.loop_enabled ? '开' : '关'}</b>（每 ${interval}） · 自动暂停/恢复 <b>${d.auto_pause ? '开' : '关'}</b><br>` +
     `模型 <b>${esc(d.model)}</b> · 提问 <b>${esc(d.prompt)}</b> · 不合格标记 <b>${esc(d.fail_marker)}</b> · 并发 <b>${d.concurrency}</b><br>` +
     `BPS 降智通道 <b>${d.bps_enabled ? '开' : '关'}</b>（模型 ${esc((d.bps_models||[]).join(', '))}） · 流量模板 <b>${d.template_ready ? '已捕获' : '未捕获'}</b><br>` +
-    `切换节奏：连续合格 <b>${d.intel_confirmations}</b> 次 · 恢复后保持 <b>${d.bps_hold_after_healthy_seconds}</b>s · 会话粘滞 <b>${d.bps_session_sticky_seconds}</b>s · BPS 失败冷却 <b>${d.bps_fallback_cooldown_seconds}</b>s · 提问超时 <b>${d.intel_prompt_timeout_seconds}</b>s + <b>${d.intel_prompt_retries}</b> 次重试${d.intel_timeout_is_failed ? '（超时算不合格）' : ''}<br>` +
+    `BPS 403 自动摘模型 <b>${d.bps_403_drop_models_enabled ? '开' : '关'}</b>（模型 ${esc((d.bps_403_drop_models||[]).join(', '))} · 摘除 ${d.bps_403_drop_seconds}s 后恢复）<br>` +
+    `出站特征：Origin <b>${esc(d.bps_origin || '不发')}</b> · UA <b>${esc(d.bps_user_agent || '保持客户端')}</b> · 会话键假名 <b>${d.bps_pseudonym_prompt_cache_key ? '开' : '关'}</b> · metadata.agent_iteration <b>${d.bps_metadata_agent_iteration ? '开' : '关'}</b> · 推理挡位自愈 <b>${d.effort_retry_enabled ? '开' : '关'}</b><br>` +
+    `切换节奏：连续合格 <b>${d.intel_confirmations}</b> 次 · 恢复后保持 <b>${d.bps_hold_after_healthy_seconds}</b>s · 会话粘滞 <b>${d.bps_session_sticky_seconds}</b>s · BPS 冷却(失败后) 超时 <b>${d.bps_cooldown_timeout_seconds}</b>s / 400 <b>${d.bps_cooldown_400_seconds}</b>s / 401 <b>${d.bps_cooldown_401_seconds}</b>s / 403 <b>${d.bps_cooldown_403_seconds}</b>s / 429 <b>${d.bps_cooldown_429_seconds}</b>s / 其它 <b>${d.bps_fallback_cooldown_seconds}</b>s · 每账号每日上限 <b>${d.bps_daily_limit_per_account ? d.bps_daily_limit_per_account + ' 次（今日最多 ' + bpsTodayMax + ' 次）' : '不限'}</b> · 提问超时 <b>${d.intel_prompt_timeout_seconds}</b>s + <b>${d.intel_prompt_retries}</b> 次重试${d.intel_timeout_is_failed ? '（超时算不合格）' : ''}<br>` +
+    `previous_response_id 门禁 <b>${d.bps_skip_on_previous_response_id !== false ? '开' : '关'}</b>（命中后整条会话钉在正常通道 <b>${d.bps_previous_response_pin_seconds || 0}</b>s）<br>` +
     `判定口径：不合格关键词 <b>${esc(d.fail_marker)}</b>${d.intel_require_year ? ' · 回答里必须出现年份' : ''}<br>` +
-    `${runTxt}${run.note ? ' · ' + esc(run.note) : ''}`;
+    `${runTxt}${run.note ? ' · ' + esc(run.note) : ''}<br>` +
+    (() => {
+      const rows = d.accounts || [];
+      const ok = rows.reduce((a, r) => a + (r.normal_ok || 0) + (r.bps_ok || 0), 0);
+      const bad = rows.reduce((a, r) => a + (r.normal_fail || 0) + (r.bps_fail || 0), 0);
+      const onBps = rows.filter(r => r.last_route === 'bps').length;
+      const onNormal = rows.filter(r => r.last_route === 'normal').length;
+      const cooling = rows.filter(r => (r.bps_cooldown_remaining_ms || 0) > 0).length;
+      return `线路统计（插件启动以来累计）：成功 <b>${ok}</b> · 失败 <b>${bad}</b> · 最近走 BPS <b>${onBps}</b> 个 · 最近走正常 <b>${onNormal}</b> 个 · BPS 冷却中 <b>${cooling}</b> 个 · 暂无流量 <b>${rows.length - onBps - onNormal}</b> 个`;
+    })();
   const chips = document.getElementById('chips');
   chips.innerHTML = '';
   const all = document.createElement('span');
@@ -734,7 +925,8 @@ function render(){
     if(!r.schedulable) tr.className = 'off';
     const intel = r.intel === 'good' ? '合格' : (r.intel === 'bad' ? (r.timed_out ? '超时' : '不合格') : (r.intel === 'error' ? '检测失败' : '未检测'));
     const intelCls = r.intel === 'good' ? 'good' : (r.timed_out ? 'error' : (r.intel || 'unknown'));
-    const detail = r.error ? `<span class="err">${esc(r.error)}</span>` : esc(r.answer || '');
+    const detail = (r.error ? `<span class="err">${esc(r.error)}</span>` : esc(r.answer || '')) +
+                   (r.note ? `<div class="id">${esc(r.note)}</div>` : '');
     tr.innerHTML =
       `<td><input type="checkbox" data-id="${r.id}"${selected.has(r.id) ? ' checked' : ''}></td>` +
       `<td class="id">#${r.id}</td>` +
@@ -744,12 +936,16 @@ function render(){
       `<td><span class="badge ${intelCls}">${intel}</span><div class="id">${fmtAgo(r.checked_at_ms)}</div></td>` +
       `<td class="id">${r.latency_ms ? (r.latency_ms / 1000).toFixed(1) + 's' : '—'}</td>` +
       `<td class="ans">${detail}</td>` +
-      `<td>${r.degrade ? '<span class="badge active">已开启</span>' : '<span class="badge unknown">关闭</span>'}</td>` +
+      `<td>${r.degrade ? '<span class="badge active">已开启</span>' + (r.degrade_default ? '<div class="id">套餐默认</div>' : '') : '<span class="badge unknown">关闭</span>'}</td>` +
       `<td>${channelCell(r)}</td>` +
+      `<td>${routeStatsCell(r)}</td>` +
+      `<td>${routeNowCell(r)}</td>` +
+      `<td>${bpsCooldownCell(r)}</td>` +
       `<td>
          <button data-act="probe" data-id="${r.id}">复检</button>
          <button data-act="degrade" data-id="${r.id}" data-on="${r.degrade ? 0 : 1}">${r.degrade ? '关闭处理' : '降智处理'}</button>
          <button data-act="bps" data-id="${r.id}"${data.bps_enabled ? '' : ' style="display:none"'}>BPS自检</button>
+         ${r.models_dropped && (r.models_dropped.models||[]).length ? `<button data-act="restore-models" data-id="${r.id}">恢复模型</button>` : ''}
          ${r.schedulable ? `<button class="danger" data-act="off" data-id="${r.id}">暂停</button>`
                          : `<button data-act="on" data-id="${r.id}">开启</button>`}
        </td>`;
@@ -784,6 +980,10 @@ async function rowAction(btn){
       alert('HTTP ' + (report.status || '-') + '\n' + (report.error || '') + '\n' + (report.snippet || ''));
       btn.disabled = false;
       return;
+    } else if(act === 'restore-models'){
+      const resp = await api('/api/models/restore?id=' + id, {method:'POST'});
+      const j = await resp.json();
+      if(j && j.ok === false) alert('恢复失败：' + (j.error || ''));
     } else {
       await api(`/api/intel/set-schedulable?id=${id}&schedulable=${act === 'on' ? 1 : 0}`, {method:'POST'});
     }

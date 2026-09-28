@@ -94,7 +94,38 @@ pub struct PluginConfig {
     /// 会话粘滞：同一会话用过 BPS 之后，空闲多久内继续走 BPS（秒，0 = 关闭）。
     pub bps_session_sticky_seconds: u32,
     /// BPS 出站失败后的冷却（秒）：冷却期内该号不再尝试 BPS。
+    ///
+    /// 这是「其它状态码」的兜底值（402 / 5xx / 未知）。按状态码分类的冷却见
+    /// 下面几项；分类值为 0 表示该类**不冷却**（下一个请求立刻再试）。
     pub bps_fallback_cooldown_seconds: u32,
+    /// 传输层失败 / 超时（没有任何 HTTP 状态码）的冷却（秒，0 = 不冷却）。
+    pub bps_cooldown_timeout_seconds: u32,
+    /// 上游 HTTP 400（协议 / 请求体形态问题）的冷却（秒，0 = 不冷却）。
+    pub bps_cooldown_400_seconds: u32,
+    /// 上游 HTTP 401（凭据失效）的冷却（秒，0 = 不冷却）。
+    pub bps_cooldown_401_seconds: u32,
+    /// 上游 HTTP 403（BPS 侧「usage policy」拦截，实测是账号级稳定拒绝）的
+    /// 冷却（秒，0 = 不冷却）。这类失败重试基本必失败，建议设长一些
+    /// （例如 3600~86400），免得每个请求都先白撞一次 BPS 再回退。
+    pub bps_cooldown_403_seconds: u32,
+    /// 上游 HTTP 429（BPS 限流）的冷却（秒，0 = 不冷却）。
+    pub bps_cooldown_429_seconds: u32,
+    /// BPS 403 自动摘除模型（默认开）。
+    ///
+    /// BPS 端点回 403（账号被上游 usage policy 拦截）时，把这个账号上配置的
+    /// `bps_403_drop_models` 里的模型从宿主账号的模型名单（credentials 的
+    /// model_whitelist / model_mapping）中摘掉，让宿主调度器不再把这些模型
+    /// 派给这个号（同分组其它账号照常接）。摘除时长到点后自动加回来。
+    pub bps_403_drop_models_enabled: bool,
+    /// 403 时要摘除的模型列表（空 = gpt-6-astra + gpt-5.6-sol）。
+    pub bps_403_drop_models: Vec<String>,
+    /// 摘除保持时长（秒，0 = 跟随 bps_cooldown_403_seconds）。
+    pub bps_403_drop_models_seconds: u32,
+    /// 每账号每日 BPS 调用上限（0 = 不限）。
+    ///
+    /// 只在真实业务请求**真正发往 BPS**时计数（面板「BPS 自检」不计入），
+    /// 达到上限的账号当天不再尝试 BPS、直接走正常通道，按 UTC 日切归零。
+    pub bps_daily_limit_per_account: u32,
     /// 降智账号 BPS 通道总开关（默认关）。开启后，面板里勾了
     /// 「自动降智处理」的账号，其 bps_models 请求改走 BPS 端点。
     pub bps_enabled: bool,
@@ -107,16 +138,113 @@ pub struct PluginConfig {
     /// native   = 历史 function_call / function_call_output 保持原生 item 形状回放，
     ///            新调用仍走文本协议（ghcp_proxy 的 native item 路线）；
     /// officejs = 历史原生回放 + 让模型用上游 Excel 插件的 run_officejs 当运货卡车，
-    ///            代理从 code 字段还原真实客户端工具调用。
+    ///            代理从 code 字段还原真实客户端工具调用；
+    /// declared = 把客户端 function / custom 工具写成 input 里的 additional_tools 条目，
+    ///            上游原生注册，模型直接发客户端工具名的 function_call / custom_tool_call
+    ///            （历史与回程都不改写；上游对顶层 tools 仍 422，所以必须走 input 条目）。
     pub bps_tool_mode: String,
     /// 客户端工具目录放到提示词末尾（默认 false = 目录前置 + 末尾短提醒）。
     pub bps_catalog_at_prompt_end: bool,
     /// 是否把客户端的 prompt_cache_key 转发给 BPS（默认 true）。
     pub bps_forward_prompt_cache_key: bool,
+    /// 转发时把客户端的 prompt_cache_key 换成「按账号作用域派生」的 UUID 形态假名
+    /// （默认 true）。关掉 = 原样透传（旧行为），用于 A/B 验证缓存命中率。
+    pub bps_pseudonym_prompt_cache_key: bool,
+    /// BPS `metadata` 里附带 `agent_iteration`（默认 true，与 Excel 插件真实出站和
+    /// ghcp_proxy 参考实现一致）。上游若拒绝这个键，关掉即可。
+    pub bps_metadata_agent_iteration: bool,
+    /// BPS 出站 `Origin` 头（默认 `https://bps.openai.com`；留空 = 不发送）。
+    pub bps_origin: String,
+    /// BPS 出站 `User-Agent`：默认空 = 保持客户端原样；`browser` = `Mozilla/5.0`
+    /// 的浏览器 UA 实验档；其它值原样发送。用于 Origin / 浏览器 UA 的 A/B 实验。
+    pub bps_user_agent: String,
+    /// 推理挡位自愈（默认 true）。客户端按过期能力表挑了上游不认的挡位时
+    /// （现网最大一类 400：`minimal` + gpt-5.5），按上游错误里给出的支持列表
+    /// 换成最接近的一档重发一次，并记住这个组合。
+    pub effort_retry_enabled: bool,
     /// 给 BPS 请求附带 context_management 压缩阈值（0 = 不发送，默认 0）。
     pub bps_context_management_threshold: u32,
+    /// https 图片豁免（默认 true）：`input_image` 的 `image_url` 是绝对 https
+    /// 地址且不带 file_id 时原样带给 BPS 网关（由网关自己下载）；`data:` base64
+    /// 与带 file_id 的图片上游一律 422，仍按原规则删掉换占位文本。
+    /// 思路来自 ranxi2001/sub2api 内置 BPS 线路的 images.go 与
+    /// codex-basispoints-transport 的 keep_https_images。
+    pub bps_keep_https_images: bool,
+    /// 带附件请求跳过 BPS（默认 true）：出站前发现输入里有 BPS 收不了的附件
+    /// （base64 图片 / 文件 / file_id 图片）时，这条请求直接走账号正常的 Codex
+    /// 通道，而不是把附件悄悄丢成占位文本。代价是该条请求不吃降智兜底，
+    /// 换来的是客户截图 / 文件不再丢。
+    pub bps_skip_on_media: bool,
+    /// 带动态工具请求跳过 BPS（默认 true）：请求里声明了 `tool_search`（顶层
+    /// `tools[]`、`namespace` 子工具或 Responses Lite 的 `additional_tools` 条目），
+    /// 或者输入里带了 `tool_search_call` / `tool_search_output` 项时，这条请求直接
+    /// 走账号正常的 Codex 通道，不再改道 BPS。
+    ///
+    /// 原因：BPS 通道会把顶层 `tools` 摘掉、改用 `additional_tools` 重新注册，
+    /// 回程又会抑制 `tool_search_call` / `tool_search_output` 这类 item，客户端
+    /// 的动态工具发现（tool_search）在 BPS 上必然失效（表现为模型「不动手」）。
+    /// 代价是该条请求不吃降智兜底，换来的是动态工具能真正跑起来。
+    pub bps_skip_on_dynamic_tools: bool,
+    /// 带 previous_response_id 请求跳过 BPS（默认 true）：请求体里出现非空
+    /// `previous_response_id` 时，这条请求走账号正常的 Codex 通道。
+    ///
+    /// 原因：BPS 上游是严格白名单，`previous_response_id` 会被 422 拒掉，
+    /// 插件只能把字段剥掉再发。对「靠服务端状态续写」的客户端（每轮只发
+    /// 增量 input + 上一轮 id）剥掉就等于丢掉全部历史，表现为对话上下文
+    /// 接不上；官方 Codex 的 HTTP 请求体里没有这个字段，所以正常 Codex
+    /// 客户端不受影响（WS 增量请求带这个字段，但插件只处理 HTTP）。
+    pub bps_skip_on_previous_response_id: bool,
+    /// 命中上一条门禁后，把整个会话钉在正常通道多久（秒，0 = 只跳本条、
+    /// 不钉会话）。
+    ///
+    /// 只跳单条会出现「同一会话前几轮走 BPS、后面几条走正常通道」的撕裂：
+    /// 上游会话状态分成两套，客户端照样接不上上下文。钉住之后该会话
+    /// （账号 + 会话键）在窗口内一律走正常通道，直到窗口过期。
+    pub bps_previous_response_pin_seconds: u32,
+    /// BPS 仅对官方 Codex 客户端生效（默认 true）：UA / originator 未命中
+    /// sub2api 官方客户端集合的请求（WorkBuddy、OpenClaw 等第三方客户端）
+    /// 一律走账号正常通道，不进 BPS 降智兜底。
+    ///
+    /// 原因：BPS 是 ChatGPT 官方 Excel/Work 插件的内部端点，上游会给每条请求
+    /// 注入自己那套约 1.7 万 token 的系统上下文与账号级人设。官方 Codex 客户端
+    /// 的请求体自带完整会话与系统提示，注入只是白耗缓存；而第三方聊天客户端
+    /// （尤其 instructions 为空的）会被那套上下文盖掉，客户问「今天星期几」
+    /// 可能收到 "How can I help you today?" 或上游自带的人设问候（含账号主人
+    /// 名字），表现为答非所问 / 串人设。关掉即恢复旧行为（所有客户端都可走 BPS）。
+    pub bps_official_client_only: bool,
+    /// 回程清洗（默认 true）：BPS 网关在 `response.created` / `in_progress` /
+    /// `completed` 等事件里把它自己的 47 KB Excel 系统提示（`instructions`）与
+    /// 21 个网关工具（`tools`）原样回显，既泄露网关内部提示词又白耗下行带宽
+    /// （每个事件约 73 KB）。开启后把这些键换回客户端请求里的原值。
+    /// 思路来自 codex-basispoints-transport 的 scrub_response_echo。
+    pub bps_scrub_echo: bool,
+    /// 用量归一化（默认 true）：BPS 的 usage 多一个
+    /// `input_tokens_details.cache_write_tokens`（实测一次 17634 输入里 17566 是
+    /// cache_write），宿主把它当 Anthropic 式「缓存写入」从输入里扣掉，结果每次
+    /// 只按几十个输入 token 计费。OpenAI 正规接口的 usage 只有 `cached_tokens`，
+    /// 删除这些键后按普通输入计费（与正常 Codex 线路一致）。
+    /// 思路来自 codex-basispoints-transport 的 normalize_usage。
+    pub bps_normalize_usage: bool,
     /// 每账号「自动降智处理」开关的落盘路径（空 = 复用 intel_state_path 同目录）。
     pub degrade_state_path: String,
+    /// 跨机状态同步总开关（默认关）。
+    ///
+    /// 两台服务器共用同一批账号（同一份 PG）时，同一个账号在两台上是同一个上游
+    /// 身份，面板上的「自动降智处理」开关理应对两台都生效。开启后，本机的开关
+    /// 变化会立刻推给 `sync_peers` 里的对端面板，并按 `sync_interval_seconds`
+    /// 周期对账；按 `enabled_at_ms` 时间戳取新（last-write-wins）。
+    pub sync_enabled: bool,
+    /// 对端面板地址列表（逗号分隔），例：
+    /// `http://142.54.187.42:8848, http://107.150.62.202:8848`。
+    pub sync_peers: Vec<String>,
+    /// 对端鉴权 token（空 = 复用 panel_token）。两台建议用同一个强随机 token。
+    pub sync_token: String,
+    /// 对账周期（秒，0 = 只在本地改动时即时推，不做周期对账；上限 3600）。
+    pub sync_interval_seconds: u32,
+    /// 是否把本机状态推给对端（默认 true）。关掉 = 纯接收端：本机的开关改动
+    /// 不再外推，但仍然接受对端推来的状态。适合「一台服务器为准、其它只跟随」
+    /// 的部署（例如 142 当主服务器）。
+    pub sync_push: bool,
     /// 出站身份 Profile。
     pub identity: IdentityConfig,
 }
@@ -213,14 +341,42 @@ impl Default for PluginConfig {
             bps_hold_after_healthy_seconds: 900,
             bps_session_sticky_seconds: 1800,
             bps_fallback_cooldown_seconds: 120,
+            bps_cooldown_timeout_seconds: 120,
+            bps_cooldown_400_seconds: 120,
+            bps_cooldown_401_seconds: 600,
+            bps_cooldown_403_seconds: 3600,
+            bps_cooldown_429_seconds: 600,
+            // 403 是账号级拦截：先把指定模型摘掉，让调度器绕开这个号。
+            bps_403_drop_models_enabled: true,
+            bps_403_drop_models: vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()],
+            bps_403_drop_models_seconds: 0,
+            bps_daily_limit_per_account: 0,
             bps_enabled: false,
             bps_endpoint: "https://bps.openai.com/basispoints/api/responses".to_string(),
             bps_models: Vec::new(),
             bps_tool_mode: "text".to_string(),
             bps_catalog_at_prompt_end: false,
             bps_forward_prompt_cache_key: true,
+            bps_pseudonym_prompt_cache_key: true,
+            bps_metadata_agent_iteration: true,
+            bps_origin: "https://bps.openai.com".to_string(),
+            bps_user_agent: String::new(),
+            effort_retry_enabled: true,
             bps_context_management_threshold: 0,
+            bps_keep_https_images: true,
+            bps_skip_on_media: true,
+            bps_skip_on_dynamic_tools: true,
+            bps_official_client_only: true,
+            bps_skip_on_previous_response_id: true,
+            bps_previous_response_pin_seconds: 21_600,
+            bps_scrub_echo: true,
+            bps_normalize_usage: true,
             degrade_state_path: String::new(),
+            sync_enabled: false,
+            sync_peers: Vec::new(),
+            sync_token: String::new(),
+            sync_interval_seconds: 30,
+            sync_push: true,
             identity: IdentityConfig::default(),
         }
     }
@@ -237,7 +393,7 @@ const VALID_PROFILES: &[&str] = &[
 
 const VALID_FINGERPRINT_MODES: &[&str] = &["passthrough", "machine"];
 
-const VALID_BPS_TOOL_MODES: &[&str] = &["text", "native", "officejs"];
+const VALID_BPS_TOOL_MODES: &[&str] = &["text", "native", "officejs", "declared"];
 
 impl PluginConfig {
     pub fn parse(raw: &[u8]) -> Result<Self, String> {
@@ -314,6 +470,88 @@ impl PluginConfig {
         }
     }
 
+    /// 403 要摘除的模型列表（空 = 默认 gpt-6-astra + gpt-5.6-sol）。
+    pub fn bps_403_drop_model_list(&self) -> Vec<String> {
+        let configured: Vec<String> = self
+            .bps_403_drop_models
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
+        if configured.is_empty() {
+            vec!["gpt-6-astra".to_string(), "gpt-5.6-sol".to_string()]
+        } else {
+            configured
+        }
+    }
+
+    /// 摘除保持时长（秒）：0 = 跟随「BPS 冷却：403」。
+    pub fn bps_403_drop_seconds(&self) -> u32 {
+        if self.bps_403_drop_models_seconds > 0 {
+            self.bps_403_drop_models_seconds
+        } else {
+            self.bps_cooldown_403_seconds
+        }
+    }
+
+    /// 摘除记录落盘路径（空配置时与 degrade 状态文件同目录）。
+    pub fn model_drop_state_file(&self) -> String {
+        let base = self.degrade_state_file();
+        if base.trim().is_empty() {
+            return String::new();
+        }
+        match std::path::Path::new(&base).parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                dir.join("model-drop.json").to_string_lossy().into_owned()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// BPS 排查日志路径（`bps-notes.log`）：与 degrade 状态文件同目录；两者都没配
+    /// 就不落盘（等价于关掉这个日志）。
+    pub fn bps_log_file(&self) -> String {
+        let base = self.degrade_state_file();
+        if base.trim().is_empty() {
+            return String::new();
+        }
+        match std::path::Path::new(&base).parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                dir.join("bps-notes.log").to_string_lossy().into_owned()
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// `bps_user_agent` 的最终取值：空 = 不改写客户端 UA；`browser` = 浏览器 UA 实验档；
+    /// 其它值原样发送。
+    pub fn bps_user_agent_value(&self) -> Option<String> {
+        match self.bps_user_agent.trim() {
+            "" => None,
+            value if value.eq_ignore_ascii_case("browser") => Some("Mozilla/5.0".to_string()),
+            value => Some(value.to_string()),
+        }
+    }
+
+    /// 跨机同步的对端面板地址（去尾斜杠、丢空项）。
+    pub fn sync_peer_list(&self) -> Vec<String> {
+        self.sync_peers
+            .iter()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .collect()
+    }
+
+    /// 跨机同步用的鉴权 token（空 = 复用 panel_token）。
+    pub fn sync_auth_token(&self) -> String {
+        let explicit = self.sync_token.trim();
+        if explicit.is_empty() {
+            self.panel_token.trim().to_string()
+        } else {
+            explicit.to_string()
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.connect_timeout_seconds > 300 {
             return Err("connect_timeout_seconds must be within 0..=300".to_string());
@@ -328,6 +566,21 @@ impl PluginConfig {
             return Err(
                 "panel_addr 非空时必须同时配置 panel_token（面板不做无鉴权暴露）".to_string(),
             );
+        }
+        if self.sync_interval_seconds > 3600 {
+            return Err("sync_interval_seconds must be within 0..=3600".to_string());
+        }
+        if self.sync_enabled && self.sync_push && self.sync_peer_list().is_empty() {
+            return Err(
+                "sync_enabled 且 sync_push 打开时至少要配一个 sync_peers 对端地址".to_string(),
+            );
+        }
+        for peer in &self.sync_peer_list() {
+            let parsed = reqwest::Url::parse(peer)
+                .map_err(|err| format!("sync_peers 地址 {peer:?} 无效: {err}"))?;
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                return Err(format!("sync_peers 地址 {peer:?} 必须是 http(s) 地址"));
+            }
         }
         if !(60..=86_400).contains(&self.intel_loop_interval_seconds) {
             return Err("intel_loop_interval_seconds must be within 60..=86400".to_string());
@@ -350,8 +603,34 @@ impl PluginConfig {
         if self.bps_session_sticky_seconds > 86_400 {
             return Err("bps_session_sticky_seconds must be within 0..=86400".to_string());
         }
-        if self.bps_fallback_cooldown_seconds > 3600 {
-            return Err("bps_fallback_cooldown_seconds must be within 0..=3600".to_string());
+        if self.bps_previous_response_pin_seconds > 86_400 {
+            return Err("bps_previous_response_pin_seconds must be within 0..=86400".to_string());
+        }
+        // 冷却上限放宽到一天：403 这类账号级拦截需要长冷却才有意义。
+        for (name, value) in [
+            (
+                "bps_fallback_cooldown_seconds",
+                self.bps_fallback_cooldown_seconds,
+            ),
+            (
+                "bps_cooldown_timeout_seconds",
+                self.bps_cooldown_timeout_seconds,
+            ),
+            ("bps_cooldown_400_seconds", self.bps_cooldown_400_seconds),
+            ("bps_cooldown_401_seconds", self.bps_cooldown_401_seconds),
+            ("bps_cooldown_403_seconds", self.bps_cooldown_403_seconds),
+            ("bps_cooldown_429_seconds", self.bps_cooldown_429_seconds),
+            (
+                "bps_403_drop_models_seconds",
+                self.bps_403_drop_models_seconds,
+            ),
+        ] {
+            if value > 86_400 {
+                return Err(format!("{name} must be within 0..=86400"));
+            }
+        }
+        if self.bps_daily_limit_per_account > 100_000 {
+            return Err("bps_daily_limit_per_account must be within 0..=100000".to_string());
         }
         if self.bps_enabled {
             let endpoint = self.bps_endpoint.trim();
@@ -363,6 +642,12 @@ impl PluginConfig {
                     "bps_tool_mode must be one of {}",
                     VALID_BPS_TOOL_MODES.join("/")
                 ));
+            }
+            if self.bps_user_agent.len() > 256 {
+                return Err("bps_user_agent must be within 0..=256 bytes".to_string());
+            }
+            if self.bps_origin.len() > 256 {
+                return Err("bps_origin must be within 0..=256 bytes".to_string());
             }
         }
         if !VALID_PROFILES.contains(&self.identity.profile.as_str()) {
@@ -528,6 +813,27 @@ mod tests {
     }
 
     #[test]
+    fn sync_receive_only_allows_empty_peers() {
+        // 主从部署：跟随端（sync_push=false）可以不配对端地址，只接收主服务器推来的状态。
+        let cfg =
+            PluginConfig::parse(br#"{"sync_enabled":true,"sync_push":false,"sync_peers":[]}"#)
+                .unwrap();
+        assert!(cfg.sync_enabled);
+        assert!(!cfg.sync_push);
+        // 还要推送，就必须有对端地址。
+        assert!(
+            PluginConfig::parse(br#"{"sync_enabled":true,"sync_push":true,"sync_peers":[]}"#)
+                .is_err()
+        );
+        assert!(
+            PluginConfig::parse(br#"{"sync_enabled":true,"sync_peers":["http://a:8848"]}"#).is_ok()
+        );
+        assert!(PluginConfig::parse(br#"{"sync_enabled":true,"sync_peers":["ftp://a"]}"#).is_err());
+        // 默认（不写 sync_push）就是允许推送。
+        assert!(PluginConfig::default().sync_push);
+    }
+
+    #[test]
     fn rejects_out_of_range() {
         assert!(PluginConfig::parse(br#"{"max_request_body_mb":0}"#).is_err());
         assert!(PluginConfig::parse(br#"{"connect_timeout_seconds":301}"#).is_err());
@@ -595,14 +901,41 @@ mod tests {
             "bps_hold_after_healthy_seconds",
             "bps_session_sticky_seconds",
             "bps_fallback_cooldown_seconds",
+            "bps_cooldown_timeout_seconds",
+            "bps_cooldown_400_seconds",
+            "bps_cooldown_401_seconds",
+            "bps_cooldown_403_seconds",
+            "bps_cooldown_429_seconds",
+            "bps_403_drop_models_enabled",
+            "bps_403_drop_models",
+            "bps_403_drop_models_seconds",
+            "bps_daily_limit_per_account",
             "bps_enabled",
             "bps_endpoint",
             "bps_models",
             "bps_tool_mode",
             "bps_catalog_at_prompt_end",
             "bps_forward_prompt_cache_key",
+            "bps_pseudonym_prompt_cache_key",
+            "bps_metadata_agent_iteration",
+            "bps_origin",
+            "bps_user_agent",
+            "effort_retry_enabled",
             "bps_context_management_threshold",
+            "bps_keep_https_images",
+            "bps_skip_on_media",
+            "bps_skip_on_dynamic_tools",
+            "bps_official_client_only",
+            "bps_skip_on_previous_response_id",
+            "bps_previous_response_pin_seconds",
+            "bps_scrub_echo",
+            "bps_normalize_usage",
             "degrade_state_path",
+            "sync_enabled",
+            "sync_peers",
+            "sync_token",
+            "sync_interval_seconds",
+            "sync_push",
             "identity",
         ] {
             assert!(object.contains_key(key), "missing {key}");

@@ -68,3 +68,38 @@ pub fn now_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
+
+/// UTC 日期键（`YYYY-MM-DD`）：给「每账号每日 BPS 次数」做日切用。
+///
+/// 用 Howard Hinnant 的 civil_from_days 算法自己算，不为一个日期多背依赖。
+pub fn utc_day_key(ms: u64) -> String {
+    let days = (ms / 86_400_000) as i64;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 {
+        yoe + era * 400 + 1
+    } else {
+        yoe + era * 400
+    };
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utc_day_key;
+
+    #[test]
+    fn utc_day_key_formats_known_timestamps() {
+        assert_eq!(utc_day_key(0), "1970-01-01");
+        assert_eq!(utc_day_key(1_790_438_640_000), "2026-09-26");
+        assert_eq!(utc_day_key(1_790_467_199_999), "2026-09-26");
+        assert_eq!(utc_day_key(1_790_467_200_000), "2026-09-27");
+        assert_eq!(utc_day_key(1_709_164_800_000), "2024-02-29");
+    }
+}

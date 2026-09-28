@@ -144,6 +144,26 @@ pub fn per_account_installation_id(seed: &str, account_id: i64) -> String {
     )
 }
 
+/// BPS 身份派生的 HMAC 前缀（与 machine 身份的前缀分开，同一份种子下两套派生
+/// 不会互相碰撞）。
+const BPS_SCOPE_PREFIX: &str = "bps-scope:";
+
+/// 用安装种子 + 账号作用域派生稳定的 UUID 形态标识。
+///
+/// BPS 通道的 `metadata.task_id` / `metadata.turn_id` 与假名化的
+/// `prompt_cache_key` 都走这里：与 [`MachineContext`] 的假名化同源（同一个 HMAC
+/// 种子、同样的 UUID 形态输出），所以降智通道里的会话身份与身份 Profile 层是同一套
+/// 口径——上游看到的仍然只是「一个账号下的若干会话」，账号之间互不串味，并且同一
+/// 份请求每次派生的结果完全一致（重试可复现，缓存亲和不受影响）。
+pub fn scoped_identifier(seed: &str, scope: &str, label: &str, value: &str) -> String {
+    let message = format!("{BPS_SCOPE_PREFIX}{scope}\u{0}{label}\u{0}{value}");
+    uuid_from_digest(
+        &hmac_digest(seed.as_bytes(), message.as_bytes()),
+        false,
+        None,
+    )
+}
+
 /// 改写请求头中的 installation id（含 x-codex-turn-metadata JSON 内嵌字段）。
 ///
 /// 重要：只改写、绝不插入。真实 codex 0.153.4 的主流式请求（POST /responses）
@@ -235,6 +255,153 @@ fn ascii_escape_json(serialized: String) -> String {
 /// 判定是否为 ChatGPT Codex 内部接口请求（身份改写只作用于该面）。
 pub fn is_codex_backend_request(url: &str) -> bool {
     url.contains("/backend-api/codex")
+}
+
+// ---------------------------------------------------------------------------
+// 官方 Codex 客户端判定（与 sub2api internal/pkg/openai/request.go 同口径）
+// ---------------------------------------------------------------------------
+
+/// 宿主透传的「客户端自报身份」头。宿主在把请求交给插件之前，会把出站身份收口为
+/// 网关规范 Codex 身份（指纹收敛 / 统一出口，`enforceCodexIdentityHeaders`），因此
+/// 插件看到的 `user-agent` / `originator` **永远是官方形态**，直接按它们判定客户端
+/// 来源只会永远命中。宿主另用这两个私有头把客户端原始身份交给插件，判定口径因此与
+/// 宿主侧 `openai.IsCodexOfficialClientByHeaders(userAgent, originator)` 完全一致。
+///
+/// 兼容性：旧宿主不写这两个头，插件回退到请求头 `user-agent` / `originator`。
+pub const HOST_CLIENT_UA_HEADER: &str = "x-sub2api-client-user-agent";
+pub const HOST_CLIENT_ORIGINATOR_HEADER: &str = "x-sub2api-client-originator";
+
+/// 宿主私有透传头前缀。插件只读这些头做判定，**绝不能出站到上游**：它们既不是真实
+/// 客户端会发的头，也会把中转链路特征暴露给上游。
+pub const HOST_PRIVATE_HEADER_PREFIX: &str = "x-sub2api-";
+
+/// 官方客户端家族 UA 前缀。逐项都是确定字面量，绝不含会被 TrimSpace 退化成
+/// 裸 `codex` 的空格前缀（`Codex ` 家族由 family prefix 单独处理）。
+const CODEX_OFFICIAL_CLIENT_UA_PREFIXES: [&str; 9] = [
+    "codex_cli_rs/",
+    "codex-tui/",
+    "codex_vscode/",
+    "codex_vscode_copilot/",
+    "codex_app/",
+    "codex_chatgpt_desktop/",
+    "codex_atlas/",
+    "codex_exec/",
+    "codex_sdk_ts/",
+];
+
+/// `Codex ` 前缀家族（Codex Desktop 等）。**保留尾随空格**：去掉会退化成裸
+/// `codex`，把任何含 codex 的串都放行。
+const CODEX_OFFICIAL_CLIENT_FAMILY_PREFIX: &str = "codex ";
+
+/// 官方客户端 originator 精确集合（app-server `initialize` 写入 clientInfo.name）。
+/// originator 侧只用精确集合 + `Codex ` 家族前缀，不做「含 codex」宽松兜底。
+const CODEX_OFFICIAL_CLIENT_ORIGINATORS: [&str; 9] = [
+    "codex_cli_rs",
+    "codex-tui",
+    "codex_vscode",
+    "codex_vscode_copilot",
+    "codex_app",
+    "codex_chatgpt_desktop",
+    "codex_atlas",
+    "codex_exec",
+    "codex_sdk_ts",
+];
+
+/// 头值归一化：去首尾空白 + 小写（与 sub2api `normalizeCodexClientHeader` 一致）。
+fn normalize_client_header(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+/// 前缀集匹配：优先 `starts_with`，UA 被网关拼接成复合串时退化为 `contains`
+/// （与 sub2api 非 strict 版 `matchCodexClientHeaderPrefixes` 一致）。
+fn match_client_prefixes(value: &str, prefixes: &[&str]) -> bool {
+    prefixes.iter().any(|prefix| {
+        let prefix = normalize_client_header(prefix);
+        !prefix.is_empty() && (value.starts_with(&prefix) || value.contains(&prefix))
+    })
+}
+
+/// 从 codex-rs 格式 UA 的最后一个括号组里取出 clientInfo.name。
+///
+/// `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` 只改 UA 前缀（originator 段），不改尾部
+/// 的 `(name; version)` 括号组，所以从尾部能恢复被 override 的真实客户端标识
+/// （例如 `cccc/0.142.0 ... (codex-tui; 0.142.0)` → `codex-tui`）。
+fn codex_ua_trailer_name(ua: &str) -> String {
+    let Some(open) = ua.rfind('(') else {
+        return String::new();
+    };
+    let rest = &ua[open + 1..];
+    let Some(close) = rest.find(')') else {
+        return String::new();
+    };
+    let inner = rest[..close].trim();
+    match inner.find(';') {
+        Some(semi) => inner[..semi].trim().to_string(),
+        None => inner.to_string(),
+    }
+}
+
+/// originator 是否为官方 Codex 客户端（精确集合 + `Codex ` 家族前缀）。
+pub fn is_official_codex_client_originator(originator: &str) -> bool {
+    let value = normalize_client_header(originator);
+    if value.is_empty() {
+        return false;
+    }
+    CODEX_OFFICIAL_CLIENT_ORIGINATORS.contains(&value.as_str())
+        || value.starts_with(CODEX_OFFICIAL_CLIENT_FAMILY_PREFIX)
+}
+
+/// User-Agent 是否为官方 Codex 客户端：前缀集 → `Codex ` 家族 → 尾部 name 兜底。
+pub fn is_official_codex_client_user_agent(user_agent: &str) -> bool {
+    let ua = normalize_client_header(user_agent);
+    if ua.is_empty() {
+        return false;
+    }
+    if match_client_prefixes(&ua, &CODEX_OFFICIAL_CLIENT_UA_PREFIXES) {
+        return true;
+    }
+    if ua.starts_with(CODEX_OFFICIAL_CLIENT_FAMILY_PREFIX) {
+        return true;
+    }
+    let name = codex_ua_trailer_name(&ua);
+    !name.is_empty() && is_official_codex_client_originator(&name)
+}
+
+/// 这条请求是否来自官方 Codex 客户端家族（UA 或 originator 命中）。
+///
+/// 与 sub2api `IsCodexOfficialClientByHeaders` 同口径：WorkBuddy / OpenClaw 这类
+/// 第三方客户端两者都不命中，因此会被 BPS 门禁挡在降智兜底通道之外。
+///
+/// 入参必须是**身份 Profile 改写之前**的原始 UA / originator：profile 会把出站
+/// UA 换成官方形态，改写后再判就只能永远命中。
+pub fn is_official_codex_client(user_agent: &str, originator: &str) -> bool {
+    if is_official_codex_client_user_agent(user_agent) {
+        return true;
+    }
+    is_official_codex_client_originator(originator)
+}
+
+/// 供面板/日志留痕：客户端自报身份（UA 首段 + originator），截断到安全长度。
+pub fn client_identity_label(user_agent: &str, originator: &str) -> String {
+    let short_ua: String = user_agent.trim().chars().take(64).collect();
+    format!("ua={short_ua:?} originator={originator:?}")
+}
+
+/// 客户端自报身份来源：`host` = 宿主透传头，`request` = 请求头回退。
+pub fn pick_client_identity<'a>(
+    host_user_agent: Option<&'a str>,
+    host_originator: Option<&'a str>,
+    request_user_agent: Option<&'a str>,
+    request_originator: Option<&'a str>,
+) -> (&'a str, &'a str, &'static str) {
+    match host_user_agent {
+        Some(ua) => (ua, host_originator.unwrap_or_default(), "host"),
+        None => (
+            request_user_agent.unwrap_or_default(),
+            request_originator.unwrap_or_default(),
+            "request",
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -999,5 +1166,162 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(id));
+    }
+
+    // ----- 官方 Codex 客户端判定（BPS 客户端门禁口径，与 sub2api 对齐）-----
+
+    #[test]
+    fn official_client_matches_sub2api_rules() {
+        // 官方 UA 前缀家族（逐字面量）。
+        for ua in [
+            "codex_cli_rs/0.147.0 (Ubuntu 22.4.0; x86_64) xterm-256color",
+            "codex-tui/0.144.1 (Mac OS 15.0; arm64)",
+            "codex_vscode/1.0.0",
+            "codex_vscode_copilot/1.2.3",
+            "codex_app/0.9.0",
+            "codex_chatgpt_desktop/1.0.0",
+            "codex_atlas/1.0.0",
+            "codex_exec/0.5.0",
+            "codex_sdk_ts/0.2.0",
+            "Codex Desktop/0.147.0-alpha.1.2 (Windows 10.0.26200; x86_64) unknown",
+        ] {
+            assert!(
+                is_official_codex_client_user_agent(ua),
+                "should match: {ua}"
+            );
+        }
+        // UA 被网关拼成复合串时退化为包含匹配。
+        assert!(is_official_codex_client_user_agent(
+            "SomeProxy/1.0 codex_cli_rs/0.147.0"
+        ));
+        // UA 尾部括号组兜底：originator 被 override（cccc）但尾部保留真实客户端名。
+        assert!(is_official_codex_client_user_agent(
+            "cccc/0.142.0 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.142.0)"
+        ));
+    }
+
+    #[test]
+    fn non_official_clients_are_rejected() {
+        for ua in [
+            // 本单客户实际 UA：第三方 WorkBuddy 客户端。
+            "WorkBuddy/5.6.2 WorkBuddy/5.6.2 CLI/2.147.0",
+            "OpenClaw/1.0 (Linux; x86_64)",
+            "OpenAI/JS 6.39.1",
+            "curl/8.21.0",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140.0.0.0",
+            "",
+        ] {
+            assert!(
+                !is_official_codex_client_user_agent(ua),
+                "should NOT match: {ua}"
+            );
+        }
+        assert!(!is_official_codex_client_originator("workbuddy"));
+        assert!(!is_official_codex_client_originator("codex-cli"));
+        // 宽松版（与 sub2api 非 strict 的 IsCodexOfficialClientRequest 同口径）允许
+        // 包含匹配，所以前缀里塞官方 token 的伪造串仍会命中——这是刻意对齐上游
+        // 行为，不在这里收窄。
+        assert!(is_official_codex_client_user_agent(
+            "evil-codex_cli_rs/1.0.0"
+        ));
+    }
+
+    #[test]
+    fn originator_family_matches_exactly_or_codex_space() {
+        for value in [
+            "codex_cli_rs",
+            "codex-tui",
+            "codex_vscode",
+            "codex_vscode_copilot",
+            "codex_app",
+            "codex_chatgpt_desktop",
+            "codex_atlas",
+            "codex_exec",
+            "codex_sdk_ts",
+            "Codex Desktop",
+        ] {
+            assert!(
+                is_official_codex_client_originator(value),
+                "should match originator: {value}"
+            );
+        }
+        for value in ["", "  ", "codex", "codexcli", "codex_tui", "my-codex_atlas"] {
+            assert!(
+                !is_official_codex_client_originator(value),
+                "should NOT match originator: {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn headers_gate_uses_user_agent_or_originator() {
+        assert!(is_official_codex_client("codex_cli_rs/0.147.0", ""));
+        assert!(is_official_codex_client(
+            "WorkBuddy/5.6.2 CLI/2.147.0",
+            "codex_cli_rs"
+        ));
+        assert!(!is_official_codex_client(
+            "WorkBuddy/5.6.2 WorkBuddy/5.6.2 CLI/2.147.0",
+            "workbuddy"
+        ));
+        assert!(!is_official_codex_client("", ""));
+        assert_eq!(
+            client_identity_label("WorkBuddy/5.6.2 CLI/2.147.0", "workbuddy"),
+            "ua=\"WorkBuddy/5.6.2 CLI/2.147.0\" originator=\"workbuddy\""
+        );
+    }
+
+    // ----- 客户端身份来源：宿主透传头优先，旧宿主回退请求头 -----
+
+    #[test]
+    fn client_identity_prefers_host_headers() {
+        // 宿主透传：出站 UA 已被收口成规范身份，真实来源看宿主头。
+        let (ua, originator, source) = pick_client_identity(
+            Some("WorkBuddy/5.6.2 CLI/2.147.0"),
+            Some("workbuddy"),
+            Some("codex_cli_rs/0.153.4 (Ubuntu 22.04; x86_64) xterm-256color"),
+            Some("codex_cli_rs"),
+        );
+        assert_eq!(source, "host");
+        assert_eq!(ua, "WorkBuddy/5.6.2 CLI/2.147.0");
+        assert_eq!(originator, "workbuddy");
+        assert!(!is_official_codex_client(ua, originator));
+
+        // 宿主透传官方身份 → 门禁放行。
+        let (ua, originator, source) = pick_client_identity(
+            Some("codex_cli_rs/0.153.4 (Ubuntu 22.04; x86_64) xterm-256color"),
+            Some("codex_cli_rs"),
+            Some("codex_cli_rs/0.153.4"),
+            Some("codex_cli_rs"),
+        );
+        assert_eq!(source, "host");
+        assert!(is_official_codex_client(ua, originator));
+
+        // 宿主只给了 UA、originator 头缺失 → originator 视为空，不误判。
+        let (ua, originator, source) = pick_client_identity(
+            Some("WorkBuddy/5.6.2 CLI/2.147.0"),
+            None,
+            Some("codex_cli_rs/0.153.4"),
+            Some("codex_cli_rs"),
+        );
+        assert_eq!(source, "host");
+        assert_eq!(originator, "");
+        assert!(!is_official_codex_client(ua, originator));
+
+        // 旧宿主（没有透传头）→ 回退请求头，行为与 0.4.33 一致。
+        let (ua, originator, source) = pick_client_identity(
+            None,
+            Some("codex_cli_rs"),
+            Some("WorkBuddy/5.6.2 CLI/2.147.0"),
+            Some("workbuddy"),
+        );
+        assert_eq!(source, "request");
+        assert_eq!(ua, "WorkBuddy/5.6.2 CLI/2.147.0");
+        assert_eq!(originator, "workbuddy");
+
+        // 两头都缺 → 空串。
+        let (ua, originator, source) = pick_client_identity(None, None, None, None);
+        assert_eq!(source, "request");
+        assert!(ua.is_empty() && originator.is_empty());
     }
 }
