@@ -10,7 +10,11 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // 插件返回标准 http.Response，响应解析、错误映射、SSE 和计费仍由现有核心链处理。
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
 	if s.pluginManager != nil {
+		// 插件需要客户端自报身份（例如 BPS 降温通道只放行官方 Codex 客户端）：出站身份
+		// 收口已把 UA/originator 改写为网关规范身份，这里补私有头透传，未接管即撤回。
+		restoreClientIdentity := attachPluginClientIdentity(request)
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
+		restoreClientIdentity()
 		if handled {
 			return response, err
 		}
@@ -27,7 +31,9 @@ func (s *AccountTestService) doOpenAIAccountTestUpstream(
 	useTLSFallback bool,
 ) (*http.Response, error) {
 	if s.pluginManager != nil {
+		restoreClientIdentity := attachPluginClientIdentity(request)
 		response, handled, err := s.pluginManager.RoundTripOpenAIOAuth(request.Context(), request, proxyURL, account)
+		restoreClientIdentity()
 		if handled {
 			return response, err
 		}

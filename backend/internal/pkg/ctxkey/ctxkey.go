@@ -81,4 +81,13 @@ const (
 
 	// ClaudeCodeVersion stores the extracted Claude Code version from User-Agent (e.g. "2.1.22")
 	ClaudeCodeVersion Key = "ctx_claude_code_version"
+
+	// ClientUserAgent 是客户端自报 User-Agent（入站原值，在出站身份收口之前抓取）。
+	// 宿主会把 OAuth 出站的 User-Agent 改写为网关规范 Codex 身份，插件因此看不到
+	// 客户端自报身份；需要按客户端来源做判定的插件（例如 BPS 降温通道只放行官方
+	// Codex 客户端）由 service.attachPluginClientIdentity 把本值写成私有头透传。
+	ClientUserAgent Key = "ctx_client_user_agent"
+
+	// ClientOriginator 是客户端自报 originator（入站原值，同上）。
+	ClientOriginator Key = "ctx_client_originator"
 )
