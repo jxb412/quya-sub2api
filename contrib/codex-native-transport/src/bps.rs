@@ -1581,6 +1581,11 @@ fn native_history_item(
         .unwrap_or("");
     match kind {
         "message" => normalize_message_item(entry, out, keep_https_images),
+        // 同上：宿主转出来的 role 型消息不带 `type`，必须按 message 处理，
+        // 否则整段用户输入被丢掉（历史回放路径同样中招）。
+        "" if entry.contains_key("role") || entry.contains_key("content") => {
+            normalize_message_item(entry, out, keep_https_images)
+        }
         "function_call" | "custom_tool_call" | "apply_patch_call" => {
             let call_id = entry
                 .get("call_id")
@@ -1889,6 +1894,13 @@ fn sanitize_item(
         .unwrap_or("");
     match kind {
         "message" => normalize_message_item(entry, out, keep_https_images),
+        // role 型消息不带 `type` 也是合法输入：宿主把 `/v1/chat/completions`
+        // 转成 `/v1/responses` 时就是这么发的（`ResponsesInputItem.Type` 为空值，
+        // 被 `omitempty` 省略）。早先这类项落到 `_ => {}` 被静默丢掉，整段用户
+        // 输入从此消失，上游只剩账号自带人设与注入上下文，表现就是「答非所问」。
+        "" if entry.contains_key("role") || entry.contains_key("content") => {
+            normalize_message_item(entry, out, keep_https_images)
+        }
         "function_call" | "custom_tool_call" | "apply_patch_call" => {
             let name = call_dispatch_name(entry);
             let args = entry
@@ -3825,6 +3837,61 @@ mod tests {
         assert_eq!(first["metadata"], again["metadata"]);
         assert_ne!(first["metadata"], other["metadata"]);
         assert_ne!(first["metadata"]["task_id"], first["metadata"]["turn_id"]);
+    }
+
+    #[test]
+    fn role_message_without_type_survives_every_history_path() {
+        // 宿主把 `/v1/chat/completions` 转成 `/v1/responses` 时，role 型消息不带
+        // `type`（sub2api `apicompat.ResponsesInputItem` 的 `type` 为空值被 omitempty
+        // 省略）。这类项曾经在两种历史路径上都落到兜底分支被静默丢弃，整段用户输入
+        // 消失，上游只按账号自带人设作答 —— 客户反馈的「答非所问」就是这个现象。
+        let body = serde_json::json!({
+            "model": "gpt-6-astra",
+            "stream": true,
+            "instructions": "You are Codex.",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "UNIQUE-MARKER-9377"}]},
+                {"role": "assistant", "content": [{"type": "output_text", "text": "ASSISTANT-REPLY-9377"}]},
+                {"role": "user", "content": "PLAIN-STRING-TURN-9377"}
+            ]
+        })
+        .to_string();
+        for mode in [
+            ToolMode::Text,
+            ToolMode::Native,
+            ToolMode::OfficeJs,
+            ToolMode::Declared,
+        ] {
+            let options = BridgeOptions {
+                mode,
+                ..BridgeOptions::default()
+            };
+            let out: serde_json::Value = serde_json::from_slice(
+                &prepare_request(body.as_bytes(), Some("sess-9377"), &options).unwrap(),
+            )
+            .unwrap();
+            let roles: Vec<&str> = out["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|item| item["role"].as_str())
+                .collect();
+            assert_eq!(
+                roles,
+                vec!["developer", "user", "assistant", "user"],
+                "{mode:?} 没有把无 type 的 role 消息当成 message 处理"
+            );
+            let joined = out["input"].to_string();
+            assert!(joined.contains("UNIQUE-MARKER-9377"), "{mode:?}: {joined}");
+            assert!(
+                joined.contains("ASSISTANT-REPLY-9377"),
+                "{mode:?}: {joined}"
+            );
+            assert!(
+                joined.contains("PLAIN-STRING-TURN-9377"),
+                "{mode:?}: {joined}"
+            );
+        }
     }
 
     #[test]

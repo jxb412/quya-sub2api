@@ -70,6 +70,12 @@
   控制（默认开），思路来自 `ranxi2001/sub2api` 的 `basispoints/images.go` 与
   `codex-basispoints-transport` 的 `keep_https_images`；
 - `input` 里的 `reasoning` 项（encrypted_content 不是它的）会 400，会被剥掉。
+- `input` 里的 role 型消息**可以不写 `type`**：宿主把 `/v1/chat/completions` 转成
+  `/v1/responses` 时发的就是这种形态（`apicompat.ResponsesInputItem` 的 `type` 为空值，
+  被 `omitempty` 省略）。这类项必须按 message 处理 —— 0.4.34 及以前它落到兜底分支被
+  **静默丢掉**，整段用户输入从此消失，上游只剩账号自带人设与注入上下文，客户看到
+  的就是「答非所问 / 回复里带别人的名字」（0.4.35 修复，两条历史路径都改了）。
+  排查同类问题时不要只看 `type` 字段：`{"role":"user","content":[…]}` 也是合法输入项。
 
 因此这里把「客户端工具目录 + 调用协议」写成一条 developer 输入项：模型需要调用客户端工具时
 只输出一行 JSON `{"__tool_call__":{"name":...,"arguments":{...}}}`，回程再把它翻成标准
