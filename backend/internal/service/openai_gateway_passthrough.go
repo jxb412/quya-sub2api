@@ -135,6 +135,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	reqStream bool,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
+	// 必须在任何账号级 client_metadata / 指纹改写前抓取客户端原始会话信号。
+	// 后续构造出的 http.Request 会继承这个私有 context，交给插件时转换为
+	// x-sub2api-client-conversation-*，但绝不会发往上游。
+	ctx = ensurePluginClientConversationContext(ctx, c, body)
 	requestedModel := reqModel
 	upstreamPassthroughModel := ""
 	if isOpenAIResponsesCompactPath(c) {

@@ -59,8 +59,10 @@
 
 出站会按上游白名单重写请求体，这是实测出来的硬约束：
 
-- 接受：`model` / `input` / `stream` / `reasoning` / `prompt_cache_key` / `instructions`，
-  以及 `metadata`（**只允许 `task_id` + `turn_id` 两个键**）；
+- 接受：`model` / `input` / `stream` / `reasoning_effort` / `prompt_cache_key` /
+  `instructions`，
+  以及字符串形式的 `metadata.task_id` / `metadata.turn_id` / `metadata.agent_iteration`
+  （最后一项可用 `bps_metadata_agent_iteration` 关闭）；
 - 拒绝（422 `Invalid request body`）：非空 `tools`、`tool_choice`、`parallel_tool_calls`、
   `text`、`include`、`temperature`、`top_p`、`truncation`、`previous_response_id`、
   `store: true`、metadata 里多出的任何键、`input_image` 的 base64（`data:`）形态、
@@ -110,17 +112,28 @@
 
 ### 会话身份与出站特征（0.4.23）
 
+#### 0.4.36 会话碰撞修复
+
+修复了服务层已提取会话头却没有传给 BPS 派生器的问题。现在会话锚点按以下顺序
+使用：请求体 `prompt_cache_key`、宿主按会员/API Key 收敛后的 session/thread/window
+或 `client_metadata`，再没有稳定键时使用本次唯一 `request_id`。`task_id`、`turn_id`
+和假名 `prompt_cache_key` 都包含该锚点；因此共享同一 OAuth 账号的不同会员即使发送
+完全相同的首问，也不会共用 BPS 会话或缓存。BPS 顶层仍只发送已验证白名单字段，
+没有添加自定义参数。
+
 BPS 出站的 `metadata` 与 `prompt_cache_key` 全部按内容派生，**不带随机数**，
 口径与 ranxi2001/sub2api 的 `basispoints` 实现、ghcp_proxy 参考实现一致：
 
-- `task_id` = `HMAC(种子, 账号作用域 + 会话锚点)`：同一会话多轮恒定。会话锚点 =
-  客户端 `prompt_cache_key`，没给就用历史第一条 item 的指纹；
-- `turn_id` = `HMAC(种子, 账号作用域 + 到最近一条 user 消息为止的前缀)`：同一回合
+- `task_id` = `HMAC(种子, 账号作用域 + 会话锚点)`：同一会话多轮恒定。会话锚点
+  优先取客户端 `prompt_cache_key`，其次取宿主已按会员/API Key 隔离的
+  `session/thread/window/client_metadata`；全部缺失时使用本次唯一 `request_id`，不再
+  退化为多个会员都可能相同的首条输入；
+- `turn_id` = `HMAC(种子, 账号作用域 + 会话锚点 + 到最近一条 user 消息为止的前缀)`：同一回合
   重发（客户端重试、agent 迭代）恒定，进入新回合才变；
 - `agent_iteration` = `1 + 本回合里的 *_call_output 数量`：**只有它逐轮递增**。
   上游据此把重试认成「同一个 turn」，不会把已完成的 plan 当成新 turn 重新规划
   （恒定的 turn_id + 递增的 iteration 也是缓存前缀能命中的前提）；
-- `prompt_cache_key` 换成 `HMAC(种子, 账号作用域 + 客户端会话键)` 的 UUID 形态假名
+- `prompt_cache_key` 换成 `HMAC(种子, 账号作用域 + 会话锚点)` 的 UUID 形态假名
   （默认开，`bps_pseudonym_prompt_cache_key=false` 可关掉做 A/B）：同会话多轮同值、
   跨账号不同值，客户端原始会话键不再外传；
 - `HMAC` 种子取 `identity.installation_id_seed` —— 与身份 Profile（machine 假名化、
@@ -244,6 +257,11 @@ UTC 时间戳 + 账号 id，超过 1MB 滚动成 `.1`）。
   只跳单条会造成「同一会话前几轮走 BPS、后面几条走正常通道」的撕裂 —— 上游会话状态
   分成两套，客户端照样接不上上下文；钉住之后该会话只在一侧继续。
   钉会话状态在内存里（进程级），与既有的 BPS 会话粘滞同样是 per-process。
+- 0.4.38 起，新宿主会在账号指纹改写前通过
+  `x-sub2api-client-conversation-source/key` 私有头交付按 API Key 隔离的会员会话键。
+  插件用它派生 BPS task/turn/cache，并让 `previous_response_id` 的正常通道 pin 在
+  调度换上游账号后继续生效；客户端没有显式会话键时明确退到每请求 `request_id`，
+  不再误用宿主注入的账号级固定 session。旧宿主未提供私有头时维持兼容逻辑。
 
 回程（响应方向）有两个默认开启的整理项，抄自 `codex-basispoints-transport`：
 

@@ -613,7 +613,7 @@ async fn run_forward(
     // BPS 会话键必须用「身份改写之前」的原始请求来算。one_id_per_request 会把
     // prompt_cache_key 换成每请求一个新 ID，machine 模式也会换成伪名；等改写完
     // 再取键，BPS 会话粘滞和 previous_response_id 门禁就都绑定不到同一会话上。
-    let client_session_key = bps_conversation_key(&start.headers, &body);
+    let client_session_key = bps_client_conversation_key(&start.headers, &body);
     let mut headers =
         transport::ordered_headers(&start.headers, codex_backend, strict_native_headers);
 
@@ -681,7 +681,8 @@ async fn run_forward(
         let conversation_key = client_session_key.clone();
         sticky_key = conversation_key
             .as_ref()
-            .map(|key| format!("{}:{key}", start.account_id));
+            .map(|key| bps_sticky_key(start.account_id, key));
+        let normal_pin_key = conversation_key.as_deref().map(normal_pin_key);
         let sticky_bps = sticky_key
             .as_deref()
             .map(|key| state.channels.session_wants_bps(key, now, sticky_ms))
@@ -692,7 +693,7 @@ async fn run_forward(
         // input + 上一轮 id）剥掉就等于丢历史，表现为上下文接不上。所以命中就把
         // 这条请求改走账号正常通道，并把整条会话钉住（只跳单条会撕裂会话）。
         let pin_ms = config.bps_previous_response_pin_seconds as u64 * 1000;
-        let pinned_normal = sticky_key
+        let pinned_normal = normal_pin_key
             .as_deref()
             .map(|key| state.channels.session_pinned_normal(key, now, pin_ms))
             .unwrap_or(false);
@@ -754,7 +755,7 @@ async fn run_forward(
             // 之间来回跳。
             if config.bps_skip_on_previous_response_id && has_prev_id {
                 previous_response_blocks_bps = true;
-                if let Some(key) = sticky_key.as_deref() {
+                if let Some(key) = normal_pin_key.as_deref() {
                     state.channels.pin_session_normal(key, now, pin_ms);
                 }
             }
@@ -852,13 +853,22 @@ async fn run_forward(
                 bps_trace_model = model.clone();
                 if crate::bps::is_bps_model(&config.bps_model_list(), &model) {
                     let bridge = crate::bps::BridgeOptions::from_config(&config);
-                    // 会话作用域：账号级。`task_id` / `turn_id` / 假名化的
-                    // `prompt_cache_key` 都由它 + 客户端会话内容派生（与
-                    // ranxi2001/sub2api 的 scope 口径一致），所以同一账号的同一会话
-                    // 多轮稳定、不同账号之间互不串味。
+                    // 会话作用域：账号级；会话锚点优先使用宿主已经按会员/API Key
+                    // 隔离过的 prompt_cache_key / session / thread / window 标识。
+                    // 完全没有稳定标识时用本次宿主 request_id：宁可这一类客户端不跨
+                    // 请求复用 BPS 缓存，也不能让多个会员因相同首问共用 task/turn。
                     let scope = format!("acct:{}", start.account_id);
-                    match crate::bps::prepare_request(&body, Some(&scope), &bridge) {
-                        Ok(rewritten) => {
+                    let session_anchor = bps_session_anchor(
+                        client_session_key.as_deref(),
+                        start.request_id.as_str(),
+                    );
+                    match crate::bps::prepare_request_with_session_key_scoped(
+                        &body,
+                        Some(&scope),
+                        Some(&session_anchor),
+                        &bridge,
+                    ) {
+                        Ok(prepared) => {
                             state.degrade.mark_bps_used(start.account_id, now);
                             // 诊断留痕：这条请求原样带了哪些客户端工具、桥接是否把目录写进提示词。
                             crate::bps::remember_last_rewrite(crate::bps::rewrite_note(
@@ -877,7 +887,7 @@ async fn run_forward(
                                 .flatten();
                             bps_fallback =
                                 Some((request_url.clone(), headers.clone(), body.clone()));
-                            body = rewritten;
+                            body = prepared.body;
                             request_url = config.bps_endpoint.trim().to_string();
                             // 记一次「今天真的打了 BPS」：每日上限判定与面板展示都用它。
                             state.channels.bump_daily(start.account_id, now);
@@ -893,8 +903,12 @@ async fn run_forward(
                                 headers.insert(name, value);
                             }
                             bps_stream = Some(
-                                crate::bps::BpsStream::with_targets(&bridge, targets)
-                                    .with_response_rewrite(scrub, config.bps_normalize_usage),
+                                crate::bps::BpsStream::with_targets_and_scope(
+                                    &bridge,
+                                    targets,
+                                    prepared.call_cache_scope,
+                                )
+                                .with_response_rewrite(scrub, config.bps_normalize_usage),
                             );
                         }
                         // body 不是可用的 Responses JSON：保持旧行为，原样放行。
@@ -1359,33 +1373,131 @@ fn raw_header<'a>(headers: &'a HashMap<String, HeaderValues>, name: &str) -> Opt
         .filter(|value| !value.is_empty())
 }
 
-/// BPS 通道的会话键：优先请求体里的 `prompt_cache_key`，其次 `session_id` /
-/// `thread-id` 头；用它派生稳定的 `metadata.task_id` / `metadata.turn_id`，
-/// 让同一会话的多轮请求在上游落在同一条缓存/路由亲和上。
+/// BPS 通道的会话键：优先请求体里的 `prompt_cache_key`，其次会话相关请求头，
+/// 最后读取 `client_metadata`。宿主会先把这些值按 API Key + OAuth 账号作用域
+/// 隔离，再交给插件；这里读取的是隔离后的值，不是会员原始标识。
 fn bps_conversation_key(headers: &HashMap<String, HeaderValues>, body: &[u8]) -> Option<String> {
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-        if let Some(key) = value
-            .get("prompt_cache_key")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(key.to_string());
+        for path in [
+            &["prompt_cache_key"][..],
+            &["client_metadata", "session_id"][..],
+            &["client_metadata", "session-id"][..],
+            &["client_metadata", "thread_id"][..],
+            &["client_metadata", "thread-id"][..],
+            &["client_metadata", "x-codex-window-id"][..],
+        ] {
+            let mut current = &value;
+            let mut found = true;
+            for segment in path {
+                current = match current.get(*segment) {
+                    Some(next) => next,
+                    None => {
+                        found = false;
+                        break;
+                    }
+                };
+            }
+            if found {
+                if let Some(key) = current
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                {
+                    return Some(key.to_string());
+                }
+            }
         }
-    }
-    for name in ["session_id", "thread-id", "x-codex-window-id"] {
-        if let Some(values) = headers.get(name) {
-            if let Some(value) = values
-                .values
-                .first()
-                .map(|item| item.trim().to_string())
-                .filter(|item| !item.is_empty())
-            {
-                return Some(value);
+        // Codex 还会把同一组标识嵌在 client_metadata 的 JSON 字符串头里；宿主
+        // 的账号/API Key 收敛层会同步改写这层内容，优先取其中的会话字段而不是
+        // 把整段 JSON 当作一个键。
+        if let Some(raw) = value
+            .get("client_metadata")
+            .and_then(|metadata| metadata.get("x-codex-turn-metadata"))
+            .and_then(serde_json::Value::as_str)
+        {
+            if let Ok(metadata) = serde_json::from_str::<serde_json::Value>(raw) {
+                for name in [
+                    "session_id",
+                    "session-id",
+                    "thread_id",
+                    "thread-id",
+                    "window_id",
+                ] {
+                    if let Some(key) = metadata
+                        .get(name)
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                    {
+                        return Some(key.to_string());
+                    }
+                }
             }
         }
     }
+    // Go 的 http.Header 会把头名规范化成 `X-Codex-Window-Id`；必须大小写
+    // 不敏感读取。旧实现直接 HashMap::get(小写名)，实际线上经常永远取不到。
+    for name in [
+        "session-id",
+        "session_id",
+        "thread-id",
+        "thread_id",
+        "x-codex-window-id",
+    ] {
+        if let Some(value) = raw_header(headers, name) {
+            return Some(value.to_string());
+        }
+    }
     None
+}
+
+/// 优先使用新宿主在账号指纹改写前捕获的会员会话键。
+///
+/// * explicit：只信任私有 key，忽略宿主后来注入的账号级 session；
+/// * none：确认客户端没有显式稳定键，必须退到本次 request_id；
+/// * 私有头缺失：兼容旧宿主，沿用旧的请求体/头提取逻辑。
+fn bps_client_conversation_key(
+    headers: &HashMap<String, HeaderValues>,
+    body: &[u8],
+) -> Option<String> {
+    match raw_header(
+        headers,
+        crate::identity::HOST_CLIENT_CONVERSATION_SOURCE_HEADER,
+    ) {
+        Some(source) if source.eq_ignore_ascii_case("explicit") => raw_header(
+            headers,
+            crate::identity::HOST_CLIENT_CONVERSATION_KEY_HEADER,
+        )
+        .map(str::to_string),
+        Some(source) if source.eq_ignore_ascii_case("none") => None,
+        Some(_) => None,
+        None => bps_conversation_key(headers, body),
+    }
+}
+
+fn bps_sticky_key(account_id: i64, conversation_key: &str) -> String {
+    format!("acct:{account_id}:conversation:{conversation_key}")
+}
+
+/// 正常通道 pin 故意不包含上游账号：调度换账号后仍属于同一会员会话。
+fn normal_pin_key(conversation_key: &str) -> String {
+    format!("client-conversation:{conversation_key}")
+}
+
+/// 给 BPS 派生标识使用的本地会话锚点。稳定客户端会话键优先；没有任何会话键时
+/// 退到宿主为每次转发生成的唯一 request_id，确保不同会员不会因相同输入碰撞。
+fn bps_session_anchor(client_session_key: Option<&str>, request_id: &str) -> String {
+    if let Some(key) = client_session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("session:{key}");
+    }
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return format!("request:{}", uuid::Uuid::now_v7());
+    }
+    format!("request:{request_id}")
 }
 
 #[cfg(test)]
@@ -1420,6 +1532,113 @@ mod tests {
         let mut off = config_with_cooldowns();
         off.bps_cooldown_403_seconds = 0;
         assert_eq!(bps_cooldown_for(&off, Some(403)).0, 0);
+    }
+
+    #[test]
+    fn bps_conversation_key_reads_canonicalized_header_names() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "X-Codex-Window-Id".to_string(),
+            HeaderValues {
+                values: vec!["window-scoped-by-host".to_string()],
+            },
+        );
+        assert_eq!(
+            bps_conversation_key(&headers, br#"{"model":"gpt-6-astra"}"#),
+            Some("window-scoped-by-host".to_string())
+        );
+    }
+
+    #[test]
+    fn bps_conversation_key_prefers_body_prompt_key_and_reads_client_metadata() {
+        let headers = HashMap::new();
+        let body = br#"{"model":"gpt-6-astra","client_metadata":{"thread_id":"thread-scoped"}}"#;
+        assert_eq!(
+            bps_conversation_key(&headers, body),
+            Some("thread-scoped".to_string())
+        );
+        let nested = br#"{"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"nested-session\"}"}}"#;
+        assert_eq!(
+            bps_conversation_key(&headers, nested),
+            Some("nested-session".to_string())
+        );
+        let body_with_prompt =
+            br#"{"prompt_cache_key":"body-key","client_metadata":{"thread_id":"thread-scoped"}}"#;
+        assert_eq!(
+            bps_conversation_key(&headers, body_with_prompt),
+            Some("body-key".to_string())
+        );
+    }
+
+    #[test]
+    fn private_explicit_conversation_key_beats_host_fingerprint_fields() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "X-Sub2api-Client-Conversation-Source".to_string(),
+            HeaderValues {
+                values: vec!["explicit".to_string()],
+            },
+        );
+        headers.insert(
+            "X-Sub2api-Client-Conversation-Key".to_string(),
+            HeaderValues {
+                values: vec!["member-key".to_string()],
+            },
+        );
+        let body = br#"{"prompt_cache_key":"account-fixed-key","client_metadata":{"session_id":"account-fixed-session"}}"#;
+        assert_eq!(
+            bps_client_conversation_key(&headers, body),
+            Some("member-key".to_string())
+        );
+    }
+
+    #[test]
+    fn private_none_ignores_host_injected_fixed_session() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            "x-sub2api-client-conversation-source".to_string(),
+            HeaderValues {
+                values: vec!["none".to_string()],
+            },
+        );
+        let body = br#"{"prompt_cache_key":"account-fixed-key","client_metadata":{"session_id":"account-fixed-session"}}"#;
+        assert_eq!(bps_client_conversation_key(&headers, body), None);
+        assert_ne!(
+            bps_session_anchor(None, "req-a"),
+            bps_session_anchor(None, "req-b")
+        );
+    }
+
+    #[test]
+    fn old_host_without_private_headers_keeps_legacy_behavior() {
+        let headers = HashMap::new();
+        let body = br#"{"prompt_cache_key":"legacy-key"}"#;
+        assert_eq!(
+            bps_client_conversation_key(&headers, body),
+            Some("legacy-key".to_string())
+        );
+    }
+
+    #[test]
+    fn normal_pin_key_survives_account_switch_but_bps_sticky_does_not() {
+        assert_eq!(normal_pin_key("member-key"), normal_pin_key("member-key"));
+        assert_ne!(
+            bps_sticky_key(72, "member-key"),
+            bps_sticky_key(73, "member-key")
+        );
+        let sticky = ChannelSticky::default();
+        let key = normal_pin_key("member-key");
+        sticky.pin_session_normal(&key, 1_000, 30_000);
+        assert!(sticky.session_pinned_normal(&normal_pin_key("member-key"), 2_000, 30_000));
+    }
+
+    #[test]
+    fn bps_session_anchor_falls_back_to_unique_request_id() {
+        assert_eq!(
+            bps_session_anchor(Some("member-session"), "req-1"),
+            "session:member-session"
+        );
+        assert_eq!(bps_session_anchor(None, "req-1"), "request:req-1");
     }
 
     #[test]

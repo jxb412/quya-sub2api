@@ -90,4 +90,12 @@ const (
 
 	// ClientOriginator 是客户端自报 originator（入站原值，同上）。
 	ClientOriginator Key = "ctx_client_originator"
+
+	// ClientConversationSource 标识客户端是否显式携带稳定会话键。
+	// 值为 explicit 或 none；用于让插件区分真实客户端会话与宿主后续注入的账号级指纹。
+	ClientConversationSource Key = "ctx_client_conversation_source"
+
+	// ClientConversationKey 是按 API Key 隔离后的客户端稳定会话键。
+	// 该值不包含上游账号，因此调度换号后仍保持一致。
+	ClientConversationKey Key = "ctx_client_conversation_key"
 )

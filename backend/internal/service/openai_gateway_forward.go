@@ -19,6 +19,10 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	// 在任何账号级 client_metadata / prompt_cache_key / 指纹改写之前抓取
+	// 客户端原始会话信号。Forward 可能因上游失败被同一请求多次调用；已有快照时
+	// 保留首次值，确保换账号后 previous_response_id pin 与 BPS 会话锚点不漂移。
+	ctx = ensurePluginClientConversationContext(ctx, c, body)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
 	if shouldForwardOpenAIResponsesViaRawChatCompletions(account) {

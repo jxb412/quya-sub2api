@@ -3,7 +3,7 @@
 //! 端点 `https://bps.openai.com/basispoints/api/responses` 是 ChatGPT Office/Excel
 //! 插件的后端。实测它的请求体是**严格白名单**：
 //!
-//! * 接受：`model` / `input` / `stream` / `store` / `reasoning` / `prompt_cache_key`
+//! * 接受：`model` / `input` / `stream` / `store` / `reasoning_effort` / `prompt_cache_key`
 //!   / `instructions`，以及 `metadata`（键值**都必须是字符串**：本插件只写
 //!   `task_id` / `turn_id` / `agent_iteration`，与 Excel 插件真实出站和
 //!   ghcp_proxy 参考实现同口径）；
@@ -409,6 +409,44 @@ pub fn prepare_request(
     scope: Option<&str>,
     options: &BridgeOptions,
 ) -> Result<Vec<u8>, PrepareError> {
+    prepare_request_with_session_key(body, scope, None, options)
+}
+
+/// 与 [`prepare_request`] 相同，但允许宿主把请求头/客户端元数据里已经解析出的
+/// 稳定会话键一并传入。
+///
+/// BPS 的顶层请求体是严格白名单，不能通过新增自定义字段来隔离会员；这里仅把
+/// `client_session_key` 用作本地派生 `task_id` / `turn_id` / 假名
+/// `prompt_cache_key` 的输入。客户端原始值不会出站。只要宿主显式传入该键，
+/// 就以宿主在身份改写前捕获的值为准；旧宿主未传入时才读取请求体里的
+/// `prompt_cache_key`。
+pub fn prepare_request_with_session_key(
+    body: &[u8],
+    scope: Option<&str>,
+    client_session_key: Option<&str>,
+    options: &BridgeOptions,
+) -> Result<Vec<u8>, PrepareError> {
+    prepare_request_with_session_key_scoped(body, scope, client_session_key, options)
+        .map(|prepared| prepared.body)
+}
+
+/// BPS 请求改写结果，以及这条会话专属的原生工具回放缓存作用域。
+///
+/// 工具调用的 `call_id` 由客户端或上游生成，不能假设在整个插件进程内唯一。缓存
+/// 作用域使用同一份 `task_id` 派生逻辑，确保同账号同会话稳定、不同会员/会话隔离。
+pub struct PreparedRequest {
+    pub body: Vec<u8>,
+    pub call_cache_scope: String,
+}
+
+/// 与 [`prepare_request_with_session_key`] 相同，并把工具回放缓存作用域返回给响应
+/// 流改写器。线上服务层必须使用这个入口，避免只按 `call_id` 回放时跨会话串工具。
+pub fn prepare_request_with_session_key_scoped(
+    body: &[u8],
+    scope: Option<&str>,
+    client_session_key: Option<&str>,
+    options: &BridgeOptions,
+) -> Result<PreparedRequest, PrepareError> {
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| PrepareError::NotApplicable)?;
     let obj = value.as_object().ok_or(PrepareError::NotApplicable)?;
@@ -441,11 +479,26 @@ pub fn prepare_request(
         _ => Vec::new(),
     };
 
-    let history = translate_history(
+    let cache_key = prompt_cache_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let client_session_key = client_session_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // 新宿主传入的是在任何账号级身份/指纹改写之前捕获、并按会员隔离后的会话
+    // 锚点，必须优先于请求体。否则客户端本来没有会话键时，宿主随后注入的账号级
+    // prompt_cache_key 会覆盖 request_id 兜底，多个会员仍可能共用同一 BPS 会话。
+    // 旧宿主不传该参数时继续读取请求体，保持向后兼容。
+    let conversation_key = client_session_key.or(cache_key);
+    let identity = session_identity(scope, &input_items, conversation_key, &options.id_seed);
+
+    let history = translate_history_scoped(
         &input_items,
         options.mode,
         options.keep_https_images,
         &call_targets_from_tools(&tools),
+        &identity.task_id,
     );
     let mut input = Vec::with_capacity(history.len() + 2);
     if options.catalog_at_prompt_end {
@@ -474,8 +527,6 @@ pub fn prepare_request(
         }
     }
 
-    let cache_key = prompt_cache_key.as_deref();
-    let identity = session_identity(scope, &input_items, cache_key, &options.id_seed);
     let mut out = serde_json::Map::new();
     out.insert("model".to_string(), serde_json::Value::String(model));
     out.insert("input".to_string(), serde_json::Value::Array(input));
@@ -494,7 +545,7 @@ pub fn prepare_request(
         serde_json::Value::String("explicit".to_string()),
     );
     if options.forward_prompt_cache_key {
-        if let Some(key) = cache_key.filter(|value| !value.trim().is_empty()) {
+        if let Some(key) = conversation_key {
             // 假名化：上游只看到「按账号作用域派生」的 UUID 形态会话键，
             // 语义与真实 Codex 的 conversation id 一致；同一会话多轮同值，
             // 所以缓存亲和不受影响（关掉即原样透传，用于 A/B）。
@@ -534,7 +585,12 @@ pub fn prepare_request(
         );
     }
     out.insert("metadata".to_string(), serde_json::Value::Object(metadata));
-    serde_json::to_vec(&serde_json::Value::Object(out)).map_err(|_| PrepareError::NotApplicable)
+    let body = serde_json::to_vec(&serde_json::Value::Object(out))
+        .map_err(|_| PrepareError::NotApplicable)?;
+    Ok(PreparedRequest {
+        body,
+        call_cache_scope: identity.task_id,
+    })
 }
 
 fn text_message(role: &str, text: &str) -> serde_json::Value {
@@ -1406,7 +1462,7 @@ pub fn rewrite_note(
     })
 }
 
-/// 单进程内的「原生工具项」缓存：`call_id` -> 回放时应发给上游的 item。
+/// 单进程内的「原生工具项」缓存：`会话作用域 + call_id` -> 回放时应发给上游的 item。
 ///
 /// * officejs 方案存的是上游 `run_officejs` 的完整 item：客户端回传的是被翻译过的
 ///   客户端工具调用（名字对不上），必须换回上游认识的那个身份；
@@ -1422,28 +1478,34 @@ fn native_call_cache(
 
 const NATIVE_CALL_CACHE_CAP: usize = 2048;
 
-/// 记录一个原生工具项（回放历史时按 `call_id` 取回）。
-pub fn remember_native_call(call_id: &str, item: &serde_json::Value) {
+fn native_call_cache_key(cache_scope: &str, call_id: &str) -> Option<String> {
+    let cache_scope = cache_scope.trim();
     let call_id = call_id.trim();
-    if call_id.is_empty() {
-        return;
+    if cache_scope.is_empty() || call_id.is_empty() {
+        return None;
     }
+    Some(format!("{cache_scope}\0{call_id}"))
+}
+
+/// 记录一个原生工具项（回放历史时按 `会话作用域 + call_id` 取回）。
+pub fn remember_native_call(cache_scope: &str, call_id: &str, item: &serde_json::Value) {
+    let Some(key) = native_call_cache_key(cache_scope, call_id) else {
+        return;
+    };
     if let Ok(mut cache) = native_call_cache().lock() {
         if cache.len() >= NATIVE_CALL_CACHE_CAP {
             cache.clear();
         }
-        cache.insert(call_id.to_string(), item.clone());
+        cache.insert(key, item.clone());
     }
 }
 
-fn recall_native_call(call_id: &str) -> Option<serde_json::Value> {
-    if call_id.trim().is_empty() {
-        return None;
-    }
+fn recall_native_call(cache_scope: &str, call_id: &str) -> Option<serde_json::Value> {
+    let key = native_call_cache_key(cache_scope, call_id)?;
     native_call_cache()
         .lock()
         .ok()
-        .and_then(|cache| cache.get(call_id).cloned())
+        .and_then(|cache| cache.get(&key).cloned())
 }
 
 /// 历史项转换：text 方案转文本，native / officejs 方案保留原生 item 形状。
@@ -1452,6 +1514,16 @@ fn translate_history(
     mode: ToolMode,
     keep_https_images: bool,
     targets: &std::collections::HashMap<String, CallTarget>,
+) -> Vec<serde_json::Value> {
+    translate_history_scoped(items, mode, keep_https_images, targets, "")
+}
+
+fn translate_history_scoped(
+    items: &[serde_json::Value],
+    mode: ToolMode,
+    keep_https_images: bool,
+    targets: &std::collections::HashMap<String, CallTarget>,
+    call_cache_scope: &str,
 ) -> Vec<serde_json::Value> {
     if mode.replays_native_history() {
         let mut out = Vec::with_capacity(items.len());
@@ -1463,6 +1535,7 @@ fn translate_history(
                 keep_https_images,
                 targets,
                 &mut suppressed_calls,
+                call_cache_scope,
             );
         }
         // 兜底：不管 id 来自客户端回传、缓存回放还是我们自己生成，只要进 input
@@ -1568,6 +1641,7 @@ fn native_history_item(
     keep_https_images: bool,
     targets: &std::collections::HashMap<String, CallTarget>,
     suppressed_calls: &mut std::collections::HashSet<String>,
+    call_cache_scope: &str,
 ) {
     let Some(entry) = item.as_object() else {
         if let Some(text) = item.as_str() {
@@ -1592,7 +1666,7 @@ fn native_history_item(
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            if let Some(mut remembered) = recall_native_call(&call_id) {
+            if let Some(mut remembered) = recall_native_call(call_cache_scope, &call_id) {
                 // 缓存里可能存着老版本写的 `ctc_bps_...`，回放前统一修正。
                 normalize_item_id_field(&mut remembered);
                 let remembered_target = remembered
@@ -2085,7 +2159,9 @@ fn session_identity(
         .filter(|value| !value.is_empty())
         .unwrap_or("acct:local")
         .to_string();
-    // 会话锚点：客户端会话键优先，其次历史第一条 item 的指纹（与参考实现一致）。
+    // 会话锚点：请求体/宿主传入的会话键优先，其次历史第一条 item 的指纹。
+    // 真实用户转发由 service 层保证一定传入会话键或 request_id；保留指纹兜底是
+    // 为了兼容面板自检和其他内部调用方。
     let conversation = cache_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -2095,9 +2171,12 @@ fn session_identity(
     let turn_end = turn_end(input);
     let turn_prefix =
         serde_json::to_string(input.get(..turn_end).unwrap_or(&[])).unwrap_or_default();
+    // turn_id 也必须带会话锚点。只把输入前缀参与派生时，不同会员发送相同首问
+    // 即使 task_id 已隔离，turn_id 仍会碰撞；BPS 会把二者共同当作会话/回合身份。
+    let turn_material = format!("{conversation}\0{turn_prefix}");
     SessionIdentity {
         task_id: crate::identity::scoped_identifier(seed, &scope, "task", &conversation),
-        turn_id: crate::identity::scoped_identifier(seed, &scope, "turn", &turn_prefix),
+        turn_id: crate::identity::scoped_identifier(seed, &scope, "turn", &turn_material),
         agent_iteration: agent_iteration(input, turn_end),
         scope,
     }
@@ -2266,6 +2345,8 @@ pub struct BpsStream {
     normalize_usage: bool,
     /// 目录里的调用名 → 客户端寻址目标（回程还原 namespace / custom_tool_call）。
     targets: std::collections::HashMap<String, CallTarget>,
+    /// 原生工具回放缓存的账号会话作用域。绝不能只按 call_id 做进程级共享。
+    call_cache_scope: String,
     buf: Vec<u8>,
     decision: Decision,
     held: Vec<serde_json::Value>,
@@ -2307,9 +2388,19 @@ impl BpsStream {
         options: &BridgeOptions,
         targets: std::collections::HashMap<String, CallTarget>,
     ) -> Self {
+        Self::with_targets_and_scope(options, targets, String::new())
+    }
+
+    /// 带客户端工具寻址表和会话隔离作用域构造。
+    pub fn with_targets_and_scope(
+        options: &BridgeOptions,
+        targets: std::collections::HashMap<String, CallTarget>,
+        call_cache_scope: String,
+    ) -> Self {
         Self {
             mode: options.mode,
             targets,
+            call_cache_scope,
             ..Self::default()
         }
     }
@@ -2506,7 +2597,7 @@ impl BpsStream {
                 if self.passes_through_call(&item) {
                     // 原样透传，并记下 call_id → 上游 item，多轮历史按原形回放。
                     if let Some(call_id) = item.get("call_id").and_then(serde_json::Value::as_str) {
-                        remember_native_call(call_id, &item);
+                        remember_native_call(&self.call_cache_scope, call_id, &item);
                     }
                 }
                 None
@@ -2811,7 +2902,7 @@ impl BpsStream {
                 );
                 // native / officejs 方案回放历史时按 call_id 取回这个原生 item。
                 if let Some(call_id) = item.get("call_id").and_then(serde_json::Value::as_str) {
-                    remember_native_call(call_id, &item);
+                    remember_native_call(&self.call_cache_scope, call_id, &item);
                 }
                 out.extend(frames);
                 self.tool_items.push((None, item));
@@ -2908,7 +2999,7 @@ impl BpsStream {
             self.held_index,
         );
         // 客户端回传历史时看到的是被翻译过的客户端工具调用，回放要换回上游的卡车 item。
-        remember_native_call(&call_id, item);
+        remember_native_call(&self.call_cache_scope, &call_id, item);
         self.tool_items.push((Some(item_id), built));
         Some(frames)
     }
@@ -3837,6 +3928,88 @@ mod tests {
         assert_eq!(first["metadata"], again["metadata"]);
         assert_ne!(first["metadata"], other["metadata"]);
         assert_ne!(first["metadata"]["task_id"], first["metadata"]["turn_id"]);
+    }
+
+    #[test]
+    fn external_session_anchor_is_used_when_prompt_cache_key_is_missing() {
+        let body = serde_json::json!({
+            "model": "gpt-6-astra",
+            "stream": true,
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "same first question"}]}]
+        })
+        .to_string();
+        let options = BridgeOptions {
+            id_seed: "collision-regression-seed".to_string(),
+            ..BridgeOptions::default()
+        };
+        let a: serde_json::Value = serde_json::from_slice(
+            &prepare_request_with_session_key(
+                body.as_bytes(),
+                Some("acct:shared-oauth"),
+                Some("session:member-a"),
+                &options,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let b: serde_json::Value = serde_json::from_slice(
+            &prepare_request_with_session_key(
+                body.as_bytes(),
+                Some("acct:shared-oauth"),
+                Some("session:member-b"),
+                &options,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let a_retry: serde_json::Value = serde_json::from_slice(
+            &prepare_request_with_session_key(
+                body.as_bytes(),
+                Some("acct:shared-oauth"),
+                Some("session:member-a"),
+                &options,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_ne!(a["metadata"]["task_id"], b["metadata"]["task_id"]);
+        assert_ne!(a["metadata"]["turn_id"], b["metadata"]["turn_id"]);
+        assert_ne!(a["prompt_cache_key"], b["prompt_cache_key"]);
+        assert_eq!(a["metadata"], a_retry["metadata"]);
+        assert_eq!(a["prompt_cache_key"], a_retry["prompt_cache_key"]);
+    }
+
+    #[test]
+    fn turn_id_includes_conversation_anchor() {
+        let body = serde_json::json!({
+            "model": "gpt-6-astra",
+            "stream": true,
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "identical"}]}]
+        })
+        .to_string();
+        let options = BridgeOptions::default();
+        let one: serde_json::Value = serde_json::from_slice(
+            &prepare_request_with_session_key(
+                body.as_bytes(),
+                Some("acct:1"),
+                Some("one"),
+                &options,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let two: serde_json::Value = serde_json::from_slice(
+            &prepare_request_with_session_key(
+                body.as_bytes(),
+                Some("acct:1"),
+                Some("two"),
+                &options,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_ne!(one["metadata"]["turn_id"], two["metadata"]["turn_id"]);
     }
 
     #[test]
@@ -5016,7 +5189,11 @@ mod tests {
 
     #[test]
     fn officejs_stream_translates_transport_truck_native() {
-        let mut stream = BpsStream::with_options(&bridge(ToolMode::OfficeJs));
+        let mut stream = BpsStream::with_targets_and_scope(
+            &bridge(ToolMode::OfficeJs),
+            std::collections::HashMap::new(),
+            "officejs-native-roundtrip".to_string(),
+        );
         let item_id = "fc_truck_1";
         let arguments = serde_json::json!({
             "code": "{\"tool\":\"get_weather\",\"args\":{\"city\":\"Tokyo\"}}",
@@ -5061,6 +5238,64 @@ mod tests {
         assert_eq!(calls[0]["name"], serde_json::json!("get_weather"));
         assert_eq!(calls[0]["call_id"], serde_json::json!("call_truck_1"));
         assert_eq!(calls[0]["id"], serde_json::json!(item_id));
+    }
+
+    #[test]
+    fn native_call_cache_is_isolated_by_conversation_scope() {
+        let call_id = "call_same_across_members";
+        let item_a = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_member_a",
+            "status": "completed",
+            "call_id": call_id,
+            "name": "tool_a",
+            "arguments": "{}"
+        });
+        let item_b = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_member_b",
+            "status": "completed",
+            "call_id": call_id,
+            "name": "tool_b",
+            "arguments": "{}"
+        });
+        remember_native_call("task-member-a", call_id, &item_a);
+        remember_native_call("task-member-b", call_id, &item_b);
+
+        assert_eq!(
+            recall_native_call("task-member-a", call_id),
+            Some(item_a.clone())
+        );
+        assert_eq!(
+            recall_native_call("task-member-b", call_id),
+            Some(item_b.clone())
+        );
+        assert_eq!(recall_native_call("task-member-c", call_id), None);
+
+        let history = vec![serde_json::json!({
+            "type": "function_call",
+            "id": "fc_client_history",
+            "status": "completed",
+            "call_id": call_id,
+            "name": "client_visible_name",
+            "arguments": "{}"
+        })];
+        let replay_a = translate_history_scoped(
+            &history,
+            ToolMode::Declared,
+            false,
+            &std::collections::HashMap::new(),
+            "task-member-a",
+        );
+        let replay_b = translate_history_scoped(
+            &history,
+            ToolMode::Declared,
+            false,
+            &std::collections::HashMap::new(),
+            "task-member-b",
+        );
+        assert_eq!(replay_a[0]["name"], serde_json::json!("tool_a"));
+        assert_eq!(replay_b[0]["name"], serde_json::json!("tool_b"));
     }
 
     #[test]
