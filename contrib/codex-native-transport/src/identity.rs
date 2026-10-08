@@ -270,8 +270,7 @@ pub fn is_codex_backend_request(url: &str) -> bool {
 /// 兼容性：旧宿主不写这两个头，插件回退到请求头 `user-agent` / `originator`。
 pub const HOST_CLIENT_UA_HEADER: &str = "x-sub2api-client-user-agent";
 pub const HOST_CLIENT_ORIGINATOR_HEADER: &str = "x-sub2api-client-originator";
-pub const HOST_CLIENT_CONVERSATION_SOURCE_HEADER: &str =
-    "x-sub2api-client-conversation-source";
+pub const HOST_CLIENT_CONVERSATION_SOURCE_HEADER: &str = "x-sub2api-client-conversation-source";
 pub const HOST_CLIENT_CONVERSATION_KEY_HEADER: &str = "x-sub2api-client-conversation-key";
 
 /// 宿主私有透传头前缀。插件只读这些头做判定，**绝不能出站到上游**：它们既不是真实
