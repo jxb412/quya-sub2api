@@ -326,14 +326,30 @@ pub async fn restore_one(
     path: &str,
     record: &DropRecord,
 ) -> Result<(), String> {
-    crate::admin::restore_account_models(
+    if let Err(err) = crate::admin::restore_account_models(
         base,
         key,
         record.account_id,
         &record.models,
         &record.form,
     )
-    .await?;
+    .await
+    {
+        if account_gone(&err) {
+            // 账号已被删除：宿主上已经没有这份名单可恢复，摘除记录直接丢弃。
+            // 留着的话巡检每轮都重试一次、永远失败——现网见过一个删掉的号让
+            // 日志刷了 600 多条「恢复失败 ... account detail status 404」。
+            state.model_drop.remove(record.account_id, path);
+            let text = format!(
+                "403 摘除记录丢弃 acc={}（账号已不存在，无需恢复）",
+                record.account_id
+            );
+            crate::bps::note(config, record.account_id, &text);
+            eprintln!("[codex-native-transport] {text}");
+            return Ok(());
+        }
+        return Err(err);
+    }
     state.model_drop.remove(record.account_id, path);
     let text = format!(
         "403 摘除模型已恢复 acc={} 模型={}",
@@ -343,6 +359,11 @@ pub async fn restore_one(
     crate::bps::note(config, record.account_id, &text);
     eprintln!("[codex-native-transport] {text}");
     Ok(())
+}
+
+/// 宿主明确回「账号不存在」：这类失败重试多少次都不会成功，按陈旧记录丢弃。
+fn account_gone(err: &str) -> bool {
+    err.contains("account detail status 404") || err.contains("account detail status 410")
 }
 
 #[cfg(test)]
@@ -410,5 +431,17 @@ mod tests {
         assert!(record.next_retry_ms > crate::donor::now_ms());
         assert_eq!(record.last_error, "boom");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 宿主回「账号不存在」时不再无限重试：识别为陈旧记录后丢弃。
+    #[test]
+    fn stale_record_is_recognized_when_account_is_gone() {
+        assert!(account_gone("account detail status 404"));
+        assert!(account_gone("account detail status 410"));
+        assert!(!account_gone("account detail status 500"));
+        assert!(!account_gone(
+            "account update status 404: {\"error\":\"x\"}"
+        ));
+        assert!(!account_gone("account detail request: connection refused"));
     }
 }

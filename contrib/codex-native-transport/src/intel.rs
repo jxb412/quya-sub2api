@@ -1,7 +1,12 @@
 //! 账号智力巡检（降智检测 + 自动暂停/恢复 + 每账号降智处理开关）。
 //!
 //! 判据很土但直接：拿账号自己的 bearer 打一次真实 Codex /responses，
-//! 问一句知识库日期类问题，回答里出现 `2024`（可配）即判定该号当前被降智。
+//! 问一句知识库日期类问题，按回答判定该号当前是否被降智。
+//!
+//! 运营口径（2026-10 确认）：**拒答才是正常的**——不降智的模型不会自报截止日期；一旦
+//! 报出早于 `intel_degraded_before_year`（默认 2026）的日期，例如典型的「2024 年 6 月」，
+//! 就说明这次请求被上游路由到了降智模型，判不合格。`intel_fail_marker` 里的自定义关键词
+//! 仍然照常命中即判不合格。
 //!
 //! 请求形状（url / 请求头 / body）借用池里任一条真实流量模板，只把 input 换成
 //! 巡检问题、model 换成巡检模型、bearer 与 chatgpt-account-id 换成目标号，
@@ -25,8 +30,6 @@ use crate::service::SharedState;
 pub const DEFAULT_INTEL_MODEL: &str = "gpt-6-astra";
 /// 巡检默认问题。
 pub const DEFAULT_INTEL_PROMPT: &str = "你在知识库日期 不允许联网快速回答";
-/// 命中即判不合格的标记。
-pub const DEFAULT_INTEL_FAIL_MARKER: &str = "2024";
 /// 套餐默认开启降智处理的套餐类型：Business Premium（`self_serve_business_prolite`）。
 /// 规则只在 BPS 通道总开关（`bps_enabled`）打开时生效；总开关关掉时，
 /// 由本规则自己置上的账号会被自动收回（用户手动勾过的账号一律不碰）。
@@ -1124,35 +1127,27 @@ pub fn intel_question(config: &PluginConfig) -> String {
     }
 }
 
-/// 降智标记（空则用默认）。
+/// 面板展示用的不合格关键词（原样返回，可能为空 = 不启用关键词判定）。
 pub fn intel_marker(config: &PluginConfig) -> String {
-    if config.intel_fail_marker.trim().is_empty() {
-        DEFAULT_INTEL_FAIL_MARKER.to_string()
-    } else {
-        config.intel_fail_marker.trim().to_string()
-    }
+    config.intel_fail_marker.trim().to_string()
 }
 
 /// 不合格关键词列表：支持逗号 / 竖线分隔（任一命中即判不合格）。
 ///
-/// 单一关键词（例如 `2024`）容易被模型的措辞绕过：同一个降智号有时会答
-/// 「我不知道自己的知识截止日期」，不含 `2024`，于是被误判成「合格」。
-/// 因此这里允许一次填多个关键词，例如 `2024,无法确认,没有提供`。
+/// 默认（未配置）返回空列表。判定主判据是 `intel_degraded_before_year` 的年份规则：
+/// 拒答属于**正常**表现，所以「回答里没有年份」不能再算不合格。这一项只作为额外的
+/// 关键词兜底，留空即完全不启用，想临时加词（例如某个模型的敷衍措辞）时再填。
 pub fn intel_markers(config: &PluginConfig) -> Vec<String> {
     let raw = config.intel_fail_marker.trim();
     if raw.is_empty() {
-        return vec![DEFAULT_INTEL_FAIL_MARKER.to_string()];
+        return Vec::new();
     }
     let markers: Vec<String> = raw
         .split([',', '|', ';', '，', '｜', '；'])
         .map(|part| part.trim().to_string())
         .filter(|part| !part.is_empty())
         .collect();
-    if markers.is_empty() {
-        vec![DEFAULT_INTEL_FAIL_MARKER.to_string()]
-    } else {
-        markers
-    }
+    markers
 }
 
 /// 回答里是否命中任一不合格关键词。
@@ -1162,10 +1157,36 @@ pub fn answer_is_unqualified(answer: &str, markers: &[String]) -> bool {
         .any(|marker| answer.contains(marker.as_str()))
 }
 
+/// 按当前口径判定一条巡检回答是否「合格」（true = 这个号现在没被降智）。
+///
+/// 运营口径（2026-10 确认）：**拒答才是正常的** —— 不降智的模型不会自报知识截止日期。
+/// 所以：
+/// - 命中 `intel_fail_marker` 里的自定义关键词 → 不合格；
+/// - 回答里报出早于 `intel_degraded_before_year` 的日期（典型「2024 年 6 月」）→ 不合格；
+/// - 拒答 / 压根不提日期 → **合格**。
+///
+/// 旧的 `intel_require_year`（回答里必须出现年份）与这套口径互斥，只在
+/// `intel_degraded_before_year = 0`（关掉年份下限判定）时才作为兜底生效。
+pub fn answer_is_healthy(answer: &str, config: &PluginConfig) -> bool {
+    if answer_is_unqualified(answer, &intel_markers(config)) {
+        return false;
+    }
+    if answer_has_degraded_year(answer, config.intel_degraded_before_year) {
+        return false;
+    }
+    if config.intel_require_year
+        && config.intel_degraded_before_year == 0
+        && !answer_has_year(answer)
+    {
+        return false;
+    }
+    true
+}
+
 /// 回答里是否出现年份证据（4 位数字且以 19/20 开头）。
 ///
-/// 巡检问的就是「你的知识库日期」，正常回答一定带年份；答不出年份的（例如
-/// 「好的，我将仅基于已有知识回答」这类敷衍）按不合格处理，避免降智号被误判成合格。
+/// ⚠️ 旧口径的辅助判据，只在 `intel_degraded_before_year = 0`（关掉年份下限判定）
+/// 且 `intel_require_year = true` 时才生效。新口径下「拒答」才算正常，所以默认不用它。
 pub fn answer_has_year(answer: &str) -> bool {
     let bytes = answer.as_bytes();
     for start in 0..bytes.len().saturating_sub(3) {
@@ -1175,6 +1196,42 @@ pub fn answer_has_year(answer: &str) -> bool {
         }
         let head = &window[..2];
         if head == b"19" || head == b"20" {
+            return true;
+        }
+    }
+    false
+}
+
+/// 回答里是否出现早于 `floor` 的年份（4 位数字，19xx/20xx）。
+///
+/// 不降智的号会拒答；报出任何早于 `floor` 的日期（典型「2024 年 6 月」）都说明这次
+/// 请求落到了降智模型上。`floor = 0` 表示关闭该判定。
+pub fn answer_has_degraded_year(answer: &str, floor: u16) -> bool {
+    if floor == 0 {
+        return false;
+    }
+    let bytes = answer.as_bytes();
+    for start in 0..bytes.len().saturating_sub(3) {
+        let window = &bytes[start..start + 4];
+        if !window.iter().all(u8::is_ascii_digit) {
+            continue;
+        }
+        let head = &window[..2];
+        if head != b"19" && head != b"20" {
+            continue;
+        }
+        // 只认独立的 4 位年份：夹在更长数字串里的（请求 id / 时间戳 / token 数）不算降智证据。
+        if start > 0 && bytes[start - 1].is_ascii_digit() {
+            continue;
+        }
+        if matches!(bytes.get(start + 4), Some(next) if next.is_ascii_digit()) {
+            continue;
+        }
+        let year = (window[0] - b'0') as u16 * 1000
+            + (window[1] - b'0') as u16 * 100
+            + (window[2] - b'0') as u16 * 10
+            + (window[3] - b'0') as u16;
+        if year < floor {
             return true;
         }
     }
@@ -1255,7 +1312,6 @@ pub async fn probe_account(
 ) -> IntelResult {
     let model = intel_model(config);
     let question = intel_question(config);
-    let markers = intel_markers(config);
     let began = Instant::now();
     let mut result = IntelResult {
         model: model.clone(),
@@ -1393,11 +1449,8 @@ pub async fn probe_account(
         let answer = extract_output_text(&sse);
         if !answer.trim().is_empty() {
             result.answer = clip(&answer, 400);
-            result.ok = !answer_is_unqualified(&answer, &markers);
-            if result.ok && config.intel_require_year && !answer_has_year(&answer) {
-                // 没有年份证据 = 没回答到「知识库日期」这个点，按降智处理。
-                result.ok = false;
-            }
+            // 判定口径见 answer_is_healthy：拒答 = 合格，早于下限的日期 = 降智。
+            result.ok = answer_is_healthy(&answer, config);
             return result;
         }
 
@@ -2225,6 +2278,41 @@ mod tests {
     }
 
     #[test]
+    fn degraded_year_flags_anything_before_the_floor() {
+        // 典型降智回答：报 2024 年 6 月 → 不合格。
+        assert!(answer_has_degraded_year(
+            "我的知识库截止到 2024 年 6 月。",
+            2026
+        ));
+        assert!(answer_has_degraded_year("截止 2025-12", 2026));
+        assert!(answer_has_degraded_year("知识库更新至 2023 年", 2026));
+        // 拒答 / 不带日期 = 正常口径，不能判不合格。
+        assert!(!answer_has_degraded_year(
+            "我无法确认当前模型的具体知识截止日期。",
+            2026
+        ));
+        assert!(!answer_has_degraded_year(
+            "好的，我将仅基于已有知识回答。",
+            2026
+        ));
+        // 顺带提到的「当前系统日期是 2026 年 10 月 9 日」不能算降智证据。
+        assert!(!answer_has_degraded_year(
+            "当前系统日期是 2026 年 10 月 9 日。",
+            2026
+        ));
+        // 夹在更长数字串里的「2024」（请求 id / 时间戳 / token 数）不算降智证据。
+        assert!(!answer_has_degraded_year("request id 1820246623", 2026));
+        assert!(!answer_has_degraded_year("用了 1792024 个 token", 2026));
+        assert!(!answer_has_degraded_year("编号 20241", 2026));
+        assert!(answer_has_degraded_year("（2024）", 2026));
+        // 0 = 关闭判定。
+        assert!(!answer_has_degraded_year(
+            "我的知识库截止到 2024 年 6 月。",
+            0
+        ));
+    }
+
+    #[test]
     fn fail_marker_accepts_multiple_keywords() {
         let mut config = PluginConfig::default();
         config.intel_fail_marker = "2024, 无法确认｜没有提供".to_string();
@@ -2241,7 +2329,56 @@ mod tests {
         assert!(!answer_is_unqualified("2025 年 6 月", &markers));
 
         config.intel_fail_marker = "   ".to_string();
-        assert_eq!(intel_markers(&config), vec!["2024".to_string()]);
+        // 默认空配置 = 不启用关键词判定（拒答是正常表现，不能再靠关键词兜底）。
+        assert!(intel_markers(&config).is_empty());
+        let d = PluginConfig::default();
+        assert!(d.intel_fail_marker.is_empty());
+        assert!(intel_markers(&d).is_empty());
+        assert_eq!(d.intel_degraded_before_year, 2026);
+    }
+
+    #[test]
+    fn refusal_is_healthy_and_pre_floor_dates_are_degraded() {
+        // 默认口径：拒答 = 正常，早于 2026 的日期 = 降智。
+        let config = PluginConfig::default();
+        assert!(answer_is_healthy(
+            "我无法确认当前模型的具体知识截止日期。",
+            &config
+        ));
+        assert!(answer_is_healthy(
+            "当前会话没有提供我的确切知识截止日期。",
+            &config
+        ));
+        assert!(!answer_is_healthy(
+            "我的知识库截止到 2024 年 6 月。",
+            &config
+        ));
+        assert!(!answer_is_healthy("截至 2025 年 12 月。", &config));
+        // 顺手提到的「当前系统日期 2026」不是降智证据。
+        assert!(answer_is_healthy(
+            "当前系统日期是 2026 年 10 月 9 日。",
+            &config
+        ));
+
+        // 关掉年份下限、打开旧规则（回答里必须出现年份）时，拒答又会被判不合格。
+        let mut legacy = PluginConfig::default();
+        legacy.intel_degraded_before_year = 0;
+        legacy.intel_require_year = true;
+        assert!(!answer_is_healthy("我无法确认我的知识截止日期。", &legacy));
+        assert!(answer_is_healthy(
+            "我的知识库更新至 2026 年 3 月。",
+            &legacy
+        ));
+
+        // 自定义关键词仍然优先：命中即不合格，即使回答里没有日期。
+        let mut marked = PluginConfig::default();
+        marked.intel_fail_marker = "无法确认".to_string();
+        assert!(!answer_is_healthy("我无法确认我的知识截止日期。", &marked));
+
+        // 年份下限填 0 且没有关键词 = 该维度不判定。
+        let mut off = PluginConfig::default();
+        off.intel_degraded_before_year = 0;
+        assert!(answer_is_healthy("我的知识库截止到 2024 年 6 月。", &off));
     }
 
     #[test]

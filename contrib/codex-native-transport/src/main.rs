@@ -6,8 +6,13 @@
 //! reqwest/native-tls/hyper/h2 栈发出。依赖版本按 Codex 参考版本固定；是否
 //! 与某个官方客户端版本完全一致，仍需通过对应版本的抓包和回归测试确认。
 
+// 状态 JSON（panel.rs）用一个 serde_json::json! 字面量拼 70+ 个键，
+// 宏展开的递归深度会超过默认的 128。
+#![recursion_limit = "512"]
+
 mod admin;
 mod bps;
+mod bps_auth;
 mod config;
 mod donor;
 mod goplugin;
@@ -110,6 +115,8 @@ async fn serve() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(intel::plan_default_loop(std::sync::Arc::clone(&state)));
     // BPS 403 自动摘除模型（到点把模型加回宿主账号）。
     tokio::spawn(model_drop::run(std::sync::Arc::clone(&state)));
+    // BPS 官方 Excel 授权凭据：探活 + 到点自动刷新（bps_auth_enabled 时才真正跑）。
+    tokio::spawn(bps_auth::refresh_loop(std::sync::Arc::clone(&state)));
     // 跨机状态同步（sync_enabled 时才真正推）。
     tokio::spawn(sync::run(std::sync::Arc::clone(&state)));
     // 内嵌管理面板（配置 panel_addr + panel_token 后才会绑定端口）。

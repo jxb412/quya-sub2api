@@ -342,6 +342,174 @@ pub fn has_previous_response_id(body: &[u8]) -> bool {
 /// 工具声明里代表动态工具发现的 `type`。
 const DYNAMIC_TOOL_DECLARATIONS: [&str; 2] = ["tool_search", "tool_search_preview"];
 
+/// 请求是否依赖 BPS 执行不了的 OpenAI 托管工具。
+///
+/// * 顶层 `tools[]` 声明了 `image_generation`；
+/// * 顶层 `tools[]` 声明了 `web_search*` 且 `external_web_access=true`
+///   （真联网）或 `search_context_size=high`（大上下文检索）；
+/// * `tool_choice` 直接指向托管工具，或用 `allowed_tools` + `required`
+///   只允许托管工具。
+///
+/// Codex CLI 默认附带的「仅缓存搜索」（`web_search` 且 `external_web_access=false`）
+/// 不算，`tool_choice: "none"` 不算。命中后由 service 层改走账号正常通道
+/// （配置 `bps_skip_on_hosted_tools`，默认开），因为这些工具在 BPS 上要么被
+/// 摘掉、要么被模型当成客户端工具调用，客户端根本执行不了。
+pub fn has_hosted_tools(body: &[u8]) -> bool {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    let Some(object) = parsed.as_object() else {
+        return false;
+    };
+    if let Some(choice) = object.get("tool_choice") {
+        if tool_choice_forces_hosted(choice) {
+            return true;
+        }
+        if choice.as_str().map(|mode| mode.trim() == "none") == Some(true) {
+            return false;
+        }
+    }
+    object
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .map(|tools| tools.iter().any(hosted_tool_declared))
+        .unwrap_or(false)
+}
+
+/// 单个工具声明是否属于需要原生通道的托管工具。
+fn hosted_tool_declared(tool: &serde_json::Value) -> bool {
+    let kind = tool
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if kind == "image_generation" {
+        return true;
+    }
+    if !kind.starts_with("web_search") {
+        return false;
+    }
+    if tool
+        .get("external_web_access")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return true;
+    }
+    tool.get("search_context_size")
+        .and_then(serde_json::Value::as_str)
+        .map(|size| size.trim().eq_ignore_ascii_case("high"))
+        .unwrap_or(false)
+}
+
+/// `tool_choice` 是否强制本轮调用托管工具。
+fn tool_choice_forces_hosted(choice: &serde_json::Value) -> bool {
+    let Some(object) = choice.as_object() else {
+        return false;
+    };
+    let is_hosted = |value: &serde_json::Value| {
+        let kind = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        kind.starts_with("web_search") || kind == "image_generation"
+    };
+    if is_hosted(choice) {
+        return true;
+    }
+    let kind = object
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let mode = object
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if !kind.eq_ignore_ascii_case("allowed_tools") || !mode.eq_ignore_ascii_case("required") {
+        return false;
+    }
+    let Some(tools) = object.get("tools").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    !tools.is_empty() && tools.iter().all(is_hosted)
+}
+
+/// 解析上游 `Retry-After`（纯秒数或 HTTP 日期），钳到 1 秒..2 小时。
+/// 无法解析时返回 None（调用方退回配置的固定冷却秒数）。
+pub fn parse_retry_after_ms(value: &str, now_ms: u64) -> Option<u64> {
+    const MAX_MS: u64 = 7_200_000;
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    let seconds = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        value
+            .parse::<u64>()
+            .ok()
+            .map(|secs| secs.min(MAX_MS / 1000))
+    } else {
+        http_date_ms(value).map(|at_ms| at_ms.saturating_sub(now_ms) / 1000)
+    }?;
+    Some(seconds.clamp(1, MAX_MS / 1000) * 1000)
+}
+
+/// 极简 HTTP-date（RFC 7231 IMF-fixdate）解析：只认
+/// `Sun, 06 Nov 1994 08:49:37 GMT`，返回 Unix 毫秒。其它日期格式一律 None。
+fn http_date_ms(value: &str) -> Option<u64> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.len() < 5 {
+        return None;
+    }
+    let day: u64 = parts[1].parse().ok()?;
+    let month = match parts[2] {
+        "Jan" => 1u64,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let year: i64 = parts[3].parse().ok()?;
+    let time: Vec<&str> = parts[4].split(':').collect();
+    if time.len() != 3 {
+        return None;
+    }
+    let hour: u64 = time[0].parse().ok()?;
+    let minute: u64 = time[1].parse().ok()?;
+    let second: u64 = time[2].parse().ok()?;
+    if !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let seconds = days as i64 * 86_400 + (hour * 3600 + minute * 60 + second) as i64;
+    u64::try_from(seconds).ok().map(|secs| secs * 1000)
+}
+
+/// Howard Hinnant civil_from_days 的逆运算（days_from_civil）。
+fn days_from_civil(year: i64, month: u64, day: u64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    // 1 基月份 → Hinnant 的「三月起始」月份（0=三月）。
+    // 3 月 → 0，所以用 (m + 9) % 12（m + 9 等价于 m - 3 的模 12 形式）。
+    let mp = (month as i64 + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
 fn tool_list_has_dynamic(tools: &[serde_json::Value]) -> bool {
     for tool in tools {
         let kind = tool
@@ -2343,6 +2511,10 @@ pub struct BpsStream {
     scrub: Option<EchoScrub>,
     /// 回程用量归一化：删掉上游 usage 里多出来的 `cache_write_tokens`。
     normalize_usage: bool,
+    /// 流内失败的账号保护：带账号信号的 `error` / `response.failed` 改写成中性 5xx 语义。
+    guard_failures: bool,
+    /// 本次流是否真的中性化过失败事件（追踪用）。
+    guarded_failure: bool,
     /// 目录里的调用名 → 客户端寻址目标（回程还原 namespace / custom_tool_call）。
     targets: std::collections::HashMap<String, CallTarget>,
     /// 原生工具回放缓存的账号会话作用域。绝不能只按 call_id 做进程级共享。
@@ -2413,6 +2585,12 @@ impl BpsStream {
     ) -> Self {
         self.scrub = scrub;
         self.normalize_usage = normalize_usage;
+        self
+    }
+
+    /// 流内失败事件的账号保护（`bps_protect_account_status`）。
+    pub fn with_failure_guard(mut self, guard: bool) -> Self {
+        self.guard_failures = guard;
         self
     }
 
@@ -2490,6 +2668,22 @@ impl BpsStream {
         // 上游把它的 Excel 系统提示与 21 个工具原样回显在每个带 response 对象的事件里，
         // 先换回客户端请求里的原值，再做后面的工具协议改写。
         let scrubbed = self.rewrite_echo(&mut value);
+        // 输出开始后的失败事件（`error` / `response.failed` / `response.cancelled`）：
+        // 带账号信号时中性化，避免宿主按 401/403/429/529 处罚整个 OAuth 账号。
+        let guarded = if self.guard_failures
+            && matches!(
+                kind.as_str(),
+                "error" | "response.failed" | "response.cancelled"
+            ) {
+            let changed = neutralize_account_failure(&kind, &mut value);
+            if changed {
+                self.guarded_failure = true;
+                self.trace_note("流内失败已中性化（账号保护）");
+            }
+            changed
+        } else {
+            false
+        };
         match kind.as_str() {
             "response.output_item.added" => {
                 let item = value.get("item")?.clone();
@@ -2615,7 +2809,7 @@ impl BpsStream {
             }
             "response.completed" => Some(self.finish_response(value)),
             _ => {
-                if scrubbed {
+                if scrubbed || guarded {
                     Some(vec![value])
                 } else {
                     None
@@ -2700,6 +2894,7 @@ impl BpsStream {
             "account_id": account_id,
             "model": model,
             "mode": self.mode.as_str(),
+            "guarded_failure": self.guarded_failure,
             "inbound": self.trace_in,
             "outbound": self.trace_out,
             "notes": self.trace_notes,
@@ -3167,6 +3362,204 @@ pub fn normalize_usage(response: &mut serde_json::Map<String, serde_json::Value>
     modified
 }
 
+/// 宿主判定「流内失败事件属于账号级问题」时匹配的关键词。与
+/// `openAIStreamFailedEventSemanticStatus` 的 combined 串匹配表对齐（只去掉了
+/// invalid_request，因为那是请求类错误，不该被中性化）。
+const ACCOUNT_FAILURE_SIGNALS: [&str; 8] = [
+    "rate_limit",
+    "authentication",
+    "unauthorized",
+    "invalid_api_key",
+    "permission",
+    "forbidden",
+    "access denied",
+    "insufficient_quota",
+];
+
+/// 宿主 `isOpenAIUpstreamAccessStateCode` 认的账号/工作区/组织停用码。
+fn is_access_state_code(code: &str) -> bool {
+    let code = code.trim().to_ascii_lowercase();
+    if code == "deactivated_workspace" {
+        return true;
+    }
+    for subject in ["workspace", "account", "organization", "org"] {
+        for state in ["deactivated", "disabled", "suspended"] {
+            if code == format!("{subject}_{state}") || code == format!("{state}_{subject}") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 宿主读取流内失败状态码的字段路径（`openAIStreamErrorStatusPaths`）。
+const FAILURE_STATUS_PATHS: [&[&str]; 6] = [
+    &["response", "error", "status_code"],
+    &["response", "error", "status"],
+    &["error", "status_code"],
+    &["error", "status"],
+    &["status_code"],
+    &["status"],
+];
+
+/// 按宿主 gjson 口径取状态码：接受数字或数字字符串。
+fn failure_status_at(value: &serde_json::Value, path: &[&str]) -> Option<u16> {
+    let mut current = value;
+    for key in path {
+        current = current.get(key)?;
+    }
+    if let Some(number) = current.as_u64() {
+        return u16::try_from(number).ok();
+    }
+    if let Some(number) = current.as_f64() {
+        return u16::try_from(number as i64).ok();
+    }
+    current
+        .as_str()
+        .and_then(|text| text.trim().parse::<f64>().ok())
+        .map(|number| number as i64)
+        .and_then(|number| u16::try_from(number).ok())
+}
+
+/// 取事件里第一个有效状态码；宿主优先 401/403/429/529。
+fn failure_status(value: &serde_json::Value) -> Option<u16> {
+    let mut fallback = None;
+    for path in FAILURE_STATUS_PATHS {
+        let Some(status) = failure_status_at(value, path) else {
+            continue;
+        };
+        if matches!(status, 401 | 402 | 403 | 429 | 529) {
+            return Some(status);
+        }
+        if fallback.is_none() && (400..=599).contains(&status) {
+            fallback = Some(status);
+        }
+    }
+    fallback
+}
+
+/// 从错误对象里收集 code / type / message（供账号信号匹配，仅小写化后比对）。
+fn collect_failure_detail(
+    detail: &serde_json::Map<String, serde_json::Value>,
+    codes: &mut Vec<String>,
+    texts: &mut Vec<String>,
+) {
+    for key in ["code", "type"] {
+        if let Some(value) = detail.get(key).and_then(serde_json::Value::as_str) {
+            codes.push(value.trim().to_ascii_lowercase());
+        }
+    }
+    for key in ["code", "type", "message"] {
+        if let Some(value) = detail.get(key).and_then(serde_json::Value::as_str) {
+            texts.push(value.to_ascii_lowercase());
+        }
+    }
+}
+
+/// 流内失败的账号保护：把带账号信号的 `error` / `response.failed` 事件改写成中性
+/// 5xx 语义（`server_error` + `basispoints_unavailable`），原始状态码只留在宿主不读取的
+/// `upstream_status`。命中条件与宿主一致：显式 401/402/403/429/529、账号停用错误码，
+/// 或 rate_limit / authentication / permission / forbidden 等账号语义关键词。
+///
+/// 不带账号信号的请求类错误（`context_length_exceeded`、`cyber_policy` 等）原样放行，
+/// Codex 才能对前者触发自动压缩。返回是否改写过。
+pub fn neutralize_account_failure(kind: &str, value: &mut serde_json::Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let mut codes: Vec<String> = Vec::new();
+    let mut texts: Vec<String> = Vec::new();
+    if let Some(detail) = object
+        .get("response")
+        .and_then(|response| response.get("error"))
+        .and_then(serde_json::Value::as_object)
+    {
+        collect_failure_detail(detail, &mut codes, &mut texts);
+    }
+    if let Some(detail) = object.get("error").and_then(serde_json::Value::as_object) {
+        collect_failure_detail(detail, &mut codes, &mut texts);
+    }
+    if let Some(code) = object.get("code").and_then(serde_json::Value::as_str) {
+        codes.push(code.trim().to_ascii_lowercase());
+    }
+    // 宿主 isOpenAIUpstreamAccessStateError 还读 `detail.code`（只读 code，不读 message），
+    // 这里跟着读同一个位置，避免漏判账号停用码。
+    if let Some(code) = object
+        .get("detail")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|detail| detail.get("code"))
+        .and_then(serde_json::Value::as_str)
+    {
+        codes.push(code.trim().to_ascii_lowercase());
+    }
+    for key in ["code", "message"] {
+        if let Some(text) = object.get(key).and_then(serde_json::Value::as_str) {
+            texts.push(text.to_ascii_lowercase());
+        }
+    }
+    let status = failure_status(value);
+    let account_scoped = matches!(status, Some(401 | 402 | 403 | 429 | 529))
+        || codes.iter().any(|code| is_access_state_code(code))
+        || texts.iter().any(|text| {
+            ACCOUNT_FAILURE_SIGNALS
+                .iter()
+                .any(|signal| text.contains(signal))
+        });
+    if !account_scoped {
+        return false;
+    }
+    let upstream_status = status.unwrap_or(0);
+    let neutral = serde_json::json!({
+        "type": "server_error",
+        "code": "basispoints_unavailable",
+        "message": format!(
+            "OpenAI Basis Points could not serve this request (upstream HTTP {upstream_status}); please retry"
+        ),
+        "upstream_status": upstream_status,
+    });
+    let Some(object) = value.as_object_mut() else {
+        return false;
+    };
+    object.shift_remove("status");
+    object.shift_remove("status_code");
+    object.shift_remove("detail");
+    let has_error_object = object
+        .get("error")
+        .map(|error| error.is_object())
+        .unwrap_or(false);
+    let has_top_code = object.contains_key("code");
+    let has_top_message = object.contains_key("message");
+    if has_error_object || kind == "error" {
+        object.insert("error".to_string(), neutral.clone());
+    }
+    if has_top_code || kind == "error" {
+        object.insert(
+            "code".to_string(),
+            serde_json::Value::String("basispoints_unavailable".to_string()),
+        );
+    }
+    if has_top_message || kind == "error" {
+        object.insert(
+            "message".to_string(),
+            neutral
+                .get("message")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(response) = object
+        .get_mut("response")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        response.shift_remove("status_code");
+        response.shift_remove("status");
+        if response.contains_key("error") {
+            response.insert("error".to_string(), neutral);
+        }
+    }
+    true
+}
+
 /// 追踪帧裁剪：单行化并截断，避免诊断接口撑爆。
 fn clip_raw(text: &str) -> String {
     let compact = text.trim();
@@ -3513,6 +3906,11 @@ const BPS_LOG_MAX_BYTES: u64 = 1 << 20;
 /// * `origin`（`bps_origin`，默认 `https://bps.openai.com`，留空 = 不发）；
 /// * `user-agent`（`bps_user_agent`，默认空 = 保持客户端原样；`browser` =
 ///   `Mozilla/5.0` 的浏览器 UA 实验档；其它值原样发送）。
+///
+/// `bps_excel_client_profile`（默认开）再补一整套官方 Excel 插件 profile：
+/// `x-openai-internal-basispoints-client-*` 身份、`x-openai-internal-basispoints-office-*`
+/// 宿主与 `x-stainless-*` SDK 指纹，UA 未显式配置时用 `oai-basispoints/<插件版本>`。
+/// 取值来源：Roins-hub/sub2api-oai-basispoints 的 `authHeaders`（CPA 插件 v0.2.8）。
 pub fn bps_client_headers(config: &PluginConfig) -> Vec<(&'static str, String)> {
     let mut headers = vec![
         ("x-basispoints-auth-mode", "chatgpt".to_string()),
@@ -3522,8 +3920,43 @@ pub fn bps_client_headers(config: &PluginConfig) -> Vec<(&'static str, String)> 
     if !origin.is_empty() {
         headers.push(("origin", origin.to_string()));
     }
+    if config.bps_excel_client_profile {
+        headers.extend(
+            [
+                (
+                    "x-openai-internal-basispoints-client-agent-profile",
+                    "excel",
+                ),
+                ("x-openai-internal-basispoints-client-editor", "excel"),
+                ("x-openai-internal-basispoints-client-host", "office"),
+                ("x-openai-internal-basispoints-client-platform", "excel"),
+                ("x-openai-internal-basispoints-client-platform-class", "PC"),
+                (
+                    "x-openai-internal-basispoints-client-product",
+                    "basispoints-excel-plugin",
+                ),
+                ("x-openai-internal-basispoints-client-runtime", "desktop"),
+                ("x-openai-internal-basispoints-office-host", "Excel"),
+                ("x-openai-internal-basispoints-office-platform", "PC"),
+                ("x-stainless-arch", "unknown"),
+                ("x-stainless-lang", "js"),
+                ("x-stainless-os", "Unknown"),
+                ("x-stainless-package-version", "6.31.0"),
+                ("x-stainless-retry-count", "0"),
+                ("x-stainless-runtime", "browser:chrome"),
+            ]
+            .into_iter()
+            .map(|(name, value)| (name, value.to_string())),
+        );
+    }
     if let Some(agent) = config.bps_user_agent_value() {
         headers.push(("user-agent", agent));
+    } else if config.bps_excel_client_profile {
+        // 参考实现的 UA 就是这套 profile 的一部分；显式配了 bps_user_agent 时以配置为准。
+        headers.push((
+            "user-agent",
+            format!("oai-basispoints/{}", crate::service::PLUGIN_VERSION),
+        ));
     }
     headers
 }
@@ -3651,9 +4084,23 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
     let Some(target) = targets.iter().find(|row| row.account_id == account_id) else {
         return check_report(false, 0, "账号不存在或未被导出", String::new());
     };
-    if target.access_token.trim().is_empty() {
+    // 打开「BPS 官方 Excel 授权」后，真正出站用的是那份 Excel 凭据；自检必须走同一份
+    // 凭据，否则只会得出「自检 403、实跑 200」这种自相矛盾的结论。拿不到凭据就退回
+    // 宿主 token，和线上回退路径一致。
+    let excel_token = crate::bps_auth::access_token(state, config, account_id).await;
+    let excel_workspace = state
+        .bps_auth
+        .credential(account_id)
+        .map(|credential| credential.chatgpt_account_id.trim().to_string())
+        .unwrap_or_default();
+    if target.access_token.trim().is_empty() && excel_token.is_none() {
         return check_report(false, 0, "账号无可用 access_token", String::new());
     }
+    let credential_label = if excel_token.is_some() {
+        "excel"
+    } else {
+        "host"
+    };
 
     let models = {
         let configured = config.bps_model_list();
@@ -3743,16 +4190,24 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
         set_header(
             &mut headers,
             "authorization",
-            &format!("Bearer {}", target.access_token),
+            &format!(
+                "Bearer {}",
+                excel_token.as_deref().unwrap_or(&target.access_token)
+            ),
         );
         set_header(&mut headers, "content-type", "application/json");
         set_header(&mut headers, "accept", "text/event-stream");
         for (name, value) in bps_client_headers(config) {
             set_header(&mut headers, name, &value);
         }
-        if let Some(account_id) = target.chatgpt_account_id.as_deref() {
-            set_header(&mut headers, "chatgpt-account-id", account_id);
-            set_header(&mut headers, "x-openai-account-id", account_id);
+        let workspace = if excel_workspace.is_empty() {
+            target.chatgpt_account_id.clone().unwrap_or_default()
+        } else {
+            excel_workspace.clone()
+        };
+        if !workspace.is_empty() {
+            set_header(&mut headers, "chatgpt-account-id", &workspace);
+            set_header(&mut headers, "x-openai-account-id", &workspace);
         }
         if !headers.contains_key("user-agent") {
             set_header(
@@ -3777,7 +4232,13 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
                 let text = response.text().await.unwrap_or_default();
                 let snippet: String = text.chars().take(600).collect();
                 if (200..300).contains(&status) {
-                    return check_report(true, status, "", format!("model={model}\n{snippet}"));
+                    return check_report_with(
+                        true,
+                        status,
+                        "",
+                        format!("model={model}\n{snippet}"),
+                        credential_label,
+                    );
                 }
                 last_status = status;
                 last_snippet = format!("model={model}\n{snippet}");
@@ -3792,15 +4253,28 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
             }
         }
     }
-    check_report(false, last_status, "", last_snippet)
+    check_report_with(false, last_status, "", last_snippet, credential_label)
 }
 
 fn check_report(ok: bool, status: u16, error: &str, snippet: String) -> String {
+    check_report_with(ok, status, error, snippet, "")
+}
+
+/// `credential` 说明这次自检用的是哪一份凭据：`excel` = BPS 官方 Excel 授权，
+/// `host` = 宿主账号自带 token。
+fn check_report_with(
+    ok: bool,
+    status: u16,
+    error: &str,
+    snippet: String,
+    credential: &str,
+) -> String {
     serde_json::json!({
         "ok": ok,
         "status": status,
         "error": error,
         "snippet": snippet,
+        "credential": credential,
     })
     .to_string()
 }
@@ -5746,5 +6220,163 @@ mod tests {
                      "call_id": "call_decl_inj_1", "name": "write_range", "arguments": ""}
         });
         assert!(stream.push(frame(&injected).as_bytes()).is_empty());
+    }
+
+    #[test]
+    fn retry_after_parses_seconds_and_http_date() {
+        // 纯秒数：原样换算成毫秒。
+        assert_eq!(parse_retry_after_ms("120", 0), Some(120_000));
+        // 小于 1 秒按 1 秒钳，避免立刻重试打爆上游。
+        assert_eq!(parse_retry_after_ms("0", 0), Some(1_000));
+        assert_eq!(parse_retry_after_ms("3", 100), Some(3_000));
+        // 超过 2 小时钳到 2 小时。
+        assert_eq!(parse_retry_after_ms("99999", 0), Some(7_200_000));
+        // RFC 7231 IMF-fixdate：Sun, 06 Nov 1994 08:49:37 GMT = 784_111_777s。
+        let now = 784_111_777_000u64 - 30_000;
+        assert_eq!(
+            parse_retry_after_ms("Sun, 06 Nov 1994 08:49:37 GMT", now),
+            Some(30_000)
+        );
+        // 日期已经过去 → 0 秒钳到 1 秒。
+        assert_eq!(
+            parse_retry_after_ms("Sun, 06 Nov 1994 08:49:37 GMT", 800_000_000_000),
+            Some(1_000)
+        );
+        // 无法解析的一律 None（调用方退回配置的固定冷却）。
+        assert_eq!(parse_retry_after_ms("", 0), None);
+        assert_eq!(parse_retry_after_ms("in a while", 0), None);
+        assert_eq!(
+            parse_retry_after_ms("Sun, 06 Foo 1994 08:49:37 GMT", 0),
+            None
+        );
+    }
+
+    #[test]
+    fn hosted_tools_gate_skips_live_web_and_images_only() {
+        let body = |value: serde_json::Value| value.to_string();
+        // Codex CLI 默认的「仅缓存搜索」：不算托管工具。
+        assert!(!has_hosted_tools(
+            body(serde_json::json!({
+                "tools": [{"type": "web_search", "external_web_access": false}]
+            }))
+            .as_bytes()
+        ));
+        // 真联网 / 大上下文检索：算。
+        assert!(has_hosted_tools(
+            body(serde_json::json!({
+                "tools": [{"type": "web_search", "external_web_access": true}]
+            }))
+            .as_bytes()
+        ));
+        assert!(has_hosted_tools(
+            body(serde_json::json!({
+                "tools": [{"type": "web_search_preview", "search_context_size": "high"}]
+            }))
+            .as_bytes()
+        ));
+        // 生图：算。
+        assert!(has_hosted_tools(
+            body(serde_json::json!({"tools": [{"type": "image_generation"}]})).as_bytes()
+        ));
+        // 普通客户端函数工具：不算。
+        assert!(!has_hosted_tools(
+            body(serde_json::json!({
+                "tools": [{"type": "function", "name": "get_weather", "parameters": {"type": "object"}}]
+            }))
+            .as_bytes()
+        ));
+        // tool_choice 强制托管工具：算；显式 none：不算。
+        assert!(has_hosted_tools(
+            body(serde_json::json!({
+                "tools": [{"type": "web_search"}],
+                "tool_choice": {"type": "web_search"}
+            }))
+            .as_bytes()
+        ));
+        assert!(!has_hosted_tools(
+            body(serde_json::json!({
+                "tools": [{"type": "web_search", "external_web_access": true}],
+                "tool_choice": "none"
+            }))
+            .as_bytes()
+        ));
+        // allowed_tools + required 且只允许托管工具：算。
+        assert!(has_hosted_tools(
+            body(serde_json::json!({
+                "tools": [{"type": "web_search"}],
+                "tool_choice": {"type": "allowed_tools", "mode": "required", "tools": [{"type": "image_generation"}]}
+            }))
+            .as_bytes()
+        ));
+        // 非 JSON 正文不能误判。
+        assert!(!has_hosted_tools(b"not json"));
+    }
+
+    #[test]
+    fn failure_guard_neutralizes_account_errors_only() {
+        // 账号语义（rate_limit）→ 中性化成 server_error，原始状态码移到 upstream_status。
+        let mut value = serde_json::json!({
+            "type": "error",
+            "code": "rate_limit_exceeded",
+            "message": "Rate limit reached for gpt-6-astra"
+        });
+        assert!(neutralize_account_failure("error", &mut value));
+        assert_eq!(value["code"], serde_json::json!("basispoints_unavailable"));
+        assert_eq!(value["error"]["type"], serde_json::json!("server_error"));
+        assert_eq!(value["error"]["upstream_status"], serde_json::json!(0));
+        assert!(value.get("status").is_none());
+
+        // 显式 401/403/429/529 状态码 → 命中。
+        // 注意宿主只读 response.error.status / error.status / status 这些路径，不读
+        // response.status，所以下面第一个用例的 upstream_status 是 0（跟宿主同口径），
+        // 真正带状态码的用例紧跟着。
+        let mut value = serde_json::json!({
+            "type": "response.failed",
+            "response": {"status": 403, "error": {"code": "forbidden", "message": "blocked"}}
+        });
+        assert!(neutralize_account_failure("response.failed", &mut value));
+        assert_eq!(
+            value["response"]["error"]["code"],
+            serde_json::json!("basispoints_unavailable")
+        );
+        assert!(value["response"].get("status").is_none());
+
+        // 状态码放在宿主真读的路径上：原样保留到 upstream_status。
+        let mut value = serde_json::json!({
+            "type": "response.failed",
+            "response": {"error": {"status": 429, "code": "rate_limit_exceeded", "message": "slow down"}}
+        });
+        assert!(neutralize_account_failure("response.failed", &mut value));
+        assert_eq!(
+            value["response"]["error"]["upstream_status"],
+            serde_json::json!(429)
+        );
+
+        // 工作区停用码 → 命中（账号级）。
+        let mut value = serde_json::json!({
+            "type": "error",
+            "error": {"code": "deactivated_workspace", "message": "workspace deactivated"}
+        });
+        assert!(neutralize_account_failure("error", &mut value));
+
+        // 请求类错误（上下文超长）不能中性化：Codex 靠它触发自动压缩。
+        let mut value = serde_json::json!({
+            "type": "response.failed",
+            "response": {"error": {"code": "context_length_exceeded", "message": "too long"}}
+        });
+        assert!(!neutralize_account_failure("response.failed", &mut value));
+        assert_eq!(
+            value["response"]["error"]["code"],
+            serde_json::json!("context_length_exceeded")
+        );
+
+        // 内容策略类错误同样原样放行。
+        let mut value = serde_json::json!({
+            "type": "error",
+            "code": "cyber_policy",
+            "message": "blocked by policy"
+        });
+        assert!(!neutralize_account_failure("error", &mut value));
+        assert_eq!(value["code"], serde_json::json!("cyber_policy"));
     }
 }

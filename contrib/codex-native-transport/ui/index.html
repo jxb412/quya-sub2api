@@ -113,15 +113,17 @@
     <p class="hint">面板里对单个账号开启了「降智处理」的，自动暂停会跳过它（改走降智通道）。</p>
     <label><span class="k">巡检模型</span><input type="text" id="intel_model" placeholder="gpt-6-astra"></label>
     <label><span class="k">巡检提问</span><input type="text" id="intel_prompt" placeholder="你在知识库日期 不允许联网快速回答"></label>
-    <label><span class="k">不合格标记（可多个，逗号分隔）</span><input type="text" id="intel_fail_marker" placeholder="2024, 无法确认, 没有提供"></label>
-    <p class="hint">回答里命中任意一个关键词即判「不合格」。建议除了 <code>2024</code> 再加上「无法确认 / 没有提供 / 无法确定」这类拒答措辞：降智号有时不提 2024，只说「我不知道自己的知识截止日期」，只用单一关键词会被误判成合格。</p>
+    <label><span class="k">额外不合格关键词（可多个，逗号分隔，空=不启用）</span><input type="text" id="intel_fail_marker" placeholder="留空即可，年份规则已经覆盖"></label>
+    <p class="hint">回答里命中任意一个关键词即判「不合格」。默认留空：主判据是下面的「降智年份下限」，而「拒答」属于正常表现，不需要再用关键词兜底。想临时加词（某个模型特有的敷衍措辞）时再填。</p>
     <label><span class="k">巡检并发(1-16)</span><input type="number" id="intel_concurrency" min="1" max="16"></label>
     <label><span class="k">单次提问超时(秒, 5-600)</span><input type="number" id="intel_prompt_timeout_seconds" min="5" max="600"></label>
     <label><span class="k">提问失败重试次数(0-5)</span><input type="number" id="intel_prompt_retries" min="0" max="5"></label>
     <label><span class="k">超时判定为不合格</span><input type="checkbox" id="intel_timeout_is_failed"></label>
     <label><span class="k">连续合格几次才切回正常通道(1-10)</span><input type="number" id="intel_confirmations" min="1" max="10"></label>
-    <label><span class="k">回答里必须出现年份</span><input type="checkbox" id="intel_require_year"></label>
-    <p class="hint">勾上后：回答里没有 19xx/20xx 年份就判「不合格」。降智号除了答 2024，还会答「我不知道自己的知识截止日期」这种不含任何关键词的敷衍话，只靠关键词会把这种号误判成合格、又切回正常通道。</p>
+    <label><span class="k">降智年份下限（默认 2026，0=关闭）</span><input type="number" id="intel_degraded_before_year" min="0" max="2100"></label>
+    <p class="hint">判定口径：不降智的模型对「你在知识库日期 不允许联网快速回答」会<b>拒答</b>（「我无法确认自己的知识截止日期」）→ 判<b>合格</b>；回答里一旦报出<b>早于该年份</b>的日期（典型「2024 年 6 月」）就说明这次被上游路由到了降智模型 → 判<b>不合格</b>。填 0 则关闭这条判定。</p>
+    <label><span class="k">（旧规则）回答里必须出现年份</span><input type="checkbox" id="intel_require_year"></label>
+    <p class="hint">旧口径的兜底判据：回答里没有 19xx/20xx 年份就判「不合格」。<b>只在上面的年份下限填 0 时才生效</b>——新口径下拒答才是正常，勾上这条会把正常号误判成降智。</p>
     <p class="hint">超时＝等满「单次提问超时」仍拿不到可判定内容（含重试全部用完）；勾上后按不合格处理（默认勾选，避免巡检卡住时把坏号当好人）。每次失败会重试「提问失败重试次数」次，间隔 0.8 秒。连续合格次数＝巡检连续 N 次判「合格」才算真的恢复（防抖动）。</p>
     <label><span class="k">巡检覆盖套餐（逗号分隔，空=全部）</span><input type="text" id="intel_plan_types" placeholder="pro, plus, free"></label>
     <label><span class="k">结论落盘路径</span><input type="text" id="intel_state_path" placeholder="/app/data/codex-native-transport/intel-state.json"></label>
@@ -151,6 +153,18 @@
     <label><span class="k">命中后整条会话钉正常通道(秒, 0=只跳本条)</span><input type="number" id="bps_previous_response_pin_seconds" min="0" max="86400"></label>
     <label><span class="k">回程清洗（换掉网关回显的 Excel 提示与工具）</span><input type="checkbox" id="bps_scrub_echo"></label>
     <label><span class="k">用量归一化（删掉 cache_write_tokens）</span><input type="checkbox" id="bps_normalize_usage"></label>
+    <label><span class="k">带托管工具（实时联网/生图）请求跳过 BPS</span><input type="checkbox" id="bps_skip_on_hosted_tools"></label>
+    <p class="hint">BPS 收不了 OpenAI 托管工具：需要实时联网（<code>web_search</code> 且 <code>external_web_access=true</code>，或 <code>search_context_size=high</code>）、声明 <code>image_generation</code>、以及 <code>tool_choice</code> 强制这些工具的请求，命中就走账号正常通道。Codex CLI 默认附带的「仅缓存搜索」不触发，<code>tool_choice:none</code> 也不触发。</p>
+    <label><span class="k">流内失败中性化（保护账号状态）</span><input type="checkbox" id="bps_protect_account_status"></label>
+    <p class="hint">输出开始后 BPS 才失败时，上游会在 SSE 里发 <code>error</code> / <code>response.failed</code>。宿主读到 401/403/429/529 或限流、鉴权语义时会处罚整个 OAuth 账号。开启后把这些事件改写成中性的 <code>server_error</code> + <code>basispoints_unavailable</code>（原始状态码只留在宿主不读的 <code>upstream_status</code>）；不带账号信号的请求类错误（如 <code>context_length_exceeded</code>）原样放行，客户端该压缩还是压缩。</p>
+    <label><span class="k">429 采用上游 Retry-After</span><input type="checkbox" id="bps_honor_retry_after"></label>
+    <p class="hint">打开后，BPS 返回 429 且带 <code>Retry-After</code>（秒数或 HTTP 日期）时，用它覆盖下面「BPS 冷却：429」的设置值（钳到 1 秒..2 小时）。上游自己说了多久，比固定值准。</p>
+    <label><span class="k">BPS 流保活帧间隔(秒, 0=关)</span><input type="number" id="bps_keepalive_seconds" min="0" max="60" placeholder="15"></label>
+    <p class="hint">模型长思考时上游可能长时间不吐字节，宿主对上游 SSE 有 180 秒静默超时，超时按整个账号记一次流超时。这里按间隔补一个 SSE 注释帧 <code>: keepalive</code>（客户端忽略、宿主算一次上游读取）把静默打断。只在 BPS 通道且响应确实是 SSE 时生效。</p>
+    <label><span class="k">HTTP/2 故障自动降级 HTTP/1.1(60秒)</span><input type="checkbox" id="bps_http2_fallback"></label>
+    <p class="hint">BPS 连接层出现 h2 GOAWAY / stream error / 帧错误这类故障时，该出口 60 秒内改用 HTTP/1.1，到期自动切回。按出口（代理串）分别记账，只影响 BPS 连接，不影响同账号的正常 Codex 通道。对应现网「PLUGIN_UPSTREAM_CONNECT」这类连续失败。</p>
+    <label><span class="k">Excel 客户端档案头（实验）</span><input type="checkbox" id="bps_excel_client_profile"></label>
+    <p class="hint">出站附带参考实现（Roins 插件）那整套 <code>x-openai-internal-basispoints-client-*</code> / <code>x-openai-internal-basispoints-office-*</code> / <code>x-stainless-*</code> 与 <code>user-agent: oai-basispoints/&lt;版本&gt;</code>，让上游把请求认成官方 Excel 插件。焚决（Fenjue）实测：补齐这类头<strong>不能</strong>解决 403（403 是账号／客户端层面的策略拦截），所以这里只当 A/B 开关用；关掉就退回我们原来的 auth-mode / accept-encoding / origin 最小头集。</p>
     <label><span class="k">context_management 阈值(0=不发)</span><input type="number" id="bps_context_management_threshold" min="0" max="2000000" placeholder="0"></label>
     <label><span class="k">智力恢复后继续走 BPS(秒, 0=立即切回)</span><input type="number" id="bps_hold_after_healthy_seconds" min="0" max="86400"></label>
     <label><span class="k">同会话粘滞时长(秒, 0=关)</span><input type="number" id="bps_session_sticky_seconds" min="0" max="86400"></label>
@@ -179,6 +193,26 @@
     <label><span class="k">允许推送（关 = 只接收，跟随主服务器）</span><input type="checkbox" id="sync_push"></label>
     <p class="hint">两台服务器如果共用同一批账号（同一份数据库），同一个账号在两台上是同一个上游身份，面板里那个「降智处理」开关理应两台一致。<br>开启后：本机改动立刻推给对端，并按「对账周期」定期全量对齐；对端收到后只落自己的状态、不再回推，所以不会来回震荡。<br>每个账号按改动时间取新（last-write-wins）——两台都是旧数据时以「勾上降智处理」的那台为准。<br>只同步开关本身；线路统计（成功/失败次数）是每台自己的流量，不参与同步。对端不可达只影响这条同步链路，客户端请求不受影响；失败原因在 <code>/api/status</code> 的 <code>sync</code> 字段里。</p>
   </fieldset>
+  <fieldset>
+    <legend>BPS 授权（官方 Excel 加载项 OAuth，默认关）</legend>
+    <label><span class="k">开启 BPS 授权</span><input type="checkbox" id="bps_auth_enabled"></label>
+    <p class="hint warn">BPS 端点只认「官方 Excel 加载项」那一路 OAuth 凭据：同账号对照实测，宿主给的 Codex token 打过去是 403，Excel token 打过去才是 200。打开后到面板的 <b>BPS 授权页</b>给账号填一次登录密码（+ TOTP 密钥），插件自动完成授权，并在到期前自动刷新。</p>
+    <label><span class="k">bps-auth 服务地址</span><input type="text" id="bps_auth_service_url" placeholder="http://bps-auth:18770"></label>
+    <label><span class="k">bps-auth 服务 token</span><input type="text" id="bps_auth_service_token" placeholder="安装时生成的 BPS_AUTH_TOKEN"></label>
+    <p class="hint">授权服务不能跑在 Sub2API 容器里（既没有 node/python，也过不了 auth.openai.com 的 Cloudflare 托管挑战），要单独放一个服务。contrib/bps-auth 给了两种装法：<br>① 推荐 <code>run-container.sh</code>：把 bps-auth 侧车容器挂到 Sub2API 同一个 docker 网络，这里填 <code>http://bps-auth:18770</code>；<br>② 宿主机 <code>install.sh</code>（systemd）：这里填 <code>http://127.0.0.1:18770</code>（容器与宿主同 loopback 时不可用，需填宿主可达地址）。<br>每台服务器各装一份、各自授权：凭据按账号存在本机，两台之间不共享。</p>
+    <label><span class="k">授权出口代理（空 = 直连）</span><input type="text" id="bps_auth_proxy_url" placeholder="http://rand12345:65423140@142.54.187.42:49000"></label>
+    <p class="hint">必须填一个能过 Cloudflare 的出口：我们的 IPv6 住宅代理池即可（用户名随便写、密码 <code>65423140</code>，端口 49000）。机房直连在 auth.openai.com 上拿不到 <code>cf_clearance</code>，授权会以「cloudflare 求解器未通过」失败。</p>
+    <label><span class="k">BPS 出站改用 Excel 凭据</span><input type="checkbox" id="bps_auth_use_for_bps"></label>
+    <p class="hint">关掉 = 只做授权与刷新、出站仍用宿主 bearer（A/B 对照用）。</p>
+    <label><span class="k">自动刷新凭据</span><input type="checkbox" id="bps_auth_auto_refresh"></label>
+    <label><span class="k">提前刷新窗口(秒)</span><input type="number" id="bps_auth_refresh_margin_seconds" min="60" max="604800" placeholder="3600"></label>
+    <label><span class="k">刷新巡检周期(秒)</span><input type="number" id="bps_auth_refresh_interval_seconds" min="60" max="86400" placeholder="300"></label>
+    <label><span class="k">单次授权超时(秒)</span><input type="number" id="bps_auth_login_timeout_seconds" min="60" max="1800" placeholder="300"></label>
+    <label><span class="k">密码 / 凭据落盘路径</span><input type="text" id="bps_auth_state_path" placeholder="（空=与巡检结论同目录）"></label>
+    <div class="row"><button id="open-bpsauth">打开 BPS 授权页</button></div>
+    <p class="hint">这个文件里有登录密码与 refresh_token，落盘权限收紧到 0600；面板只展示授权状态，绝不回显密码。</p>
+  </fieldset>
+
   <div class="row">
     <button class="primary" id="save">保存</button>
     <button id="test">测试连通性</button>
@@ -276,13 +310,14 @@
     byId("intel_loop_interval_seconds").value = config.intel_loop_interval_seconds != null ? config.intel_loop_interval_seconds : 3600;
     byId("intel_model").value = config.intel_model || "gpt-6-astra";
     byId("intel_prompt").value = config.intel_prompt || "你在知识库日期 不允许联网快速回答";
-    byId("intel_fail_marker").value = config.intel_fail_marker || "2024";
+    byId("intel_fail_marker").value = config.intel_fail_marker || "";
     byId("intel_concurrency").value = config.intel_concurrency != null ? config.intel_concurrency : 4;
     byId("intel_prompt_timeout_seconds").value = config.intel_prompt_timeout_seconds != null ? config.intel_prompt_timeout_seconds : 45;
     byId("intel_prompt_retries").value = config.intel_prompt_retries != null ? config.intel_prompt_retries : 1;
     byId("intel_timeout_is_failed").checked = config.intel_timeout_is_failed !== false;
     byId("intel_confirmations").value = config.intel_confirmations != null ? config.intel_confirmations : 1;
-    byId("intel_require_year").checked = config.intel_require_year !== false;
+    byId("intel_degraded_before_year").value = config.intel_degraded_before_year != null ? config.intel_degraded_before_year : 2026;
+    byId("intel_require_year").checked = config.intel_require_year === true;
     byId("intel_plan_types").value = (config.intel_plan_types || []).join(", ");
     byId("intel_state_path").value = config.intel_state_path || "";
     byId("bps_enabled").checked = config.bps_enabled === true;
@@ -299,6 +334,12 @@ byId("bps_skip_on_previous_response_id").checked = config.bps_skip_on_previous_r
     byId("bps_previous_response_pin_seconds").value = config.bps_previous_response_pin_seconds != null ? config.bps_previous_response_pin_seconds : 21600;
     byId("bps_scrub_echo").checked = config.bps_scrub_echo !== false;
     byId("bps_normalize_usage").checked = config.bps_normalize_usage !== false;
+    byId("bps_skip_on_hosted_tools").checked = config.bps_skip_on_hosted_tools !== false;
+    byId("bps_protect_account_status").checked = config.bps_protect_account_status !== false;
+    byId("bps_honor_retry_after").checked = config.bps_honor_retry_after !== false;
+    byId("bps_keepalive_seconds").value = config.bps_keepalive_seconds != null ? config.bps_keepalive_seconds : 15;
+    byId("bps_http2_fallback").checked = config.bps_http2_fallback !== false;
+    byId("bps_excel_client_profile").checked = config.bps_excel_client_profile !== false;
     byId("bps_context_management_threshold").value = config.bps_context_management_threshold != null ? config.bps_context_management_threshold : 0;
     byId("bps_hold_after_healthy_seconds").value = config.bps_hold_after_healthy_seconds != null ? config.bps_hold_after_healthy_seconds : 900;
     byId("bps_session_sticky_seconds").value = config.bps_session_sticky_seconds != null ? config.bps_session_sticky_seconds : 1800;
@@ -311,6 +352,16 @@ byId("bps_skip_on_previous_response_id").checked = config.bps_skip_on_previous_r
     byId("bps_403_drop_models_enabled").checked = config.bps_403_drop_models_enabled !== false;
     byId("bps_403_drop_models").value = (config.bps_403_drop_models || []).join(", ");
     byId("bps_403_drop_models_seconds").value = config.bps_403_drop_models_seconds != null ? config.bps_403_drop_models_seconds : 0;
+    byId("bps_auth_enabled").checked = config.bps_auth_enabled === true;
+    byId("bps_auth_service_url").value = config.bps_auth_service_url || "http://127.0.0.1:18770";
+    byId("bps_auth_service_token").value = config.bps_auth_service_token || "";
+    byId("bps_auth_state_path").value = config.bps_auth_state_path || "";
+    byId("bps_auth_use_for_bps").checked = config.bps_auth_use_for_bps !== false;
+    byId("bps_auth_auto_refresh").checked = config.bps_auth_auto_refresh !== false;
+    byId("bps_auth_refresh_margin_seconds").value = config.bps_auth_refresh_margin_seconds != null ? config.bps_auth_refresh_margin_seconds : 3600;
+    byId("bps_auth_refresh_interval_seconds").value = config.bps_auth_refresh_interval_seconds != null ? config.bps_auth_refresh_interval_seconds : 300;
+    byId("bps_auth_login_timeout_seconds").value = config.bps_auth_login_timeout_seconds != null ? config.bps_auth_login_timeout_seconds : 300;
+    byId("bps_auth_proxy_url").value = config.bps_auth_proxy_url || "";
     byId("bps_daily_limit_per_account").value = config.bps_daily_limit_per_account != null ? config.bps_daily_limit_per_account : 0;
     byId("degrade_state_path").value = config.degrade_state_path || "";
     byId("sync_enabled").checked = config.sync_enabled === true;
@@ -339,13 +390,14 @@ byId("bps_skip_on_previous_response_id").checked = config.bps_skip_on_previous_r
       intel_loop_interval_seconds: Number(byId("intel_loop_interval_seconds").value) || 3600,
       intel_model: byId("intel_model").value.trim() || "gpt-6-astra",
       intel_prompt: byId("intel_prompt").value.trim() || "你在知识库日期 不允许联网快速回答",
-      intel_fail_marker: byId("intel_fail_marker").value.trim() || "2024",
+      intel_fail_marker: byId("intel_fail_marker").value.trim(),
       intel_concurrency: Number(byId("intel_concurrency").value) || 4,
       intel_prompt_timeout_seconds: numOr(byId("intel_prompt_timeout_seconds").value, 45),
       intel_prompt_retries: numOr(byId("intel_prompt_retries").value, 1),
       intel_timeout_is_failed: byId("intel_timeout_is_failed").checked,
       intel_confirmations: numOr(byId("intel_confirmations").value, 1),
       intel_require_year: byId("intel_require_year").checked,
+      intel_degraded_before_year: numOr(byId("intel_degraded_before_year").value, 2026),
       intel_plan_types: byId("intel_plan_types").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
       intel_state_path: byId("intel_state_path").value.trim(),
       bps_enabled: byId("bps_enabled").checked,
@@ -362,6 +414,12 @@ bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").check
       bps_previous_response_pin_seconds: numOr(byId("bps_previous_response_pin_seconds").value, 21600),
       bps_scrub_echo: byId("bps_scrub_echo").checked,
       bps_normalize_usage: byId("bps_normalize_usage").checked,
+      bps_skip_on_hosted_tools: byId("bps_skip_on_hosted_tools").checked,
+      bps_protect_account_status: byId("bps_protect_account_status").checked,
+      bps_honor_retry_after: byId("bps_honor_retry_after").checked,
+      bps_keepalive_seconds: numOr(byId("bps_keepalive_seconds").value, 15),
+      bps_http2_fallback: byId("bps_http2_fallback").checked,
+      bps_excel_client_profile: byId("bps_excel_client_profile").checked,
       bps_context_management_threshold: Number(byId("bps_context_management_threshold").value) || 0,
       bps_hold_after_healthy_seconds: numOr(byId("bps_hold_after_healthy_seconds").value, 900),
       bps_session_sticky_seconds: numOr(byId("bps_session_sticky_seconds").value, 1800),
@@ -376,6 +434,16 @@ bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").check
       bps_403_drop_models_seconds: numOr(byId("bps_403_drop_models_seconds").value, 0),
       bps_daily_limit_per_account: numOr(byId("bps_daily_limit_per_account").value, 0),
       degrade_state_path: byId("degrade_state_path").value.trim(),
+    bps_auth_enabled: byId("bps_auth_enabled").checked,
+    bps_auth_service_url: byId("bps_auth_service_url").value.trim(),
+    bps_auth_service_token: byId("bps_auth_service_token").value.trim(),
+    bps_auth_state_path: byId("bps_auth_state_path").value.trim(),
+    bps_auth_use_for_bps: byId("bps_auth_use_for_bps").checked,
+    bps_auth_auto_refresh: byId("bps_auth_auto_refresh").checked,
+    bps_auth_refresh_margin_seconds: numOr(byId("bps_auth_refresh_margin_seconds").value, 3600),
+    bps_auth_refresh_interval_seconds: numOr(byId("bps_auth_refresh_interval_seconds").value, 300),
+    bps_auth_login_timeout_seconds: numOr(byId("bps_auth_login_timeout_seconds").value, 300),
+    bps_auth_proxy_url: byId("bps_auth_proxy_url").value.trim(),
       sync_enabled: byId("sync_enabled").checked,
       sync_peers: byId("sync_peers").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
       sync_token: byId("sync_token").value.trim(),
@@ -459,6 +527,30 @@ bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").check
     }
     window.open("http://" + host + (port ? ":" + port : "") + "/accounts?token=" + encodeURIComponent(tok), "_blank");
     setStatus("已尝试打开面板；没反应请确认端口已放行、插件配置已保存", true);
+  });
+
+  // 单独打开 BPS 授权页：账号密码填在那里，日志与状态文件都不回显密码。
+  byId("open-bpsauth").addEventListener("click", function () {
+    var addr = byId("panel_addr").value.trim();
+    var tok = byId("panel_token").value.trim();
+    if (!addr) {
+      setStatus("先填「面板监听地址」（例 127.0.0.1:8848 或 0.0.0.0:8848）再保存", false);
+      return;
+    }
+    if (!tok) {
+      setStatus("先填「面板 token」（可点『生成随机 token』）再保存", false);
+      return;
+    }
+    var host = location.hostname;
+    var port = "";
+    var parts = addr.split(":");
+    if (parts.length >= 2) {
+      port = parts[parts.length - 1];
+      var head = parts[0];
+      if (head && head !== "0.0.0.0" && head !== "127.0.0.1" && head !== "localhost") host = head;
+    }
+    window.open("http://" + host + (port ? ":" + port : "") + "/bps-auth?token=" + encodeURIComponent(tok), "_blank");
+    setStatus("已尝试打开 BPS 授权页；没反应请确认端口已放行、插件配置已保存", true);
   });
 
   byId("save").addEventListener("click", function () {

@@ -260,6 +260,84 @@ fn handle_conn(
                 .unwrap_or_else(|| "{}".to_string());
             write_response(&mut stream, 200, "application/json", body.as_bytes())
         }
+        ("GET", "/bps-auth") => write_response(
+            &mut stream,
+            200,
+            "text/html; charset=utf-8",
+            BPS_AUTH_HTML.as_bytes(),
+        ),
+        ("GET", "/api/bps-auth/accounts") => {
+            let body = bps_auth_accounts_json(state, handle);
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
+        }
+        ("POST", "/api/bps-auth/login") => {
+            let account_id =
+                query_get(&req.query, "id").and_then(|value| value.parse::<i64>().ok());
+            let config = state.current_config();
+            let body = if !config.bps_auth_enabled {
+                json_error("BPS 授权未开启（插件配置里打开「BPS 授权」总开关）")
+            } else if state.bps_auth.is_running() {
+                json_error("已有一次授权在进行中，请等它结束")
+            } else if let Some(account_id) = account_id {
+                // 密码只在这里上行一次：解析进内存 → 交给授权任务 → 立刻落盘 0600。
+                let secret: Option<crate::bps_auth::AccountSecret> =
+                    serde_json::from_slice(&req.body).ok();
+                let spawned = Arc::clone(state);
+                handle.spawn(async move {
+                    if let Err(err) =
+                        crate::bps_auth::login_account(&spawned, &config, account_id, secret).await
+                    {
+                        eprintln!("[codex-native-transport] bps auth login failed: {err}");
+                    }
+                });
+                "{\"started\":true}".to_string()
+            } else {
+                json_error("id required")
+            };
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
+        }
+        ("POST", "/api/bps-auth/refresh") => {
+            let account_id =
+                query_get(&req.query, "id").and_then(|value| value.parse::<i64>().ok());
+            let config = state.current_config();
+            let body = if let Some(account_id) = account_id {
+                let spawned = Arc::clone(state);
+                handle.spawn(async move {
+                    if let Err(err) =
+                        crate::bps_auth::refresh_account(&spawned, &config, account_id).await
+                    {
+                        eprintln!("[codex-native-transport] bps auth refresh failed: {err}");
+                    }
+                });
+                "{\"started\":true}".to_string()
+            } else {
+                json_error("id required")
+            };
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
+        }
+        ("POST", "/api/bps-auth/probe") => {
+            let config = state.current_config();
+            let spawned = Arc::clone(state);
+            handle.spawn(async move {
+                crate::bps_auth::probe_health(&spawned, &config).await;
+            });
+            write_response(&mut stream, 200, "application/json", b"{\"started\":true}")
+        }
+        ("POST", "/api/bps-auth/clear") => {
+            let account_id =
+                query_get(&req.query, "id").and_then(|value| value.parse::<i64>().ok());
+            let body = match account_id {
+                Some(account_id) => {
+                    let config = state.current_config();
+                    let path = crate::bps_auth::state_file(&config);
+                    state.bps_auth.ensure_loaded(&path);
+                    state.bps_auth.clear_account(account_id, &path);
+                    "{\"ok\":true}".to_string()
+                }
+                None => json_error("id required"),
+            };
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
+        }
         _ => write_response(&mut stream, 404, "text/plain", b"not found"),
     }
 }
@@ -420,6 +498,12 @@ fn status_json(state: &Arc<SharedState>) -> String {
         "bps_cooldown_429_seconds": config.bps_cooldown_429_seconds,
         "bps_fallback_cooldown_seconds": config.bps_fallback_cooldown_seconds,
         "bps_daily_limit_per_account": config.bps_daily_limit_per_account,
+        "bps_keepalive_seconds": config.bps_keepalive_seconds,
+        "bps_protect_account_status": config.bps_protect_account_status,
+        "bps_skip_on_hosted_tools": config.bps_skip_on_hosted_tools,
+        "bps_honor_retry_after": config.bps_honor_retry_after,
+        "bps_http2_fallback": config.bps_http2_fallback,
+        "bps_excel_client_profile": config.bps_excel_client_profile,
         "effort_retry_enabled": config.effort_retry_enabled,
         "admin_api_base": config.admin_api_base,
         "admin_api_key_configured": !config.admin_api_key.trim().is_empty(),
@@ -553,6 +637,7 @@ fn intel_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
         "model": crate::intel::intel_model(&config),
         "prompt": crate::intel::intel_question(&config),
         "fail_marker": crate::intel::intel_marker(&config),
+        "intel_degraded_before_year": config.intel_degraded_before_year,
         "plan_types": config.intel_plan_types.clone(),
         "concurrency": config.intel_concurrency,
         "intel_prompt_timeout_seconds": config.intel_prompt_timeout_seconds,
@@ -571,6 +656,12 @@ fn intel_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
         "bps_cooldown_429_seconds": config.bps_cooldown_429_seconds,
         "bps_fallback_cooldown_seconds": config.bps_fallback_cooldown_seconds,
         "bps_daily_limit_per_account": config.bps_daily_limit_per_account,
+        "bps_keepalive_seconds": config.bps_keepalive_seconds,
+        "bps_protect_account_status": config.bps_protect_account_status,
+        "bps_skip_on_hosted_tools": config.bps_skip_on_hosted_tools,
+        "bps_honor_retry_after": config.bps_honor_retry_after,
+        "bps_http2_fallback": config.bps_http2_fallback,
+        "bps_excel_client_profile": config.bps_excel_client_profile,
         "bps_403_drop_models_enabled": config.bps_403_drop_models_enabled,
         "bps_403_drop_models": config.bps_403_drop_model_list(),
         "bps_403_drop_seconds": config.bps_403_drop_seconds(),
@@ -610,6 +701,72 @@ fn write_response(
     stream.flush()
 }
 
+/// BPS 授权页的数据：账号列表（来自宿主管理 API）+ 每账号的授权状态 + 服务健康度。
+///
+/// 只回状态，不回密码 / token —— 面板 token 泄露也不至于把账号密码带走。
+fn bps_auth_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
+    let config = state.current_config();
+    let path = crate::bps_auth::state_file(&config);
+    state.bps_auth.ensure_loaded(&path);
+    let now = crate::donor::now_ms();
+    let base = config.admin_api_base.trim().to_string();
+    let key = config.admin_api_key.trim().to_string();
+    let mut error = String::new();
+    let targets = if base.is_empty() || key.is_empty() {
+        error = "未配置 Sub2API 管理 API（admin_api_base / admin_api_key）".to_string();
+        Vec::new()
+    } else {
+        match handle.block_on(crate::admin::fetch_all_targets(&base, &key)) {
+            Ok(list) => list,
+            Err(err) => {
+                error = err;
+                Vec::new()
+            }
+        }
+    };
+    let accounts: Vec<serde_json::Value> = targets
+        .iter()
+        .map(|target| {
+            serde_json::json!({
+                "id": target.account_id,
+                "name": target.name,
+                "email": crate::bps_auth::email_from_name(&target.name).unwrap_or_default(),
+                "plan_type": target.plan_type,
+                "plan_label": plan_label(&target.plan_type),
+                "status": target.status,
+                "schedulable": target.schedulable,
+                "auth": state.bps_auth.view(target.account_id, now),
+            })
+        })
+        .collect();
+    let plans: Vec<serde_json::Value> = crate::intel::plan_type_counts(&targets)
+        .into_iter()
+        .map(|(value, count)| {
+            serde_json::json!({
+                "value": value,
+                "label": plan_label(&value),
+                "count": count,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "version": crate::service::PLUGIN_VERSION,
+        "enabled": config.bps_auth_enabled,
+        "use_for_bps": config.bps_auth_use_for_bps,
+        "auto_refresh": config.bps_auth_auto_refresh,
+        "refresh_margin_seconds": config.bps_auth_refresh_margin_seconds,
+        "service_url": config.bps_auth_service_url,
+        "state_file": path,
+        "default_proxy": config.bps_auth_proxy_url,
+        "health": state.bps_auth.health(),
+        "run": state.bps_auth.run_state(),
+        "plans": plans,
+        "error": error,
+        "accounts": accounts,
+    })
+    .to_string()
+}
+
 const INDEX_HTML: &str = r##"<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -635,6 +792,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
   <div class="card" id="status">加载中…</div>
   <div class="card">
     <a class="btn" id="accounts" href="#">打开智力巡检页</a>
+    <a class="btn" id="bpsauth" href="#" style="margin-left:8px">BPS 授权</a>
     <a class="btn" id="diag" href="#" style="margin-left:8px">BPS 工具桥接诊断</a>
   </div>
   <div class="card" id="diagcard" style="display:none">
@@ -647,6 +805,7 @@ const INDEX_HTML: &str = r##"<!DOCTYPE html>
 const token = new URLSearchParams(location.search).get('token') || '';
 document.getElementById('accounts').href = '/accounts?token=' + encodeURIComponent(token);
 document.getElementById('accounts').setAttribute('href', '/accounts?token=' + encodeURIComponent(token));
+document.getElementById('bpsauth').href = '/bps-auth?token=' + encodeURIComponent(token);
 fetch('/api/status?token=' + encodeURIComponent(token))
   .then(r => r.json())
   .then(d => {
@@ -815,6 +974,12 @@ function labelFor(value){
 
 function channelCell(r){
   const reason = r.channel_reason ? `<div class="id">${esc(r.channel_reason)}</div>` : '';
+  // 出站路径的现场留痕：托管工具 / previous_response_id / 客户端门禁都会让
+  // 「本该走 BPS」的这条请求落到正常通道；决策原因（channel_reason）是状态推演，
+  // 看不到这次请求体，所以把现场原因一并显示，免得面板看着像走了 BPS。
+  const live = (r.bps_cooldown_reason || '').indexOf('跳过 BPS') >= 0 ? r.bps_cooldown_reason : '';
+  const liveLine = live ? `<div class="id err">本条跳过：${esc(live)}</div>` : '';
+  if(live) return `<span class="badge normal">正常（本条跳过）</span>${liveLine}${reason}`;
   if(r.channel === 'bps') return `<span class="badge bps">BPS</span>${reason}`;
   if(r.channel === 'normal') return `<span class="badge normal">正常</span>${reason}`;
   return `<span class="badge off">—</span>${r.degrade ? '<div class="id">等待巡检结论</div>' : ''}`;
@@ -875,13 +1040,14 @@ function renderMeta(){
   const runTxt = run.running ? `<b>巡检中 ${run.done}/${run.total}</b>` : (run.finished_at_ms ? `上次巡检 ${fmtAgo(run.finished_at_ms)}` : '尚未巡检');
   document.getElementById('meta').innerHTML =
     `总开关 <b>${d.enabled ? '开' : '关'}</b> · 自动循环 <b>${d.loop_enabled ? '开' : '关'}</b>（每 ${interval}） · 自动暂停/恢复 <b>${d.auto_pause ? '开' : '关'}</b><br>` +
-    `模型 <b>${esc(d.model)}</b> · 提问 <b>${esc(d.prompt)}</b> · 不合格标记 <b>${esc(d.fail_marker)}</b> · 并发 <b>${d.concurrency}</b><br>` +
+    `模型 <b>${esc(d.model)}</b> · 提问 <b>${esc(d.prompt)}</b> · 并发 <b>${d.concurrency}</b><br>` +
     `BPS 降智通道 <b>${d.bps_enabled ? '开' : '关'}</b>（模型 ${esc((d.bps_models||[]).join(', '))}） · 流量模板 <b>${d.template_ready ? '已捕获' : '未捕获'}</b><br>` +
     `BPS 403 自动摘模型 <b>${d.bps_403_drop_models_enabled ? '开' : '关'}</b>（模型 ${esc((d.bps_403_drop_models||[]).join(', '))} · 摘除 ${d.bps_403_drop_seconds}s 后恢复）<br>` +
+    `保活与容错：流保活帧 <b>${d.bps_keepalive_seconds || 0}s</b> · 流内失败中性化 <b>${d.bps_protect_account_status !== false ? '开' : '关'}</b> · 托管工具跳过 <b>${d.bps_skip_on_hosted_tools !== false ? '开' : '关'}</b> · 429 Retry-After <b>${d.bps_honor_retry_after !== false ? '开' : '关'}</b> · HTTP/2 降级 <b>${d.bps_http2_fallback !== false ? '开' : '关'}</b> · Excel 档案头 <b>${d.bps_excel_client_profile !== false ? '开' : '关'}</b><br>` +
     `出站特征：Origin <b>${esc(d.bps_origin || '不发')}</b> · UA <b>${esc(d.bps_user_agent || '保持客户端')}</b> · 会话键假名 <b>${d.bps_pseudonym_prompt_cache_key ? '开' : '关'}</b> · metadata.agent_iteration <b>${d.bps_metadata_agent_iteration ? '开' : '关'}</b> · 推理挡位自愈 <b>${d.effort_retry_enabled ? '开' : '关'}</b><br>` +
     `切换节奏：连续合格 <b>${d.intel_confirmations}</b> 次 · 恢复后保持 <b>${d.bps_hold_after_healthy_seconds}</b>s · 会话粘滞 <b>${d.bps_session_sticky_seconds}</b>s · BPS 冷却(失败后) 超时 <b>${d.bps_cooldown_timeout_seconds}</b>s / 400 <b>${d.bps_cooldown_400_seconds}</b>s / 401 <b>${d.bps_cooldown_401_seconds}</b>s / 403 <b>${d.bps_cooldown_403_seconds}</b>s / 429 <b>${d.bps_cooldown_429_seconds}</b>s / 其它 <b>${d.bps_fallback_cooldown_seconds}</b>s · 每账号每日上限 <b>${d.bps_daily_limit_per_account ? d.bps_daily_limit_per_account + ' 次（今日最多 ' + bpsTodayMax + ' 次）' : '不限'}</b> · 提问超时 <b>${d.intel_prompt_timeout_seconds}</b>s + <b>${d.intel_prompt_retries}</b> 次重试${d.intel_timeout_is_failed ? '（超时算不合格）' : ''}<br>` +
     `previous_response_id 门禁 <b>${d.bps_skip_on_previous_response_id !== false ? '开' : '关'}</b>（命中后整条会话钉在正常通道 <b>${d.bps_previous_response_pin_seconds || 0}</b>s）<br>` +
-    `判定口径：不合格关键词 <b>${esc(d.fail_marker)}</b>${d.intel_require_year ? ' · 回答里必须出现年份' : ''}<br>` +
+    `判定口径：${d.intel_degraded_before_year ? '<b>早于 ' + d.intel_degraded_before_year + ' 年的日期 = 降智</b> · 拒答 = 正常' : '未启用年份下限判定'}${d.fail_marker ? ' · 额外关键词 <b>' + esc(d.fail_marker) + '</b>' : ''}${d.intel_require_year && !d.intel_degraded_before_year ? ' · <b>回答里必须出现年份</b>' : ''}<br>` +
     `${runTxt}${run.note ? ' · ' + esc(run.note) : ''}<br>` +
     (() => {
       const rows = d.accounts || [];
@@ -1037,6 +1203,384 @@ document.getElementById('check-all').onchange = (e) => {
   render();
 };
 load(); setInterval(load, 20000);
+</script>
+</body>
+</html>"##;
+
+/// BPS 授权页：给每个账号填一次登录密码 / TOTP，插件自动完成官方 Excel 加载项的 OAuth
+/// 授权，之后按提前刷新窗口自动轮换。页面**不回显密码**（只在上行那一次用到），
+/// 也不暴露任何 token。
+const BPS_AUTH_HTML: &str = r##"<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BPS 授权</title>
+<style>
+  body { font: 13px/1.6 -apple-system, "PingFang SC", system-ui, sans-serif; margin:0; background:#f4f5f7; color:#1f2430; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 20px 14px 60px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color:#6b7280; font-size:12px; margin-bottom:12px; }
+  .card { background:#fff; border:1px solid #e5e7eb; border-radius:10px; padding:12px 14px; margin-bottom:12px; }
+  table { width:100%; border-collapse: collapse; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #eef1f5; vertical-align: top; }
+  th { color:#6b7280; font-weight:600; font-size:12px; background:#fafbfc; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:999px; font-size:11px; border:1px solid #d7dce3; white-space:nowrap; }
+  .ok { background:#e8f7ee; border-color:#b7e3c8; color:#1a7f47; }
+  .bad { background:#fdecec; border-color:#f5c2c2; color:#b42318; }
+  .warn { background:#fff6e5; border-color:#f0d9a8; color:#8a5a00; }
+  .off { background:#f3f4f6; color:#6b7280; }
+  input[type=text], input[type=password] { width:100%; box-sizing:border-box; border:1px solid #d7dce3; border-radius:6px; padding:5px 7px; font-size:12px; }
+  button { border:1px solid #2b6cff; background:#2b6cff; color:#fff; border-radius:7px; padding:4px 10px; font-size:12px; cursor:pointer; }
+  button.ghost { background:#fff; color:#2b6cff; }
+  button.danger { background:#fff; color:#b42318; border-color:#f0b3b0; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .muted { color:#6b7280; font-size:12px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12px; }
+  .grid { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-bottom:8px; }
+  .detail td { background:#fafbfc; }
+  .err { color:#b42318; }
+  .oktext { color:#1a7f47; }
+  .nowrap { white-space:nowrap; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>BPS 授权（官方 Excel 加载项 OAuth）</h1>
+  <div class="sub">
+    BPS 端点只认官方 Excel 加载项那一路 OAuth 凭据，宿主给的 Codex bearer 打过去会被 403。
+    在这里给账号填一次登录密码（+ TOTP 密钥），插件会走宿主机 <span class="mono">bps-auth</span>
+    服务自动完成授权，并在到期前自动刷新。<b>页面不保存也不回显密码，只上行一次。</b>
+  </div>
+
+  <div class="card" id="head"></div>
+  <div class="card" id="errbox" style="display:none"></div>
+
+  <div class="card">
+    <div class="row">
+      <label>套餐
+        <select id="plan"><option value="">全部</option></select>
+      </label>
+      <label>关键词 <input type="text" id="kw" style="width:180px" placeholder="账号 / 邮箱"></label>
+      <label><input type="checkbox" id="only-pending"> 只看未授权 / 失败</label>
+      <button class="ghost" id="reload">刷新</button>
+      <button class="ghost" id="probe">探活 bps-auth</button>
+      <span class="muted" id="count"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:34px"><input type="checkbox" id="check-all"></th>
+          <th>账号</th>
+          <th style="width:96px">套餐</th>
+          <th style="width:120px">调度</th>
+          <th style="width:260px">BPS 授权</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="auth-sel">批量：保存并授权（选中）</button>
+      <button class="ghost" id="refresh-sel">批量：立即刷新（选中）</button>
+      <span class="muted">批量只对已经填过密码的账号生效。一次授权约 60~150 秒（要过 Cloudflare 校验），插件同一时间只跑一个。</span>
+    </div>
+  </div>
+</div>
+
+<script>
+const token = new URLSearchParams(location.search).get('token') || '';
+function api(path, options){
+  const url = path + (path.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
+  return fetch(url, options);
+}
+function esc(v){
+  return String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function fmtTs(ms){
+  if(!ms) return '-';
+  const d = new Date(Number(ms));
+  const p = n => (n < 10 ? '0' : '') + n;
+  return d.getFullYear() + '-' + p(d.getMonth()+1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+function fmtLeft(sec){
+  if(sec == null) return '-';
+  if(sec <= 0) return '已过期';
+  const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
+  if(d > 0) return d + '天' + h + '小时';
+  if(h > 0) return h + '小时' + m + '分';
+  return m + '分';
+}
+
+let data = { accounts: [], plans: [] };
+let selected = new Set();
+const draft = {};
+const open = {};
+let busyMsg = '';
+
+function draftOf(id){ return draft[id] || (draft[id] = {}); }
+
+function authPill(a){
+  if(!a || !a.has_secret) return '<span class="pill off">未填密码</span>';
+  if(!a.has_credential) return '<span class="pill bad">无凭据</span>';
+  if(a.remaining_seconds <= 0) return '<span class="pill warn">凭据已过期</span>';
+  return '<span class="pill ok">有效</span>';
+}
+
+function renderHead(){
+  const h = data.health || {};
+  const run = data.run || {};
+  const enabled = data.enabled ? '<span class="pill ok">已开启</span>' : '<span class="pill off">未开启</span>';
+  const useForBps = data.use_for_bps ? '出站使用 Excel 凭据' : '仅授权，出站仍用宿主 bearer';
+  let service;
+  if(!data.service_url){
+    service = '<span class="pill off">未填服务地址</span>';
+  } else if(h.checked_at_ms && h.ok){
+    service = '<span class="pill ok">正常</span>';
+  } else if(h.checked_at_ms){
+    service = '<span class="pill bad">不可用</span>';
+  } else {
+    service = '<span class="pill off">未探测</span>';
+  }
+  let runText = '空闲';
+  if(run.running){
+    runText = '<span class="pill warn">正在进行（账号 ' + run.account_id + '，阶段 ' + esc(run.stage) + '，开始于 ' + fmtTs(run.started_at_ms) + '）</span>';
+  } else if(run.finished_at_ms){
+    runText = (run.error ? '<span class="err">上次失败：' + esc(run.error) + '</span>' : '<span class="oktext">上次成功</span>') + '（' + fmtTs(run.finished_at_ms) + '）';
+  }
+  const err = data.error ? '<div class="err">读取账号失败：' + esc(data.error) + '</div>' : '';
+  document.getElementById('head').innerHTML =
+    '插件版本 <b>' + esc(data.version) + '</b> · BPS 授权 ' + enabled + ' · ' + esc(useForBps) + ' · 自动刷新 ' + (data.auto_refresh ? '开' : '关') + '<br>' +
+    'bps-auth 服务 <span class="mono">' + esc(data.service_url || '') + '</span> ' + service +
+    (h.detail ? '<div class="muted mono">' + esc(h.detail) + '</div>' : '') +
+    '<div class="muted">状态文件（含密码，权限 0600）<span class="mono">' + esc(data.state_file || '（未配置，授权无法保存）') + '</span> · 授权出口代理 <span class="mono">' + esc(data.default_proxy || '直连') + '</span></div>' +
+    '当前任务 ' + runText + (busyMsg ? ' <span class="muted">' + esc(busyMsg) + '</span>' : '') + err;
+}
+
+function renderPlans(){
+  const sel = document.getElementById('plan');
+  const keep = sel.value;
+  const rows = ['<option value="">全部</option>'];
+  (data.plans || []).forEach(p => {
+    rows.push('<option value="' + esc(p.value) + '">' + esc(p.label) + '（' + p.count + '）</option>');
+  });
+  sel.innerHTML = rows.join('');
+  sel.value = keep;
+}
+
+function visibleRows(){
+  const plan = document.getElementById('plan').value;
+  const kw = (document.getElementById('kw').value || '').trim().toLowerCase();
+  const onlyPending = document.getElementById('only-pending').checked;
+  return (data.accounts || []).filter(r => {
+    if(plan && r.plan_type !== plan) return false;
+    if(kw){
+      const hay = ((r.name || '') + ' ' + (r.email || '') + ' ' + r.id).toLowerCase();
+      if(hay.indexOf(kw) < 0) return false;
+    }
+    if(onlyPending){
+      const a = r.auth || {};
+      const bad = !a.has_secret || !a.has_credential || a.remaining_seconds <= 0 || a.last_error;
+      if(!bad) return false;
+    }
+    return true;
+  });
+}
+
+function render(){
+  renderHead();
+  renderPlans();
+  const rows = visibleRows();
+  document.getElementById('count').textContent = '显示 ' + rows.length + ' / ' + (data.accounts || []).length + ' 个账号';
+  const runBusy = (data.run || {}).running;
+  const out = rows.map(r => {
+    const a = r.auth || {};
+    const d = draftOf(r.id);
+    const checked = selected.has(r.id) ? ' checked' : '';
+    const sched = r.schedulable ? '<span class="pill ok">可调度</span>' : '<span class="pill off">已暂停</span>';
+    const detail = [
+      '<div class="grid">',
+      '<label>登录密码 <input type="password" data-k="password" data-id="' + r.id + '" value="' + esc(d.password || '') + '" placeholder="' + (a.has_secret ? '已保存（留空不改）' : '必填') + '"></label>',
+      '<label>TOTP 密钥 <input type="text" data-k="totp_secret" data-id="' + r.id + '" value="' + esc(d.totp_secret || '') + '" placeholder="' + (a.has_secret ? '已保存（留空不改）' : '有 2FA 就填') + '"></label>',
+      '<label>出口代理 <input type="text" data-k="proxy_url" data-id="' + r.id + '" value="' + esc(d.proxy_url || '') + '" placeholder="留空用全局代理"></label>',
+      '</div>',
+      '<div class="grid">',
+      '<label>邮箱 <input type="text" data-k="email" data-id="' + r.id + '" value="' + esc(d.email || '') + '" placeholder="' + esc(r.email || '从账号名推导') + '"></label>',
+      '<div></div><div></div>',
+      '</div>',
+      '<div class="row">',
+      '<button data-act="login" data-id="' + r.id + '"' + (runBusy ? ' disabled' : '') + '>保存并授权</button>',
+      '<button class="ghost" data-act="refresh" data-id="' + r.id + '">立即刷新凭据</button>',
+      '<button class="danger" data-act="clear" data-id="' + r.id + '">清除密码与凭据</button>',
+      '<span class="muted">密码只在上行时使用一次，不写入日志。</span>',
+      '</div>'
+    ].join('');
+    const authInfo = [
+      authPill(a),
+      '<div class="muted">',
+      a.has_credential ? ('剩余 ' + fmtLeft(a.remaining_seconds) + '（' + fmtTs(a.expires_at_ms) + ' 到期）') : '还没有 Excel 凭据',
+      a.obtained_at_ms ? '<br>授权于 ' + fmtTs(a.obtained_at_ms) : '',
+      a.refreshed_at_ms ? '<br>最近刷新 ' + fmtTs(a.refreshed_at_ms) : '',
+      a.workspace_hint ? '<br>workspace ' + esc(a.workspace_hint) + '…' : '',
+      a.last_error ? '<br><span class="err">' + esc(a.last_error) + '</span>（' + fmtTs(a.last_error_at_ms) + '）' : '',
+      '</div>'
+    ].join('');
+    return [
+      '<tr>',
+      '<td><input type="checkbox" data-pick="' + r.id + '"' + checked + '></td>',
+      '<td>' + esc(r.name) + '<div class="muted mono">#' + r.id + ' · ' + esc(r.email || '-') + '</div></td>',
+      '<td>' + esc(r.plan_label || r.plan_type || '-') + '</td>',
+      '<td>' + sched + '<div class="muted">' + esc(r.status || '') + '</div></td>',
+      '<td>' + authInfo + '<div style="margin-top:6px"><button class="ghost" data-act="toggle" data-id="' + r.id + '">' + (open[r.id] ? '收起配置' : '填写密码 / 配置') + '</button></div></td>',
+      '</tr>',
+      '<tr class="detail" id="detail-' + r.id + '" style="display:' + (open[r.id] ? '' : 'none') + '"><td colspan="5">' + detail + '</td></tr>'
+    ].join('');
+  });
+  document.getElementById('rows').innerHTML = out.join('') || '<tr><td colspan="5" class="muted">没有匹配的账号</td></tr>';
+}
+
+function collect(id){
+  const d = draftOf(id);
+  return {
+    password: (d.password || '').trim(),
+    totp_secret: (d.totp_secret || '').trim(),
+    proxy_url: (d.proxy_url || '').trim(),
+    email: (d.email || '').trim()
+  };
+}
+
+async function post(path, body){
+  const r = await api(path, {
+    method: 'POST',
+    headers: {'content-type': 'application/json'},
+    body: JSON.stringify(body || {})
+  });
+  if(!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+async function login(id){
+  const payload = collect(id);
+  if(!payload.password){
+    // 已经存过密码的账号允许直接点「保存并授权」重跑一次。
+    const row = (data.accounts || []).find(x => x.id === id);
+    if(!row || !(row.auth || {}).has_secret){
+      busyMsg = '';
+      alert('请先填密码');
+      return;
+    }
+  }
+  const out = await post('/api/bps-auth/login?id=' + id, payload);
+  if(out && out.error){ busyMsg = out.error; }
+  else {
+    draft[id] = { password: '', totp_secret: '', proxy_url: payload.proxy_url, email: payload.email };
+    busyMsg = '已提交授权，约 60~150 秒后看结果';
+  }
+  await load();
+}
+
+async function refreshOne(id){
+  const out = await post('/api/bps-auth/refresh?id=' + id, {});
+  busyMsg = (out && out.error) ? out.error : '已提交刷新';
+  await load();
+}
+
+async function clearOne(id){
+  if(!confirm('清除这个账号保存的密码与 Excel 凭据？')) return;
+  await post('/api/bps-auth/clear?id=' + id, {});
+  draft[id] = {};
+  await load();
+}
+
+document.getElementById('rows').addEventListener('input', ev => {
+  const t = ev.target;
+  const id = t.getAttribute && t.getAttribute('data-id');
+  const k = t.getAttribute && t.getAttribute('data-k');
+  if(id && k){ draftOf(Number(id))[k] = t.value; }
+});
+
+document.getElementById('rows').addEventListener('change', ev => {
+  const t = ev.target;
+  const pick = t.getAttribute && t.getAttribute('data-pick');
+  if(pick){
+    const id = Number(pick);
+    if(t.checked) selected.add(id); else selected.delete(id);
+  }
+});
+
+document.getElementById('rows').addEventListener('click', ev => {
+  const t = ev.target;
+  const act = t.getAttribute && t.getAttribute('data-act');
+  if(!act) return;
+  const id = Number(t.getAttribute('data-id'));
+  if(act === 'toggle'){ open[id] = !open[id]; render(); return; }
+  if(act === 'login'){ login(id).catch(ex => { busyMsg = ex.message; render(); }); return; }
+  if(act === 'refresh'){ refreshOne(id).catch(ex => { busyMsg = ex.message; render(); }); return; }
+  if(act === 'clear'){ clearOne(id).catch(ex => { busyMsg = ex.message; render(); }); return; }
+});
+
+document.getElementById('auth-sel').onclick = async () => {
+  const ids = Array.from(selected);
+  if(!ids.length){ alert('先勾选账号'); return; }
+  let skipped = 0;
+  for(const id of ids){
+    const row = (data.accounts || []).find(x => x.id === id);
+    const hasSecret = row && (row.auth || {}).has_secret;
+    if(!hasSecret && !(draftOf(id).password || '').trim()){ skipped += 1; continue; }
+    try { await login(id); } catch(ex){ busyMsg = ex.message; }
+    await new Promise(r => setTimeout(r, 800));
+  }
+  busyMsg = '批量授权已提交' + (skipped ? ('（跳过 ' + skipped + ' 个没填密码的）') : '');
+  await load();
+};
+
+document.getElementById('refresh-sel').onclick = async () => {
+  const ids = Array.from(selected);
+  if(!ids.length){ alert('先勾选账号'); return; }
+  for(const id of ids){
+    const row = (data.accounts || []).find(x => x.id === id);
+    if(!row || !(row.auth || {}).has_credential) continue;
+    try { await refreshOne(id); } catch(ex){ busyMsg = ex.message; }
+    await new Promise(r => setTimeout(r, 300));
+  }
+};
+
+document.getElementById('check-all').onchange = ev => {
+  selected.clear();
+  if(ev.target.checked) visibleRows().forEach(r => selected.add(r.id));
+  render();
+};
+
+document.getElementById('plan').onchange = render;
+document.getElementById('kw').oninput = render;
+document.getElementById('only-pending').onchange = render;
+document.getElementById('reload').onclick = () => load();
+document.getElementById('probe').onclick = async () => {
+  try { await post('/api/bps-auth/probe', {}); } catch(ex){ busyMsg = ex.message; }
+  setTimeout(() => load(), 1500);
+};
+
+async function load(){
+  try{
+    const r = await api('/api/bps-auth/accounts');
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    data = await r.json();
+    document.getElementById('errbox').style.display = 'none';
+    render();
+  }catch(ex){
+    document.getElementById('errbox').style.display = '';
+    document.getElementById('errbox').innerHTML = '<span class="err">加载失败: ' + esc(ex.message) + '（检查 URL 里的 ?token=）</span>';
+  }
+}
+
+load();
+setInterval(load, 5000);
 </script>
 </body>
 </html>"##;

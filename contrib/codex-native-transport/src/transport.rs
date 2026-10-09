@@ -110,6 +110,79 @@ impl CookieStore for CloudflareOnlyJar {
 // Client 缓存
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// HTTP/2 连接层故障降级（bps_http2_fallback）
+// ---------------------------------------------------------------------------
+
+/// 降级窗口：某个出口出现 HTTP/2 连接层故障后，这段时间内改用 HTTP/1.1。
+/// 参考实现 Roins 插件同口径（60 秒）。
+const HTTP2_DOWNGRADE_MS: u64 = 60_000;
+
+fn http2_downgrade_slot() -> &'static Mutex<HashMap<String, u64>> {
+    static SLOT: std::sync::OnceLock<Mutex<HashMap<String, u64>>> = std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 降级按「出口」记账：空串 = 不使用账号代理（直连）。
+fn http2_egress_key(proxy_url: &str) -> String {
+    proxy_url.trim().to_string()
+}
+
+/// 这个出口当前是否处于 HTTP/2 故障降级窗口内（到期自动失效并清表）。
+pub fn http2_downgrade_active(proxy_url: &str, now_ms: u64) -> bool {
+    let key = http2_egress_key(proxy_url);
+    let mut map = http2_downgrade_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match map.get(&key).copied() {
+        Some(until) if until > now_ms => true,
+        Some(_) => {
+            map.remove(&key);
+            false
+        }
+        None => false,
+    }
+}
+
+/// 记一次 HTTP/2 连接层故障：该出口 60 秒内改用 HTTP/1.1。
+pub fn note_http2_fault(proxy_url: &str, now_ms: u64) {
+    let key = http2_egress_key(proxy_url);
+    let mut map = http2_downgrade_slot()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // 顺手清掉过期项，表最多只有「活着的出口」那么大。
+    map.retain(|_, until| *until > now_ms);
+    map.insert(key, now_ms + HTTP2_DOWNGRADE_MS);
+}
+
+/// reqwest 错误是否属于 HTTP/2 连接层故障。
+///
+/// 逐层看 source 链的 Display：h2 的连接/流错误文案是
+/// `connection error detected: ...`、`stream error received: ...`、
+/// `http2 error: ...`、`GOAWAY ...`、`frame size error ...` 等。
+/// 只认这些 h2 特征串，普通 DNS/TLS/代理错误不触发降级。
+pub fn is_http2_fault(err: &reqwest::Error) -> bool {
+    const SIGNALS: [&str; 8] = [
+        "http2",
+        "h2::",
+        "goaway",
+        "stream error",
+        "connection error detected",
+        "frame size error",
+        "refused stream",
+        "protocol error",
+    ];
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(current) = source {
+        let text = current.to_string().to_ascii_lowercase();
+        if SIGNALS.iter().any(|signal| text.contains(signal)) {
+            return true;
+        }
+        source = current.source();
+    }
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ClientKey {
     /// per_account_cookie_jar=true 时为账号 ID（cookie jar 按账号隔离），否则为 0。
@@ -147,10 +220,15 @@ impl ClientCache {
             let trimmed = proxy_url.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
         };
+        // 出口处于 HTTP/2 故障降级窗口时，这个出口的 client 强制 HTTP/1.1。
+        // 键里带 force_http11，所以降级生效/到期会各自命中（或新建）正确的 client。
+        let force_http11 = config.force_http11
+            || (config.bps_http2_fallback
+                && http2_downgrade_active(proxy_url, crate::donor::now_ms()));
         let key = ClientKey {
             account: if config.per_account() { account_id } else { 0 },
             proxy,
-            force_http11: config.force_http11,
+            force_http11,
             connect_timeout_seconds: config.connect_timeout_seconds,
         };
 
@@ -163,7 +241,7 @@ impl ClientCache {
             return Ok(cached.client.clone());
         }
 
-        let client = build_client(config, key.proxy.as_deref())?;
+        let client = build_client(config, key.proxy.as_deref(), force_http11)?;
         if clients.len() >= config.max_cached_clients as usize {
             if let Some(oldest) = clients
                 .iter()
@@ -189,14 +267,18 @@ impl ClientCache {
 /// 注意：这里刻意 **不** 设置连接池大小、keepalive、HTTP2 窗口等参数——
 /// codex 的 HttpClientBuilder 同样不设置，保持 reqwest/h2 默认值才能让
 /// HTTP/2 SETTINGS 帧与真实客户端一致。
-fn build_client(config: &PluginConfig, proxy: Option<&str>) -> Result<reqwest::Client, String> {
+fn build_client(
+    config: &PluginConfig,
+    proxy: Option<&str>,
+    force_http11: bool,
+) -> Result<reqwest::Client, String> {
     let mut builder =
         reqwest::Client::builder().cookie_provider(Arc::new(CloudflareOnlyJar::default()));
     if config.connect_timeout_seconds > 0 {
         builder =
             builder.connect_timeout(Duration::from_secs(config.connect_timeout_seconds as u64));
     }
-    if config.force_http11 {
+    if force_http11 {
         builder = builder.http1_only();
     }
     if let Some(proxy_url) = proxy {
@@ -577,6 +659,31 @@ mod tests {
     }
 
     #[test]
+    fn http2_downgrade_window_is_per_egress_and_expires() {
+        // 用独一无二的口串，避免和其他用例（或并行测试）互相干扰。
+        let egress = "socks5://unit-test-http2-downgrade@127.0.0.1:1080";
+        let now = 1_000_000u64;
+        assert!(!http2_downgrade_active(egress, now));
+        note_http2_fault(egress, now);
+        assert!(http2_downgrade_active(egress, now));
+        // 另一个出口不受影响。
+        assert!(!http2_downgrade_active(
+            "socks5://other@127.0.0.1:1080",
+            now
+        ));
+        // 窗口内一直生效，到期即失效。
+        assert!(http2_downgrade_active(egress, now + HTTP2_DOWNGRADE_MS - 1));
+        assert!(!http2_downgrade_active(egress, now + HTTP2_DOWNGRADE_MS));
+        // 直连（空串）也能单独记账。
+        note_http2_fault("", now);
+        assert!(http2_downgrade_active("", now));
+        assert!(
+            http2_downgrade_active("   ", now),
+            "出口串两侧空白按同键处理"
+        );
+    }
+
+    #[test]
     fn cloudflare_jar_only_keeps_infra_cookies_for_chatgpt() {
         let jar = CloudflareOnlyJar::default();
         let url: reqwest::Url = "https://chatgpt.com/backend-api/codex/responses"
@@ -650,7 +757,7 @@ mod tests {
 
         let config = PluginConfig::default();
         let proxy_url = format!("socks5://proxy-user:proxy-pass@{proxy_addr}");
-        let client = build_client(&config, Some(&proxy_url)).unwrap();
+        let client = build_client(&config, Some(&proxy_url), false).unwrap();
         let response = tokio::time::timeout(
             Duration::from_secs(5),
             client.get("http://unit.test:18080/probe").send(),

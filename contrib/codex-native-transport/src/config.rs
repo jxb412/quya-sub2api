@@ -63,7 +63,11 @@ pub struct PluginConfig {
     pub intel_model: String,
     /// 巡检提问（空 = 默认知识库日期问题）。
     pub intel_prompt: String,
-    /// 判不合格的标记（空 = 2024）：回答里出现该字符串即判该号当前被降智。
+    /// 额外的不合格关键词（可多个，逗号 / 竖线分隔；空 = 不做关键词判定）。
+    ///
+    /// 运营口径改成「早于 `intel_degraded_before_year` 的年份 = 降智、拒答 = 正常」之后，
+    /// 这一项默认留空：年份规则已经覆盖了「答 2024」这种典型降智特征，再挂一个 `2024`
+    /// 关键词只是同一件事说两遍。留空后想临时加词（某个模型特有的敷衍措辞）仍可在此填。
     pub intel_fail_marker: String,
     /// 自动循环巡检开关。关 = 只在面板里手动触发。
     pub intel_loop_enabled: bool,
@@ -86,9 +90,20 @@ pub struct PluginConfig {
     pub intel_confirmations: u32,
     /// 巡检回答里必须出现年份（19xx/20xx），否则判不合格。
     ///
-    /// 降智号除了答「2024」，还会答「我不知道自己的知识截止日期」这种不含
-    /// 关键词的敷衍话；只靠关键词会把这种号误判成合格，通道又切回正常。
+    /// ⚠️ 只在 `intel_degraded_before_year = 0`（关掉年份下限判定）时生效。
+    /// 运营口径是「不降智的号会拒答」，拒答本来就不带年份，两条规则互斥，
+    /// 默认关闭。
     pub intel_require_year: bool,
+    /// 降智年份下限（默认 2026，0 = 关闭该判定）。
+    ///
+    /// 运营实测口径：不降智的模型对这个提问会**拒答**（「我无法确认自己的知识截止
+    /// 日期」），一旦报出早于该年份的日期（典型「2024 年 6 月」），说明这次请求被
+    /// 上游路由到了降智模型。所以：回答里出现 < 该年份的日期 → 不合格；拒答 /
+    /// 不报日期 → 合格。
+    ///
+    /// 2026-10 实测：BPS 通道与正常通道、本机出口 / 142 / 107 两个代理池出口共 38 次
+    /// 采样全部是「2024 年 6 月」，只有 1 次拒答，即当时上游两边都在降智。
+    pub intel_degraded_before_year: u16,
     /// 判定合格后仍在 BPS 通道保持多久（秒，0 = 立刻允许切回）。
     pub bps_hold_after_healthy_seconds: u32,
     /// 会话粘滞：同一会话用过 BPS 之后，空闲多久内继续走 BPS（秒，0 = 关闭）。
@@ -225,8 +240,87 @@ pub struct PluginConfig {
     /// 删除这些键后按普通输入计费（与正常 Codex 线路一致）。
     /// 思路来自 codex-basispoints-transport 的 normalize_usage。
     pub bps_normalize_usage: bool,
+    /// BPS 出站附带完整 Excel/Basis-Points 官方客户端 profile 头（默认 true）。
+    ///
+    /// 参考实现 Roins-hub/sub2api-oai-basispoints（CPA 插件 v0.2.8 端口）出站会带一整套
+    /// `x-openai-internal-basispoints-client-*` / `x-openai-internal-basispoints-office-*`
+    /// / `x-stainless-*` 与 `user-agent: oai-basispoints/<版本>`，让上游把请求认成官方
+    /// Excel 插件；我们此前只带 auth-mode / accept-encoding / origin。
+    /// 注意焚决（Fenjue-Windows）的实测结论：用公开插件的完整契约（含官方 stream /
+    /// user / tools version 字段）真实生成时仍返回
+    /// `403 This request was blocked by our usage policy`，说明 403 不是靠补头就能解决；
+    /// 这里只是把出站 profile 对齐到参考实现，做成开关方便 A/B。
+    pub bps_excel_client_profile: bool,
+    /// 429 冷却优先采用上游 `Retry-After`（秒数或 HTTP 日期，钳到 1 秒..2 小时；
+    /// 默认 true）。关掉 = 只用 `bps_cooldown_429_seconds`。
+    pub bps_honor_retry_after: bool,
+    /// 带托管工具请求跳过 BPS（默认 true）。
+    ///
+    /// BPS 收不了 OpenAI 托管工具：实时联网（`web_search` 且
+    /// `external_web_access=true`，或 `search_context_size=high`）、声明
+    /// `image_generation`，以及 `tool_choice` 强制这些工具的请求，命中就走账号正常通道。
+    /// Codex CLI 默认附带的「仅缓存搜索」声明（`external_web_access=false`）不触发，
+    /// `tool_choice: "none"` 也不触发。
+    pub bps_skip_on_hosted_tools: bool,
+    /// BPS 流内失败事件的账号保护（默认 true）。
+    ///
+    /// 输出开始后 BPS 才失败时，上游会在 SSE 里发 `error` / `response.failed`。宿主
+    /// （openAIStreamFailedEventSemanticStatus）读到 401/403/429/529 或
+    /// rate_limit / permission / account_disabled 这类信号时会处罚整个 OAuth 账号。
+    /// 开启后把这些事件改写成中性的 `server_error` + `basispoints_unavailable`
+    /// （原始状态码只留在宿主不读取的 `upstream_status`），让宿主不进账号级处罚；
+    /// 不带账号信号的请求类错误（如 `context_length_exceeded`）原样放行。
+    pub bps_protect_account_status: bool,
+    /// BPS 流式响应保活帧间隔（秒，0 = 关，默认 15）。
+    ///
+    /// 宿主对上游 SSE 有 `gateway.stream_data_interval_timeout`（默认 180 秒）静默超时，
+    /// 超时会按整个 OAuth 账号记一次流超时（HandleStreamTimeout，可能临时不可调度）。
+    /// 模型长思考时上游可能长时间不吐字节，这里按间隔补一个 SSE 注释帧 `: keepalive`
+    /// （SSE 客户端忽略注释，宿主把它算作一次上游读取）把静默打断。
+    /// 思路来自 Roins 插件的 stream_keepalive_seconds。
+    pub bps_keepalive_seconds: u32,
+    /// BPS 连接层出现 HTTP/2 故障后自动降级 HTTP/1.1（默认 true）。
+    ///
+    /// 现网见过一类失败：`PLUGIN_UPSTREAM_CONNECT: upstream connection or proxy tunnel
+    /// failed`，追下去是 h2 连接层问题（GOAWAY / stream error / 帧错误），换成
+    /// HTTP/1.1 立刻恢复。参考实现 Roins 插件也是这么做的：BPS 连接出现 HTTP/2
+    /// 连接层故障后，该出口 60 秒内改用 HTTP/1.1，到期自动切回。
+    /// 只对 BPS 连接生效，且按出口（代理串）分别记住，不影响同账号的正常 Codex 通道。
+    pub bps_http2_fallback: bool,
     /// 每账号「自动降智处理」开关的落盘路径（空 = 复用 intel_state_path 同目录）。
     pub degrade_state_path: String,
+    /// BPS 授权（官方 Excel 插件 OAuth）总开关（默认关）。
+    ///
+    /// 打开后：面板的「BPS 授权」页可以对每个账号填一次密码 / TOTP，插件自动完成
+    /// 官方 Excel 加载项的 OAuth 授权，并在 BPS 出站时用这份 Excel 凭据替换宿主的
+    /// Codex bearer。原因是 BPS 端点只认 Excel 那一路 OAuth（client_id
+    /// `app_fnr0pYvVwwFDocDumLG3H2Bp`）：同账号对照实测，Codex token → 403，
+    /// Excel token → 200，补 UA / 补 scope / 改指纹都换不来 200。授权本身跑在宿主机的
+    /// `bps-auth` 服务里（见 contrib/bps-auth），插件只保存材料与凭据、负责刷新。
+    pub bps_auth_enabled: bool,
+    /// bps-auth 服务的地址（默认 `http://127.0.0.1:18770`）。
+    ///
+    /// 两种部署对应两个值：宿主机 systemd 装法（contrib/bps-auth/install.sh）保持
+    /// 回环地址；侧车容器装法（contrib/bps-auth/run-container.sh，挂到 Sub2API 同一个
+    /// docker 网络）填 `http://bps-auth:18770`。
+    pub bps_auth_service_url: String,
+    /// bps-auth 服务的共享 token（`/etc/bps-auth.env` 里的 `BPS_AUTH_TOKEN`）。
+    pub bps_auth_service_token: String,
+    /// 密码 / 凭据的落盘路径（空 = 复用 intel_state_path 同目录下的 bps-auth.json）。
+    pub bps_auth_state_path: String,
+    /// BPS 出站改用 Excel access_token（默认 true，仅 `bps_auth_enabled` 打开时生效）。
+    /// 关掉 = 只做授权与刷新、仍然用宿主 bearer（用于对照 A/B）。
+    pub bps_auth_use_for_bps: bool,
+    /// 自动用 refresh_token 轮换（默认 true）。关掉后凭据过期只能手动重新授权。
+    pub bps_auth_auto_refresh: bool,
+    /// 提前多少秒刷新（默认 3600，即到期前 1 小时换新）。
+    pub bps_auth_refresh_margin_seconds: u32,
+    /// 后台刷新巡检周期（秒，默认 300，下限 60）。
+    pub bps_auth_refresh_interval_seconds: u32,
+    /// 单次授权超时（秒，默认 300；授权要过 Cloudflare 校验，通常 60~150 秒）。
+    pub bps_auth_login_timeout_seconds: u32,
+    /// 授权用的出口代理（空 = 直连；机房 IP 常过不了 Cloudflare 校验，建议填住宅代理池）。
+    pub bps_auth_proxy_url: String,
     /// 跨机状态同步总开关（默认关）。
     ///
     /// 两台服务器共用同一批账号（同一份 PG）时，同一个账号在两台上是同一个上游
@@ -327,7 +421,7 @@ impl Default for PluginConfig {
             intel_plan_types: Vec::new(),
             intel_model: "gpt-6-astra".to_string(),
             intel_prompt: "你在知识库日期 不允许联网快速回答".to_string(),
-            intel_fail_marker: "2024".to_string(),
+            intel_fail_marker: String::new(),
             intel_loop_enabled: false,
             intel_loop_interval_seconds: 3600,
             intel_concurrency: 4,
@@ -337,7 +431,8 @@ impl Default for PluginConfig {
             intel_prompt_retries: 1,
             intel_timeout_is_failed: true,
             intel_confirmations: 1,
-            intel_require_year: true,
+            intel_require_year: false,
+            intel_degraded_before_year: 2026,
             bps_hold_after_healthy_seconds: 900,
             bps_session_sticky_seconds: 1800,
             bps_fallback_cooldown_seconds: 120,
@@ -371,7 +466,23 @@ impl Default for PluginConfig {
             bps_previous_response_pin_seconds: 21_600,
             bps_scrub_echo: true,
             bps_normalize_usage: true,
+            bps_excel_client_profile: true,
+            bps_honor_retry_after: true,
+            bps_skip_on_hosted_tools: true,
+            bps_protect_account_status: true,
+            bps_keepalive_seconds: 15,
+            bps_http2_fallback: true,
             degrade_state_path: String::new(),
+            bps_auth_enabled: false,
+            bps_auth_service_url: "http://127.0.0.1:18770".to_string(),
+            bps_auth_service_token: String::new(),
+            bps_auth_state_path: String::new(),
+            bps_auth_use_for_bps: true,
+            bps_auth_auto_refresh: true,
+            bps_auth_refresh_margin_seconds: 3600,
+            bps_auth_refresh_interval_seconds: 300,
+            bps_auth_login_timeout_seconds: 300,
+            bps_auth_proxy_url: String::new(),
             sync_enabled: false,
             sync_peers: Vec::new(),
             sync_token: String::new(),
@@ -466,6 +577,27 @@ impl PluginConfig {
                 .join("degrade-handling.json")
                 .to_string_lossy()
                 .into_owned(),
+            _ => String::new(),
+        }
+    }
+
+    /// 账号密码 / Excel 凭据的落盘路径（空配置时从巡检结论路径推导）。
+    ///
+    /// 这个文件里有登录密码与 refresh_token，落盘时按 0600 收紧权限；路径留空时
+    /// 与巡检结论同目录（容器里通常是 /app/data/codex-native-transport/）。
+    pub fn bps_auth_state_file(&self) -> String {
+        let explicit = self.bps_auth_state_path.trim();
+        if !explicit.is_empty() {
+            return explicit.to_string();
+        }
+        let intel = self.intel_state_path.trim();
+        if intel.is_empty() {
+            return String::new();
+        }
+        match std::path::Path::new(intel).parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => {
+                dir.join("bps-auth.json").to_string_lossy().into_owned()
+            }
             _ => String::new(),
         }
     }
@@ -594,6 +726,11 @@ impl PluginConfig {
         if self.intel_prompt_retries > 5 {
             return Err("intel_prompt_retries must be within 0..=5".to_string());
         }
+        if self.intel_degraded_before_year != 0
+            && !(2000..=2100).contains(&self.intel_degraded_before_year)
+        {
+            return Err("intel_degraded_before_year must be 0 or within 2000..=2100".to_string());
+        }
         if !(1..=10).contains(&self.intel_confirmations) {
             return Err("intel_confirmations must be within 1..=10".to_string());
         }
@@ -631,6 +768,9 @@ impl PluginConfig {
         }
         if self.bps_daily_limit_per_account > 100_000 {
             return Err("bps_daily_limit_per_account must be within 0..=100000".to_string());
+        }
+        if self.bps_keepalive_seconds > 60 {
+            return Err("bps_keepalive_seconds must be within 0..=60".to_string());
         }
         if self.bps_enabled {
             let endpoint = self.bps_endpoint.trim();
@@ -898,6 +1038,7 @@ mod tests {
             "intel_timeout_is_failed",
             "intel_confirmations",
             "intel_require_year",
+            "intel_degraded_before_year",
             "bps_hold_after_healthy_seconds",
             "bps_session_sticky_seconds",
             "bps_fallback_cooldown_seconds",
@@ -930,6 +1071,12 @@ mod tests {
             "bps_previous_response_pin_seconds",
             "bps_scrub_echo",
             "bps_normalize_usage",
+            "bps_excel_client_profile",
+            "bps_honor_retry_after",
+            "bps_skip_on_hosted_tools",
+            "bps_protect_account_status",
+            "bps_keepalive_seconds",
+            "bps_http2_fallback",
             "degrade_state_path",
             "sync_enabled",
             "sync_peers",

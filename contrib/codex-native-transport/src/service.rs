@@ -33,6 +33,9 @@ const CAPABILITY: &str = "openai.oauth.outbound_transport.v1";
 
 const TEST_URL: &str = "https://chatgpt.com/robots.txt";
 
+/// BPS 流式响应的静默保活帧（SSE 注释，客户端忽略；宿主扫描器算一次上游读取）。
+const BPS_KEEPALIVE_FRAME: &[u8] = b": keepalive\n\n";
+
 /// 会话级通道粘滞 + 账号级 BPS 失败冷却。
 ///
 /// 目的是让「换通道」对客户端尽量透明：
@@ -224,13 +227,23 @@ fn note_bps_failure(
     sticky_key: Option<&str>,
     config: &PluginConfig,
     status: Option<u16>,
+    retry_after_ms: Option<u64>,
 ) {
     let now = crate::donor::now_ms();
     if let Some(key) = sticky_key {
         state.channels.mark_session(key, false, now);
     }
-    let (seconds, label) = bps_cooldown_for(config, status);
-    let reason = format!("{label}，冷却 {seconds}s");
+    let (mut seconds, label) = bps_cooldown_for(config, status);
+    // 429 优先采用上游 Retry-After（参考实现带的行为）：上游自己说了多久，
+    // 比配置的固定值准，也不会让每个请求先白撞一次 429 再回退。
+    let mut cooldown_source = "";
+    if status == Some(429) && config.bps_honor_retry_after {
+        if let Some(ms) = retry_after_ms {
+            seconds = ((ms + 999) / 1000).min(86_400) as u32;
+            cooldown_source = "（Retry-After）";
+        }
+    }
+    let reason = format!("{label}，冷却 {seconds}s{cooldown_source}");
     state
         .channels
         .set_last_reason(account_id, reason.clone(), now);
@@ -275,6 +288,8 @@ pub struct SharedState {
     pub channels: ChannelSticky,
     /// BPS 403 自动摘除模型（403 → 摘模型 → 到点恢复）。
     pub model_drop: crate::model_drop::ModelDropStore,
+    /// BPS 官方 Excel 授权：账号密码 / TOTP + Excel 凭据（落盘 0600）。
+    pub bps_auth: crate::bps_auth::BpsAuthStore,
 }
 
 impl SharedState {
@@ -288,6 +303,7 @@ impl SharedState {
             degrade: DegradeStore::default(),
             channels: ChannelSticky::default(),
             model_drop: crate::model_drop::ModelDropStore::default(),
+            bps_auth: crate::bps_auth::BpsAuthStore::default(),
         })
     }
 
@@ -704,6 +720,7 @@ async fn run_forward(
         let mut dynamic_tools_blocks_bps = false;
         let mut previous_response_blocks_bps = false;
         let mut client_gate_blocks_bps = false;
+        let mut hosted_tools_blocks_bps = false;
         let has_prev_id = crate::bps::has_previous_response_id(&body);
         // 这个账号这条请求本来就想走 BPS（降智处理开 + 未冷却 + 判定或会话粘滞要求）。
         // 客户端门禁只在「本来要走 BPS」时才有意义，免得给根本没进 BPS 的账号
@@ -750,6 +767,10 @@ async fn run_forward(
             // 回程还会抑制 tool_search_* 项。命中就让这条请求走账号正常通道。
             dynamic_tools_blocks_bps =
                 config.bps_skip_on_dynamic_tools && crate::bps::has_dynamic_tools(&body);
+            // 托管工具闸门：BPS 执行不了实时联网 / 生图（声明即命中，或 tool_choice
+            // 强制）。Codex CLI 默认的「仅缓存搜索」声明不触发。
+            hosted_tools_blocks_bps =
+                config.bps_skip_on_hosted_tools && crate::bps::has_hosted_tools(&body);
             // previous_response_id：命中就跳过 BPS，并把这个会话（账号 + 会话键）
             // 钉住 bps_previous_response_pin_seconds 秒，避免同一会话在两条通道
             // 之间来回跳。
@@ -765,6 +786,7 @@ async fn run_forward(
         let mut use_bps = wants_bps
             && !media_blocks_bps
             && !dynamic_tools_blocks_bps
+            && !hosted_tools_blocks_bps
             && !previous_response_blocks_bps
             && !client_gate_blocks_bps
             && !pinned_normal;
@@ -798,6 +820,12 @@ async fn run_forward(
                 },
                 now,
             );
+        } else if !use_bps && hosted_tools_blocks_bps {
+            state.channels.set_last_reason(
+                start.account_id,
+                "带托管工具（实时联网 / 生图），跳过 BPS 走正常通道".to_string(),
+                now,
+            );
         } else if !use_bps && pinned_normal && decision.enabled && !cooling {
             state.channels.set_last_reason(
                 start.account_id,
@@ -828,7 +856,7 @@ async fn run_forward(
                 &config,
                 start.account_id,
                 &format!(
-                    "会话门禁 url={} model={:?} 原始键={:?} 改写后键={:?} previous_response_id={} sticky={} pinned={} media={} dyn={} decision={} cooling={} 结果={}",
+                    "会话门禁 url={} model={:?} 原始键={:?} 改写后键={:?} previous_response_id={} sticky={} pinned={} media={} dyn={} hosted={} decision={} cooling={} 结果={}",
                     start.url,
                     body_model(&body),
                     client_session_key,
@@ -838,6 +866,7 @@ async fn run_forward(
                     pinned_normal,
                     media_blocks_bps,
                     dynamic_tools_blocks_bps,
+                    hosted_tools_blocks_bps,
                     decision.use_bps,
                     cooling,
                     if use_bps { "bps" } else { "正常通道" }
@@ -902,13 +931,49 @@ async fn run_forward(
                                 };
                                 headers.insert(name, value);
                             }
+                            // BPS 官方 Excel 授权（bps_auth_enabled 打开时）：BPS 端点只认
+                            // 「官方 Excel 加载项」那一路 OAuth 凭据，宿主给的 Codex bearer
+                            // 打过去一律 403（同账号对照实测）。这里换成该账号的 Excel
+                            // access_token，临近过期会先自动刷新；拿不到就保持宿主 bearer
+                            // 原样，绝不因为插件自己的授权问题阻断请求。
+                            if let Some(token) =
+                                crate::bps_auth::access_token(&state, &config, start.account_id)
+                                    .await
+                            {
+                                if let Ok(value) = reqwest::header::HeaderValue::from_str(&format!(
+                                    "Bearer {token}"
+                                )) {
+                                    headers.insert(reqwest::header::AUTHORIZATION, value);
+                                }
+                                // Excel 凭据自带的 workspace 与宿主记的应当一致；以凭据为准，
+                                // 免得宿主头里留着旧 workspace 让上游判成不匹配。
+                                if let Some(credential) =
+                                    state.bps_auth.credential(start.account_id)
+                                {
+                                    let workspace =
+                                        credential.chatgpt_account_id.trim().to_string();
+                                    if !workspace.is_empty() {
+                                        for name in ["chatgpt-account-id", "x-openai-account-id"] {
+                                            if let (Ok(name), Ok(value)) = (
+                                                reqwest::header::HeaderName::from_bytes(
+                                                    name.as_bytes(),
+                                                ),
+                                                reqwest::header::HeaderValue::from_str(&workspace),
+                                            ) {
+                                                headers.insert(name, value);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             bps_stream = Some(
                                 crate::bps::BpsStream::with_targets_and_scope(
                                     &bridge,
                                     targets,
                                     prepared.call_cache_scope,
                                 )
-                                .with_response_rewrite(scrub, config.bps_normalize_usage),
+                                .with_response_rewrite(scrub, config.bps_normalize_usage)
+                                .with_failure_guard(config.bps_protect_account_status),
                             );
                         }
                         // body 不是可用的 Responses JSON：保持旧行为，原样放行。
@@ -981,12 +1046,25 @@ async fn run_forward(
         Ok(response) => response,
         Err(err) => {
             // BPS 连接层失败：直接回退原通道，别把错误丢给客户端。
+            // 其中 HTTP/2 连接层故障（h2 GOAWAY / stream error / 帧错误）按出口降级：
+            // 该出口 60 秒内改用 HTTP/1.1，避开「PLUGIN_UPSTREAM_CONNECT」这类连续失败。
             if let Some((url, fallback_headers, original_body)) = bps_fallback.take() {
+                if config.bps_http2_fallback && transport::is_http2_fault(&err) {
+                    transport::note_http2_fault(&start.proxy_url, crate::donor::now_ms());
+                    crate::bps::note_throttled(
+                        &config,
+                        start.account_id,
+                        "bps-http2-fallback",
+                        60_000,
+                        "BPS 连接层 HTTP/2 故障，该出口 60 秒内改用 HTTP/1.1",
+                    );
+                }
                 note_bps_failure(
                     &state,
                     start.account_id,
                     sticky_key.as_deref(),
                     &config,
+                    None,
                     None,
                 );
                 // BPS 连接层就失败了：算 BPS 线一次失败（状态码 0）。
@@ -1052,12 +1130,18 @@ async fn run_forward(
     if let Some((url, headers, original_body)) = bps_fallback {
         if !response.status().is_success() {
             let status = response.status().as_u16();
+            let retry_after_ms = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| crate::bps::parse_retry_after_ms(value, crate::donor::now_ms()));
             note_bps_failure(
                 &state,
                 start.account_id,
                 sticky_key.as_deref(),
                 &config,
                 Some(status),
+                retry_after_ms,
             );
             // BPS 端点回了非 2xx：算 BPS 线一次失败。
             record_route(&state, &config, start.account_id, "bps", status);
@@ -1280,13 +1364,59 @@ async fn run_forward(
         return;
     }
 
+    // 保活帧：BPS 长思考时上游可能长时间不吐字节，宿主对上游 SSE 有
+    // `gateway.stream_data_interval_timeout`（默认 180 秒）的静默超时，超时会按整个
+    // OAuth 账号记一次流超时（HandleStreamTimeout，可能临时不可调度）。这里在静默期间
+    // 补 SSE 注释帧 `: keepalive`（客户端忽略，宿主的扫描器把它算作一次上游读取）。
+    // 只在 BPS 通道且响应确实是 SSE 时启用：往普通 JSON 响应里塞注释帧会破坏正文。
+    // 必须在 bytes_stream() 之前读头：那个方法会把 response 整个 move 走。
+    let response_is_sse = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("text/event-stream"))
+        .unwrap_or(false);
+
     // 5. 流式转发响应体（SSE 逐块低延迟回传）。
     let mut stream = response.bytes_stream();
     let mut bytes_received: i64 = 0;
     let mut bps = bps_stream;
-    while let Some(chunk) = stream.next().await {
+    let mut ticker = if bps_active && response_is_sse && config.bps_keepalive_seconds > 0 {
+        let period = std::time::Duration::from_secs(config.bps_keepalive_seconds as u64);
+        Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + period,
+            period,
+        ))
+    } else {
+        None
+    };
+    let mut keepalives_sent: u64 = 0;
+    loop {
+        let chunk = if let Some(ticker) = ticker.as_mut() {
+            tokio::select! {
+                biased;
+                chunk = stream.next() => chunk,
+                _ = ticker.tick() => {
+                    keepalives_sent += 1;
+                    if tx
+                        .send(Ok(ForwardResponse {
+                            frame: Some(forward_response::Frame::BodyChunk(
+                                BPS_KEEPALIVE_FRAME.to_vec(),
+                            )),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            stream.next().await
+        };
         match chunk {
-            Ok(bytes) => {
+            Some(Ok(bytes)) => {
                 let payload = match bps.as_mut() {
                     Some(rewriter) => rewriter.push(&bytes),
                     None => bytes.to_vec(),
@@ -1306,7 +1436,7 @@ async fn run_forward(
                     return;
                 }
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 let _ = tx
                     .send(Ok(error_frame(
                         "PLUGIN_UPSTREAM_READ",
@@ -1316,7 +1446,18 @@ async fn run_forward(
                     .await;
                 return;
             }
+            None => break,
         }
+    }
+    if keepalives_sent > 0 {
+        // 每个账号每分钟最多留一行，方便排查「长思考被宿主流超时」这一类问题。
+        crate::bps::note_throttled(
+            &config,
+            start.account_id,
+            "bps-keepalive",
+            60_000,
+            &format!("BPS 流静默保活：本请求补发 {keepalives_sent} 个 keepalive 帧"),
+        );
     }
 
     // BPS 通道：吐出末尾未成行/未完整分帧的残留字节。
