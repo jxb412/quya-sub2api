@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前开发版本 | `0.4.6`（合并上游 `v0.2.5`，待发布） |
+| 当前开发版本 | `0.4.13`（合并上游 `v0.2.15`，待发布） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -137,6 +137,32 @@ namespace 修复、OpenAI WebSocket 连接池与执行作用域修复，以及�
 
 本次在隔离环境完成了从 `0.4.5` 数据库原地升级到 `0.4.6` 的验证：两项迁移均已
 登记，四个相关平台约束包含 `opencode_go`，原管理员数据和登录状态保持正常。
+
+`0.4.13` 基于本项目 `0.4.12`，合并上游 `v0.2.15`（146 个提交）。上游主要变化：新增
+Cline、Command Code 平台，平台白名单由数据库 CHECK 约束改为应用层校验；平台清单
+统一由 platform profile 驱动转发、探测与账号表单；修复加密 reasoning 签名被拒、
+Anthropic thinking 缺少 signature、Chat 与 Responses 互转、WebSocket 长连接计费、
+Grok 空流 failover 等问题。
+
+OAuth 历史回放 `web_search_call` 的修复改用官方实现（`dab3b87ea`、`64caa9af8`、
+`85e311095`，含 Responses Lite 的 `additional_tools` 变体），不再保留本地早期移植
+版本，相关文件与上游逐字节一致。
+
+本次新增一个幂等迁移：
+
+- `242_drop_platform_check_constraints.sql`：删除 `user_platform_quotas_platform_check`
+  与 `composite_model_routes_target_platform_check` 两个 CHECK 约束，平台白名单改由
+  应用层校验，新增平台不再需要数据库迁移。
+
+生产环境保持 `DATABASE_INITIALIZATION_ENABLED=false` 时，应用不会自行执行该迁移。
+升级前先备份 PostgreSQL，在维护步骤中执行并登记迁移，再同时替换所有连接同一数据库
+的应用节点；旧约束未删除前，写入新平台值会被数据库拒绝。
+
+本次合并后在测试机隔离目录完成了源码级验证：`go build ./...`、`go test -tags=unit`
+（58 个包）与 `go test -tags=integration`（需要 testcontainers 的
+`postgres:18.1-alpine3.23`、`redis:8.4-alpine` 镜像）全部通过；前端
+`pnpm install --frozen-lockfile`、`vue-tsc`、eslint 与关键 vitest（31 个文件、
+579 个用例）全部通过。
 
 ## 上游同步
 
