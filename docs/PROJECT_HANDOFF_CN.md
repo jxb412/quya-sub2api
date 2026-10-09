@@ -77,8 +77,41 @@ AUTO_SETUP=true
 DATABASE_INITIALIZATION_ENABLED=true
 ```
 
-安装完成后恢复为 `false`。如果上游更新包含数据库迁移，只在维护窗口临时打开
-`DATABASE_INITIALIZATION_ENABLED=true`，完成验证后关闭。
+安装完成后恢复为 `false`。
+
+### 执行数据库迁移
+
+`DATABASE_INITIALIZATION_ENABLED` 是唯一控制启动期迁移的开关：置为 `true` 时，服务
+启动会对目标库执行 `backend/migrations/` 中所有未登记的迁移，并按
+`sha256(TrimSpace(内容))` 登记到 `schema_migrations`；置为 `false` 时，启动日志会打印
+`database initialization disabled; skipping startup migrations and bootstrap writes`
+并跳过全部迁移。生产环境默认保持 `false`，需要执行迁移时用下面任一方式。
+
+方式 A：手工执行 + 登记（本项目生产升级实际使用，可控性最好）
+
+1. 备份 PostgreSQL 与 compose/env。
+2. 在维护窗口执行本次新增的迁移 SQL（本项目迁移均为幂等语句）。
+3. 按 `sha256(TrimSpace(内容))` 计算校验和，写入
+   `schema_migrations(filename, checksum)`。
+4. 检查所有连接同一数据库的应用节点。
+
+方式 B：临时开启启动迁移（2026-10-09 已在测试机验证）
+
+已验证结论：对**已安装**的库，把 `DATABASE_INITIALIZATION_ENABLED` 改成 `true` 并重建
+容器，启动时会自动重放缺失的迁移、写入 `schema_migrations`（`applied_at` 为本次启动
+时间），且不再打印 skip 日志。
+
+注意事项：
+
+- 生产 compose 在 `environment:` 中把该变量写死为 `false`，只改 `.env` 不会生效；
+  必须改 compose 后再用 `docker compose up -d` 重建容器。
+- 该开关同时放开启动期的 bootstrap 写入（JWT 密钥补写、SIMPLE 模式默认分组与管理员
+  并发写入）。迁移完成后要改回 `false` 并重建容器。
+- 对**空库**无效：缺少 `/app/data/.installed` 安装锁且 `SETUP_ENABLED=false` 时，进程
+  会直接以 1 退出并打印
+  `first-run setup is disabled; set SETUP_ENABLED=true for an explicit installation`。
+- 多节点共用同一数据库时，迁移由 PostgreSQL advisory lock 串行化；即便如此也要在所有
+  节点上同时改回 `false`，避免节点间行为不一致。
 
 ## 部署
 
@@ -132,8 +165,9 @@ namespace 修复、OpenAI WebSocket 连接池与执行作用域修复，以及�
 - `238_purge_unlimited_user_platform_quotas.sql`：删除三档额度均为 `NULL` 的无效平台额度行。
 
 生产环境保持 `DATABASE_INITIALIZATION_ENABLED=false` 时，应用不会自行执行这两项
-迁移。升级前必须先备份 PostgreSQL，在维护步骤中执行并登记迁移，再同时替换所有
-连接同一数据库的应用节点；不需要重启 PostgreSQL。
+迁移。升级前必须先备份 PostgreSQL，在维护步骤中执行并登记迁移（执行方式见上文
+「执行数据库迁移」），再同时替换所有连接同一数据库的应用节点；不需要重启
+PostgreSQL。
 
 本次在隔离环境完成了从 `0.4.5` 数据库原地升级到 `0.4.6` 的验证：两项迁移均已
 登记，四个相关平台约束包含 `opencode_go`，原管理员数据和登录状态保持正常。
@@ -155,8 +189,9 @@ OAuth 历史回放 `web_search_call` 的修复改用官方实现（`dab3b87ea`�
   应用层校验，新增平台不再需要数据库迁移。
 
 生产环境保持 `DATABASE_INITIALIZATION_ENABLED=false` 时，应用不会自行执行该迁移。
-升级前先备份 PostgreSQL，在维护步骤中执行并登记迁移，再同时替换所有连接同一数据库
-的应用节点；旧约束未删除前，写入新平台值会被数据库拒绝。
+升级前先备份 PostgreSQL，在维护步骤中执行并登记迁移（执行方式见上文
+「执行数据库迁移」），再同时替换所有连接同一数据库的应用节点；旧约束未删除前，
+写入新平台值会被数据库拒绝。
 
 本次合并后在测试机隔离目录完成了源码级验证：`go build ./...`、`go test -tags=unit`
 （58 个包）与 `go test -tags=integration`（需要 testcontainers 的
