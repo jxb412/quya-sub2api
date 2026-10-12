@@ -814,6 +814,105 @@
               </button>
             </div>
 
+            <div class="space-y-3 rounded-lg border border-gray-100 p-4 dark:border-dark-700">
+              <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+                <div>
+                  <h3 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('admin.riskControl.accountScope') }}</h3>
+                  <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.accountScopeHint') }}</p>
+                </div>
+                <span class="inline-flex w-fit rounded-md bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-600 dark:bg-dark-700 dark:text-gray-300">
+                  {{ accountScopeSummary }}
+                </span>
+              </div>
+              <div class="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                <button
+                  v-for="option in accountTypeOptions"
+                  :key="option.value"
+                  type="button"
+                  class="flex items-center justify-between rounded-lg border p-3 text-left transition-colors"
+                  :class="isAccountTypeSelected(option.value)
+                    ? 'border-primary-300 bg-primary-50 text-primary-900 dark:border-primary-700 dark:bg-primary-900/20 dark:text-primary-100'
+                    : 'border-gray-100 hover:bg-gray-50 dark:border-dark-700 dark:hover:bg-dark-700/60'"
+                  @click="toggleAccountType(option.value)"
+                >
+                  <span class="text-sm font-semibold">{{ option.label }}</span>
+                  <span
+                    class="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border"
+                    :class="isAccountTypeSelected(option.value)
+                      ? 'border-primary-500 bg-primary-500 text-white'
+                      : 'border-gray-300 text-transparent dark:border-dark-500'"
+                  >
+                    <Icon name="check" size="xs" :stroke-width="2" />
+                  </span>
+                </button>
+              </div>
+              <button
+                type="button"
+                class="text-xs font-medium text-primary-600 hover:text-primary-700 dark:text-primary-300 dark:hover:text-primary-200"
+                @click="clearAccountTypes"
+              >
+                {{ t('admin.riskControl.accountScopeClearTypes') }}
+              </button>
+              <div class="space-y-2">
+                <div class="flex items-center justify-between gap-2">
+                  <p class="text-xs font-medium text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.accountScopeAccounts') }}</p>
+                  <button
+                    v-if="configForm.account_ids.length > 0"
+                    type="button"
+                    class="text-xs font-medium text-primary-600 hover:text-primary-700 dark:text-primary-300 dark:hover:text-primary-200"
+                    @click="clearAccountIDs"
+                  >
+                    {{ t('admin.riskControl.accountScopeClearAccounts') }}
+                  </button>
+                </div>
+                <div v-if="selectedAccountChips.length > 0" class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="account in selectedAccountChips"
+                    :key="account.id"
+                    class="inline-flex items-center gap-1 rounded-md bg-primary-50 px-2 py-0.5 text-xs text-primary-700 dark:bg-primary-900/30 dark:text-primary-200"
+                  >
+                    {{ account.name }} <span class="opacity-70">#{{ account.id }}</span>
+                    <button type="button" class="text-primary-500 hover:text-primary-700 dark:hover:text-primary-100" @click="removeAccountID(account.id)">×</button>
+                  </span>
+                </div>
+                <div class="flex flex-col gap-2 sm:flex-row">
+                  <input v-model.trim="accountSearch" type="search" class="input" :placeholder="t('admin.riskControl.accountScopeSearch')" @keyup.enter="loadAccountOptions()" />
+                  <button type="button" class="btn btn-secondary whitespace-nowrap" :disabled="accountsLoading" @click="loadAccountOptions()">
+                    {{ t('admin.riskControl.accountScopeSearchAction') }}
+                  </button>
+                </div>
+                <p v-if="accountsLoading" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.accountScopeLoading') }}</p>
+                <div v-else class="grid max-h-56 grid-cols-1 gap-1.5 overflow-y-auto pr-1 md:grid-cols-2">
+                  <button
+                    v-for="account in filteredAccountOptions"
+                    :key="account.id"
+                    type="button"
+                    class="flex items-center justify-between rounded-lg border p-2 text-left transition-colors"
+                    :class="isAccountIDSelected(account.id)
+                      ? 'border-primary-300 bg-primary-50 dark:border-primary-700 dark:bg-primary-900/20'
+                      : 'border-gray-100 hover:bg-gray-50 dark:border-dark-700 dark:hover:bg-dark-700/60'"
+                    @click="toggleAccountID(account.id)"
+                  >
+                    <span class="min-w-0">
+                      <span class="block truncate text-xs font-semibold text-gray-900 dark:text-white">{{ account.name }}</span>
+                      <span class="mt-0.5 block truncate text-[11px] text-gray-500 dark:text-gray-400">
+                        #{{ account.id }}<template v-if="account.type"> · {{ account.type }}</template><template v-if="account.platform"> · {{ account.platform }}</template>
+                      </span>
+                    </span>
+                    <span
+                      class="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border"
+                      :class="isAccountIDSelected(account.id)
+                        ? 'border-primary-500 bg-primary-500 text-white'
+                        : 'border-gray-300 text-transparent dark:border-dark-500'"
+                    >
+                      <Icon name="check" size="xs" :stroke-width="2" />
+                    </span>
+                  </button>
+                  <p v-if="filteredAccountOptions.length === 0" class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.riskControl.accountScopeNoAccounts') }}</p>
+                </div>
+              </div>
+            </div>
+
             <div class="space-y-4 rounded-lg border border-gray-100 p-4 dark:border-dark-700">
               <div class="flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
                 <div>
@@ -1188,7 +1287,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, toRaw } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, toRaw, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
@@ -1280,6 +1379,11 @@ const unbanningUserID = ref<number | null>(null)
 const settingsOpen = ref(false)
 const activeSettingsTab = ref<SettingsTab>('basic')
 const groupSearch = ref('')
+const accountSearch = ref('')
+const accountsLoading = ref(false)
+const accountOptions = ref<ModerationAccountOption[]>([])
+const accountLookupResults = ref<ModerationAccountOption[]>([])
+const accountOptionMap = ref<Record<number, ModerationAccountOption>>({})
 const flaggedHashInput = ref('')
 const groups = ref<AdminGroup[]>([])
 const proxies = ref<Proxy[]>([])
@@ -1318,6 +1422,8 @@ const configForm = reactive({
   all_groups: true,
   group_ids: [] as number[],
   account_plan_types: [] as string[],
+  account_types: [] as string[],
+  account_ids: [] as number[],
   record_non_hits: false,
   worker_count: 4,
   queue_size: 32768,
@@ -1545,6 +1651,47 @@ const accountPlanTypeOptions = computed(() => [
 const accountPlanScopeSummary = computed(() => {
   if (configForm.account_plan_types.length === 0) return t('admin.riskControl.accountPlanScopeAll')
   return t('admin.riskControl.accountPlanScopeSelected', { count: configForm.account_plan_types.length })
+})
+
+const accountTypeOptions = computed(() => [
+  { value: 'oauth', label: t('admin.riskControl.accountTypeOAuth') },
+  { value: 'apikey', label: t('admin.riskControl.accountTypeApiKey') },
+  { value: 'setup-token', label: t('admin.riskControl.accountTypeSetupToken') },
+])
+
+const accountScopeActive = computed(() => (
+  configForm.account_plan_types.length > 0 || configForm.account_types.length > 0 || configForm.account_ids.length > 0
+))
+
+const accountScopeSummary = computed(() => {
+  if (!accountScopeActive.value) return t('admin.riskControl.accountScopeAll')
+  return t('admin.riskControl.accountScopeSelected', {
+    plans: configForm.account_plan_types.length,
+    types: configForm.account_types.length,
+    accounts: configForm.account_ids.length,
+  })
+})
+
+const selectedAccountChips = computed<ModerationAccountOption[]>(() => configForm.account_ids.map((id) => (
+  accountOptionMap.value[id] ?? { id, name: `#${id}`, type: '', platform: '' }
+)))
+
+const filteredAccountOptions = computed(() => {
+  const selectedTypes = configForm.account_types
+  const scoped = selectedTypes.length > 0
+    ? accountOptions.value.filter((item) => selectedTypes.includes(item.type.toLowerCase()))
+    : accountOptions.value
+  // 按账号 ID 精确查到的账号不受类型筛选影响，方便直接指定 API Key 账号。
+  const pinned = accountLookupResults.value.filter((item) => !scoped.some((entry) => entry.id === item.id))
+  const pool = [...pinned, ...scoped]
+  const keyword = accountSearch.value.trim().toLowerCase()
+  if (!keyword) return pool
+  return pool.filter((item) => (
+    item.name.toLowerCase().includes(keyword) ||
+    String(item.id).includes(keyword) ||
+    item.platform.toLowerCase().includes(keyword) ||
+    item.type.toLowerCase().includes(keyword)
+  ))
 })
 
 const modelFilterModelCount = computed(() => configForm.model_filter_models.length)
@@ -1860,6 +2007,9 @@ function applyConfig(config: ContentModerationConfig) {
   configForm.account_plan_types = Array.isArray(config.account_plan_types)
     ? normalizeAccountPlanTypes(config.account_plan_types)
     : []
+  configForm.account_types = normalizeAccountTypes(config.account_types)
+  configForm.account_ids = normalizeAccountIDs(config.account_ids)
+  void resolveSelectedAccounts()
   configForm.record_non_hits = config.record_non_hits
   configForm.worker_count = config.worker_count || 4
   configForm.queue_size = config.queue_size || 32768
@@ -1900,6 +2050,7 @@ async function loadAll() {
     ])
     applyConfig(config)
     groups.value = groupItems
+    await loadAccountOptions()
     status.value = runtimeStatus
     proxies.value = proxyItems
     if ((runtimeStatus.engine ?? 'openai') === configForm.engine && Array.isArray(runtimeStatus.api_key_statuses)) {
@@ -1954,6 +2105,8 @@ async function saveConfig() {
       all_groups: configForm.all_groups,
       group_ids: configForm.all_groups ? [] : [...configForm.group_ids],
       account_plan_types: normalizeAccountPlanTypes(configForm.account_plan_types),
+      account_types: normalizeAccountTypes(configForm.account_types),
+      account_ids: normalizeAccountIDs(configForm.account_ids),
       record_non_hits: configForm.record_non_hits,
       clear_api_key: configForm.clear_api_key,
       worker_count: Number(configForm.worker_count) || 4,
@@ -2273,6 +2426,142 @@ function normalizeAccountPlanTypes(types: unknown): string[] {
   if (!Array.isArray(types)) return []
   const allowed = new Set(['pro', 'plus', 'team', 'free'])
   return Array.from(new Set(types.map((item) => String(item ?? '').trim().toLowerCase()).filter((item) => allowed.has(item))))
+}
+
+interface ModerationAccountOption {
+  id: number
+  name: string
+  type: string
+  platform: string
+}
+
+function normalizeAccountTypes(types: unknown): string[] {
+  if (!Array.isArray(types)) return []
+  const allowed = new Set(['oauth', 'setup-token', 'apikey'])
+  return Array.from(new Set(types.map((item) => String(item ?? '').trim().toLowerCase()).filter((item) => allowed.has(item))))
+}
+
+function normalizeAccountIDs(ids: unknown): number[] {
+  if (!Array.isArray(ids)) return []
+  const parsed = ids
+    .map((item) => Number(item))
+    .filter((item) => Number.isSafeInteger(item) && item > 0)
+  return Array.from(new Set(parsed))
+}
+
+function accountOptionFrom(item: { id: number; name?: string | null; type?: string; platform?: string }): ModerationAccountOption {
+  const name = String(item.name ?? '').trim()
+  return {
+    id: item.id,
+    name: name === '' ? `#${item.id}` : name,
+    type: String(item.type ?? ''),
+    platform: String(item.platform ?? ''),
+  }
+}
+
+function rememberAccountOptions(items: ModerationAccountOption[]) {
+  if (items.length === 0) return
+  const next = { ...accountOptionMap.value }
+  for (const item of items) next[item.id] = item
+  accountOptionMap.value = next
+}
+
+// 勾选账号类型后只列对应类型的账号：OpenAI API Key 账号没有套餐类型
+// （account_plan_types 命中不了），只能通过账号类型或精确账号纳入审计范围。
+const accountScopePageSize = 500
+
+async function loadAccountOptions() {
+  accountsLoading.value = true
+  try {
+    const keyword = accountSearch.value.trim()
+    const selectedTypes = [...configForm.account_types]
+    const baseFilters = {
+      search: keyword || undefined,
+      sort_by: 'name',
+      sort_order: 'asc' as const,
+    }
+    const pages = await Promise.all(
+      (selectedTypes.length > 0 ? selectedTypes : ['']).map((accountType) => adminAPI.accounts.list(
+        1,
+        accountScopePageSize,
+        accountType ? { ...baseFilters, type: accountType } : baseFilters,
+      )),
+    )
+    // 接口只按账号名搜索，账号 ID 无法直接搜出来；输入纯数字时按 ID 精确取一次，
+    // 保证「指定账号」能落到任意一个账号（包括 API Key 账号）上。
+    const lookup = /^\d+$/.test(keyword)
+      ? await adminAPI.accounts.getById(Number(keyword))
+        .then((item) => [accountOptionFrom(item)])
+        .catch(() => [] as ModerationAccountOption[])
+      : []
+    const merged = new Map<number, ModerationAccountOption>()
+    for (const page of pages) {
+      for (const item of page.items ?? []) {
+        const option = accountOptionFrom(item)
+        merged.set(option.id, option)
+      }
+    }
+    for (const item of lookup) merged.set(item.id, item)
+    const items = Array.from(merged.values()).sort((left, right) => left.name.localeCompare(right.name))
+    accountLookupResults.value = lookup
+    accountOptions.value = items
+    rememberAccountOptions(items)
+  } catch (err: unknown) {
+    appStore.showError(extractApiErrorMessage(err, t('admin.riskControl.accountScopeLoadFailed')))
+  } finally {
+    accountsLoading.value = false
+  }
+}
+
+// 账号类型变化时同步刷新候选列表，勾选 API Key 后即可直接从列表里挑具体账号。
+watch(() => configForm.account_types.join(','), () => {
+  if (!settingsOpen.value) return
+  void loadAccountOptions()
+})
+
+async function resolveSelectedAccounts() {
+  const missing = configForm.account_ids.filter((id) => !accountOptionMap.value[id]).slice(0, 50)
+  if (missing.length === 0) return
+  const loaded = await Promise.all(missing.map((id) => adminAPI.accounts.getById(id).catch(() => null)))
+  rememberAccountOptions(loaded.filter((item) => item !== null).map(accountOptionFrom))
+}
+
+function isAccountTypeSelected(accountType: string): boolean {
+  return configForm.account_types.includes(accountType)
+}
+
+function toggleAccountType(accountType: string) {
+  const index = configForm.account_types.indexOf(accountType)
+  if (index >= 0) {
+    configForm.account_types.splice(index, 1)
+  } else {
+    configForm.account_types.push(accountType)
+  }
+}
+
+function clearAccountTypes() {
+  configForm.account_types = []
+}
+
+function isAccountIDSelected(accountID: number): boolean {
+  return configForm.account_ids.includes(accountID)
+}
+
+function toggleAccountID(accountID: number) {
+  const index = configForm.account_ids.indexOf(accountID)
+  if (index >= 0) {
+    configForm.account_ids.splice(index, 1)
+  } else {
+    configForm.account_ids.push(accountID)
+  }
+}
+
+function removeAccountID(accountID: number) {
+  toggleAccountID(accountID)
+}
+
+function clearAccountIDs() {
+  configForm.account_ids = []
 }
 
 function isAccountPlanTypeSelected(planType: string): boolean {

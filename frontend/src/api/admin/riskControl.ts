@@ -34,6 +34,8 @@ export interface ContentModerationConfig {
   all_groups: boolean
   group_ids: number[]
   account_plan_types: string[]
+  account_types: string[]
+  account_ids: number[]
   record_non_hits: boolean
   thresholds: Record<string, number>
   worker_count: number
@@ -120,6 +122,8 @@ export interface UpdateContentModerationConfig {
   all_groups?: boolean
   group_ids?: number[]
   account_plan_types?: string[]
+  account_types?: string[]
+  account_ids?: number[]
   record_non_hits?: boolean
   thresholds?: Record<string, number>
   worker_count?: number

@@ -77,12 +77,16 @@ type Request struct {
 	GroupName               string
 	AccountPlanType         string
 	AccountPlanTypeResolved bool
-	Provider                string
-	Endpoint                string
-	Protocol                string
-	Model                   string
-	Body                    []byte
-	Stage                   string
+	AccountType             string
+	AccountID               int64
+	// AccountSelectionResolved 与 AccountPlanTypeResolved 等价（旧字段名保留）。
+	AccountSelectionResolved bool
+	Provider                 string
+	Endpoint                 string
+	Protocol                 string
+	Model                    string
+	Body                     []byte
+	Stage                    string
 }
 
 func (r Request) Clone() Request {

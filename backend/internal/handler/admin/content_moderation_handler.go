@@ -38,6 +38,8 @@ type contentModerationConfigRequest struct {
 	AllGroups            *bool               `json:"all_groups"`
 	GroupIDs             *[]int64            `json:"group_ids"`
 	AccountPlanTypes     *[]string           `json:"account_plan_types"`
+	AccountTypes         *[]string           `json:"account_types"`
+	AccountIDs           *[]int64            `json:"account_ids"`
 	RecordNonHits        *bool               `json:"record_non_hits"`
 	Thresholds           *map[string]float64 `json:"thresholds"`
 	WorkerCount          *int                `json:"worker_count"`
@@ -108,6 +110,8 @@ func (h *ContentModerationHandler) UpdateConfig(c *gin.Context) {
 		AllGroups:                      req.AllGroups,
 		GroupIDs:                       req.GroupIDs,
 		AccountPlanTypes:               req.AccountPlanTypes,
+		AccountTypes:                   req.AccountTypes,
+		AccountIDs:                     req.AccountIDs,
 		RecordNonHits:                  req.RecordNonHits,
 		Thresholds:                     req.Thresholds,
 		WorkerCount:                    req.WorkerCount,

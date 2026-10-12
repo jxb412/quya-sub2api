@@ -13,6 +13,8 @@ const {
   listLogs,
   getGroups,
   getProxies,
+  listAccounts,
+  getAccountById,
   testAPIKeys,
   showError,
   showSuccess,
@@ -23,6 +25,8 @@ const {
   listLogs: vi.fn(),
   getGroups: vi.fn(),
   getProxies: vi.fn(),
+  listAccounts: vi.fn(),
+  getAccountById: vi.fn(),
   testAPIKeys: vi.fn(),
   showError: vi.fn(),
   showSuccess: vi.fn(),
@@ -45,6 +49,10 @@ vi.mock('@/api/admin', () => ({
     },
     proxies: {
       getAll: getProxies,
+    },
+    accounts: {
+      list: listAccounts,
+      getById: getAccountById,
     },
   },
 }))
@@ -90,6 +98,9 @@ const baseConfig = (): ContentModerationConfig => ({
   sample_rate: 100,
   all_groups: true,
   group_ids: [],
+  account_plan_types: [],
+  account_types: [],
+  account_ids: [],
   record_non_hits: false,
   worker_count: 4,
   queue_size: 32768,
@@ -199,6 +210,8 @@ describe('admin RiskControlView', () => {
     getStatus.mockReset()
     listLogs.mockReset()
     getGroups.mockReset()
+    listAccounts.mockReset()
+    getAccountById.mockReset()
     showError.mockReset()
     showSuccess.mockReset()
     testAPIKeys.mockReset()
@@ -208,6 +221,8 @@ describe('admin RiskControlView', () => {
     listLogs.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 20, pages: 1 })
     getGroups.mockResolvedValue([])
     getProxies.mockResolvedValue([])
+    listAccounts.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100, pages: 0 })
+    getAccountById.mockRejectedValue(new Error('not found'))
     updateConfig.mockImplementation(async (payload: UpdateContentModerationConfig) => ({
       ...baseConfig(),
       ...payload,
@@ -369,6 +384,40 @@ describe('admin RiskControlView', () => {
       },
     }))
     expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('scopes moderation to API Key accounts and persists the selected accounts', async () => {
+    listAccounts.mockResolvedValue({
+      items: [
+        { id: 42, name: 'openai-apikey-1', platform: 'openai', type: 'apikey' },
+        { id: 77, name: 'openai-oauth-1', platform: 'openai', type: 'oauth' },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 100,
+      pages: 1,
+    })
+    const wrapper = mount(RiskControlView, { global: { stubs: { AppLayout: AppLayoutStub, BaseDialog: BaseDialogStub, Icon: true, Select: true, Toggle: true, Pagination: true, ModelWhitelistSelector: ModelWhitelistSelectorStub, ProxySelector: true } } })
+    await flushPromises()
+
+    await findButtonByText(wrapper, 'admin.riskControl.openSettings').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.tabs.scope').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.accountTypeApiKey').trigger('click')
+    await flushPromises()
+
+    // 勾选 API Key 后候选列表按类型收窄
+    expect(listAccounts).toHaveBeenCalledWith(1, 500, expect.objectContaining({ type: 'apikey' }))
+
+    await findButtonByText(wrapper, 'openai-apikey-1').trigger('click')
+    await findButtonByText(wrapper, 'admin.riskControl.saveConfig').trigger('click')
+    await flushPromises()
+
+    expect(updateConfig).toHaveBeenCalledWith(expect.objectContaining({
+      account_types: ['apikey'],
+      account_ids: [42],
+    }))
+    expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('submits edited risk control thresholds when saving moderation config', async () => {

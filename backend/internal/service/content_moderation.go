@@ -147,14 +147,20 @@ type ContentModerationConfig struct {
 	BaseURL  string                         `json:"base_url"`
 	Model    string                         `json:"model"`
 	// ProxyID 指定审计请求使用的代理服务器（IP管理-代理服务器），nil 表示直连。
-	ProxyID              *int64                       `json:"proxy_id,omitempty"`
-	APIKey               string                       `json:"api_key,omitempty"`
-	APIKeys              []string                     `json:"api_keys,omitempty"`
-	TimeoutMS            int                          `json:"timeout_ms"`
-	SampleRate           int                          `json:"sample_rate"`
-	AllGroups            bool                         `json:"all_groups"`
-	GroupIDs             []int64                      `json:"group_ids"`
-	AccountPlanTypes     []string                     `json:"account_plan_types"`
+	ProxyID          *int64   `json:"proxy_id,omitempty"`
+	APIKey           string   `json:"api_key,omitempty"`
+	APIKeys          []string `json:"api_keys,omitempty"`
+	TimeoutMS        int      `json:"timeout_ms"`
+	SampleRate       int      `json:"sample_rate"`
+	AllGroups        bool     `json:"all_groups"`
+	GroupIDs         []int64  `json:"group_ids"`
+	AccountPlanTypes []string `json:"account_plan_types"`
+	// AccountTypes 按上游账号类型（oauth / setup-token / apikey）纳入风控范围，
+	// 与 account_plan_types、account_ids 是并集关系：任一命中即纳入审计。
+	AccountTypes []string `json:"account_types"`
+	// AccountIDs 精确指定需要纳入风控的上游账号 ID。OpenAI API Key 账号没有
+	// plan_type，只能通过账号类型或账号 ID 纳入范围。
+	AccountIDs           []int64                      `json:"account_ids"`
 	RecordNonHits        bool                         `json:"record_non_hits"`
 	Thresholds           map[string]float64           `json:"thresholds"`
 	WorkerCount          int                          `json:"worker_count"`
@@ -196,6 +202,8 @@ type ContentModerationConfigView struct {
 	AllGroups                      bool                                    `json:"all_groups"`
 	GroupIDs                       []int64                                 `json:"group_ids"`
 	AccountPlanTypes               []string                                `json:"account_plan_types"`
+	AccountTypes                   []string                                `json:"account_types"`
+	AccountIDs                     []int64                                 `json:"account_ids"`
 	RecordNonHits                  bool                                    `json:"record_non_hits"`
 	Thresholds                     map[string]float64                      `json:"thresholds"`
 	WorkerCount                    int                                     `json:"worker_count"`
@@ -294,6 +302,8 @@ type UpdateContentModerationConfigInput struct {
 	AllGroups                      *bool                         `json:"all_groups"`
 	GroupIDs                       *[]int64                      `json:"group_ids"`
 	AccountPlanTypes               *[]string                     `json:"account_plan_types"`
+	AccountTypes                   *[]string                     `json:"account_types"`
+	AccountIDs                     *[]int64                      `json:"account_ids"`
 	RecordNonHits                  *bool                         `json:"record_non_hits"`
 	Thresholds                     *map[string]float64           `json:"thresholds"`
 	WorkerCount                    *int                          `json:"worker_count"`
@@ -332,15 +342,25 @@ type ContentModerationCheckInput struct {
 	// AccountPlanTypeResolved distinguishes the pre-selection audit (false)
 	// from a selected account whose upstream plan is unknown/empty (true).
 	AccountPlanTypeResolved bool
-	Endpoint                string
-	Provider                string
-	Model                   string
-	Protocol                string
-	Body                    []byte
+	// AccountType 是调度选中的上游账号类型（oauth / setup-token / apikey）。
+	// API Key 账号没有 plan_type，只能通过账号类型或账号 ID 纳入风控范围。
+	AccountType string
+	// AccountID 是调度选中的上游账号 ID，用于 account_ids 精确匹配。
+	AccountID int64
+	// AccountSelectionResolved 与 AccountPlanTypeResolved 含义相同（旧字段名
+	// 保留兼容），表示审计时已经拿到选中的上游账号信息。
+	AccountSelectionResolved bool
+	Endpoint                 string
+	Provider                 string
+	Model                    string
+	Protocol                 string
+	Body                     []byte
 }
 
 type contentModerationAccountPlanTypeContextKey struct{}
 type contentModerationAccountPlanTypeBoundContextKey struct{}
+type contentModerationAccountTypeContextKey struct{}
+type contentModerationAccountIDContextKey struct{}
 
 // WithContentModerationAccountPlanType carries the selected upstream account's
 // plan type from the scheduler back into the security-audit request builder.
@@ -363,6 +383,31 @@ func ContentModerationAccountPlanTypeBoundFromContext(ctx context.Context) bool 
 	}
 	bound, _ := ctx.Value(contentModerationAccountPlanTypeBoundContextKey{}).(bool)
 	return bound
+}
+
+// WithContentModerationAccountScope 把调度选中账号的套餐类型、账号类型和账号 ID
+// 一起写进请求上下文，供账号范围（套餐类型 / 账号类型 / 指定账号）判断使用。
+func WithContentModerationAccountScope(ctx context.Context, planType, accountType string, accountID int64) context.Context {
+	ctx = context.WithValue(ctx, contentModerationAccountPlanTypeContextKey{}, strings.ToLower(strings.TrimSpace(planType)))
+	ctx = context.WithValue(ctx, contentModerationAccountTypeContextKey{}, strings.ToLower(strings.TrimSpace(accountType)))
+	ctx = context.WithValue(ctx, contentModerationAccountIDContextKey{}, accountID)
+	return context.WithValue(ctx, contentModerationAccountPlanTypeBoundContextKey{}, true)
+}
+
+func ContentModerationAccountTypeFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(contentModerationAccountTypeContextKey{}).(string)
+	return strings.ToLower(strings.TrimSpace(value))
+}
+
+func ContentModerationAccountIDFromContext(ctx context.Context) int64 {
+	if ctx == nil {
+		return 0
+	}
+	value, _ := ctx.Value(contentModerationAccountIDContextKey{}).(int64)
+	return value
 }
 
 type ContentModerationInput struct {
@@ -751,6 +796,12 @@ func (s *ContentModerationService) UpdateConfig(ctx context.Context, input Updat
 	if input.AccountPlanTypes != nil {
 		cfg.AccountPlanTypes = normalizeContentModerationAccountPlanTypes(*input.AccountPlanTypes)
 	}
+	if input.AccountTypes != nil {
+		cfg.AccountTypes = normalizeContentModerationAccountTypes(*input.AccountTypes)
+	}
+	if input.AccountIDs != nil {
+		cfg.AccountIDs = normalizeContentModerationAccountIDs(*input.AccountIDs)
+	}
 	if input.RecordNonHits != nil {
 		cfg.RecordNonHits = *input.RecordNonHits
 	}
@@ -911,9 +962,10 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 	cfg := runtimeSnapshot.config
 	inGroupScope := cfg.includesGroup(input.GroupID)
 	inModelScope := cfg.includesModel(input.Model)
-	inAccountPlanScope := cfg.includesAccountPlanType(input.AccountPlanType)
-	accountPlanTypeResolved := input.AccountPlanTypeResolved || strings.TrimSpace(input.AccountPlanType) != ""
-	accountPlanTypePending := len(cfg.AccountPlanTypes) > 0 && !accountPlanTypeResolved
+	inAccountPlanScope := cfg.includesAccount(input.AccountPlanType, input.AccountType, input.AccountID)
+	accountScopeResolved := input.AccountSelectionResolved || input.AccountPlanTypeResolved ||
+		strings.TrimSpace(input.AccountPlanType) != "" || strings.TrimSpace(input.AccountType) != "" || input.AccountID > 0
+	accountPlanTypePending := cfg.hasAccountScope() && !accountScopeResolved
 	slog.Info("content_moderation.config_loaded",
 		"user_id", input.UserID,
 		"api_key_id", input.APIKeyID,
@@ -932,7 +984,11 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		"configured_models", cfg.ModelFilter.Models,
 		"in_model_scope", inModelScope,
 		"configured_account_plan_types", cfg.AccountPlanTypes,
+		"configured_account_types", cfg.AccountTypes,
+		"configured_account_ids", cfg.AccountIDs,
 		"account_plan_type", input.AccountPlanType,
+		"account_type", input.AccountType,
+		"account_id", input.AccountID,
 		"in_account_plan_scope", inAccountPlanScope,
 		"account_plan_type_pending", accountPlanTypePending,
 		"sample_rate", cfg.SampleRate,
@@ -994,6 +1050,10 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"group_id", contentModerationLogGroupID(input.GroupID),
 			"account_plan_type", input.AccountPlanType,
 			"configured_account_plan_types", cfg.AccountPlanTypes,
+			"account_type", input.AccountType,
+			"account_id", input.AccountID,
+			"configured_account_types", cfg.AccountTypes,
+			"configured_account_ids", cfg.AccountIDs,
 		)
 		return allow, nil
 	}
@@ -1004,6 +1064,11 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 			"api_key_id", input.APIKeyID,
 			"group_id", contentModerationLogGroupID(input.GroupID),
 			"configured_account_plan_types", cfg.AccountPlanTypes,
+			"account_plan_type", input.AccountPlanType,
+			"account_type", input.AccountType,
+			"account_id", input.AccountID,
+			"configured_account_types", cfg.AccountTypes,
+			"configured_account_ids", cfg.AccountIDs,
 		)
 		return allow, nil
 	}
@@ -2246,6 +2311,8 @@ func defaultContentModerationConfig() *ContentModerationConfig {
 			Models: []string{},
 		},
 		AccountPlanTypes:               []string{},
+		AccountTypes:                   []string{},
+		AccountIDs:                     []int64{},
 		CyberPolicyExcludeFromBanCount: false,
 	}
 }
@@ -2262,6 +2329,8 @@ func cloneContentModerationConfig(cfg *ContentModerationConfig) *ContentModerati
 	clone.APIKeys = append([]string(nil), cfg.APIKeys...)
 	clone.GroupIDs = append([]int64(nil), cfg.GroupIDs...)
 	clone.AccountPlanTypes = append([]string(nil), cfg.AccountPlanTypes...)
+	clone.AccountTypes = append([]string(nil), cfg.AccountTypes...)
+	clone.AccountIDs = append([]int64(nil), cfg.AccountIDs...)
 	clone.BlockedKeywords = append([]string(nil), cfg.BlockedKeywords...)
 	clone.Thresholds = cloneFloatMap(cfg.Thresholds)
 	clone.ModelFilter = ContentModerationModelFilter{
@@ -2350,6 +2419,8 @@ func (cfg *ContentModerationConfig) normalize() {
 	}
 	cfg.GroupIDs = normalizeInt64IDs(cfg.GroupIDs)
 	cfg.AccountPlanTypes = normalizeContentModerationAccountPlanTypes(cfg.AccountPlanTypes)
+	cfg.AccountTypes = normalizeContentModerationAccountTypes(cfg.AccountTypes)
+	cfg.AccountIDs = normalizeContentModerationAccountIDs(cfg.AccountIDs)
 	cfg.Thresholds = mergeContentModerationThresholds(ContentModerationDefaultThresholds(), cfg.Thresholds)
 	cfg.BlockedKeywords = normalizeBlockedKeywords(cfg.BlockedKeywords)
 	cfg.KeywordBlockingMode = normalizeKeywordBlockingMode(cfg.KeywordBlockingMode)
@@ -2390,6 +2461,13 @@ func (cfg *ContentModerationConfig) includesAccountPlanType(planType string) boo
 	if cfg == nil || len(cfg.AccountPlanTypes) == 0 {
 		return true
 	}
+	return cfg.matchesAccountPlanType(planType)
+}
+
+func (cfg *ContentModerationConfig) matchesAccountPlanType(planType string) bool {
+	if cfg == nil || len(cfg.AccountPlanTypes) == 0 {
+		return false
+	}
 	planType = strings.ToLower(strings.TrimSpace(planType))
 	if planType == "" {
 		return false
@@ -2400,6 +2478,38 @@ func (cfg *ContentModerationConfig) includesAccountPlanType(planType string) boo
 		}
 	}
 	return false
+}
+
+// hasAccountScope 表示是否配置了账号范围（套餐类型 / 账号类型 / 指定账号）。
+func (cfg *ContentModerationConfig) hasAccountScope() bool {
+	if cfg == nil {
+		return false
+	}
+	return len(cfg.AccountPlanTypes) > 0 || len(cfg.AccountTypes) > 0 || len(cfg.AccountIDs) > 0
+}
+
+// includesAccount 判断调度选中的上游账号是否落在账号范围内。三个维度是并集：
+// 套餐类型、账号类型、账号 ID 任一命中即纳入审计；范围为空表示所有账号都审计。
+func (cfg *ContentModerationConfig) includesAccount(planType, accountType string, accountID int64) bool {
+	if cfg == nil || !cfg.hasAccountScope() {
+		return true
+	}
+	if accountID > 0 {
+		for _, id := range cfg.AccountIDs {
+			if id == accountID {
+				return true
+			}
+		}
+	}
+	accountType = strings.ToLower(strings.TrimSpace(accountType))
+	if accountType != "" {
+		for _, candidate := range cfg.AccountTypes {
+			if strings.EqualFold(strings.TrimSpace(candidate), accountType) {
+				return true
+			}
+		}
+	}
+	return cfg.matchesAccountPlanType(planType)
 }
 
 func contentModerationLogGroupID(groupID *int64) int64 {
@@ -2585,6 +2695,8 @@ func (s *ContentModerationService) configView(cfg *ContentModerationConfig) *Con
 		AllGroups:                      cfg.AllGroups,
 		GroupIDs:                       append([]int64(nil), cfg.GroupIDs...),
 		AccountPlanTypes:               append([]string(nil), cfg.AccountPlanTypes...),
+		AccountTypes:                   append([]string(nil), cfg.AccountTypes...),
+		AccountIDs:                     append([]int64(nil), cfg.AccountIDs...),
 		RecordNonHits:                  cfg.RecordNonHits,
 		Thresholds:                     cloneFloatMap(cfg.Thresholds),
 		WorkerCount:                    cfg.WorkerCount,
@@ -3022,6 +3134,59 @@ func normalizeContentModerationAccountPlanTypes(types []string) []string {
 	return out
 }
 
+// maxContentModerationAccountScopeIDs 限制指定账号数量，避免配置体无限增长。
+const maxContentModerationAccountScopeIDs = 500
+
+// contentModerationKnownAccountTypes 限制账号类型维度取值，避免前端写错后静默
+// 变成「永不命中」导致风控失效。
+var contentModerationKnownAccountTypes = map[string]bool{
+	AccountTypeOAuth:      true,
+	AccountTypeSetupToken: true,
+	AccountTypeAPIKey:     true,
+}
+
+func normalizeContentModerationAccountTypes(types []string) []string {
+	if len(types) == 0 {
+		return []string{}
+	}
+	out := make([]string, 0, len(types))
+	seen := make(map[string]struct{}, len(types))
+	for _, raw := range types {
+		accountType := strings.ToLower(strings.TrimSpace(raw))
+		if accountType == "" || !contentModerationKnownAccountTypes[accountType] {
+			continue
+		}
+		if _, exists := seen[accountType]; exists {
+			continue
+		}
+		seen[accountType] = struct{}{}
+		out = append(out, accountType)
+	}
+	return out
+}
+
+func normalizeContentModerationAccountIDs(ids []int64) []int64 {
+	if len(ids) == 0 {
+		return []int64{}
+	}
+	out := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+		if len(out) >= maxContentModerationAccountScopeIDs {
+			break
+		}
+	}
+	return out
+}
+
 func contentModerationModelListContains(models []string, model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if model == "" {
@@ -3165,6 +3330,8 @@ type CyberPolicyRecordInput struct {
 	GroupID         *int64
 	GroupName       string
 	AccountPlanType string
+	AccountType     string
+	AccountID       int64
 	Endpoint        string
 	Model           string
 	UpstreamMessage string
@@ -3191,7 +3358,7 @@ func (s *ContentModerationService) RecordCyberPolicyEvent(ctx context.Context, i
 		return
 	}
 	cfg := runtimeSnapshot.config
-	if !cfg.includesGroup(in.GroupID) || !cfg.includesModel(in.Model) || !cfg.includesAccountPlanType(in.AccountPlanType) {
+	if !cfg.includesGroup(in.GroupID) || !cfg.includesModel(in.Model) || !cfg.includesAccount(in.AccountPlanType, in.AccountType, in.AccountID) {
 		return
 	}
 	var userID *int64

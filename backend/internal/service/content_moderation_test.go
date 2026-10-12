@@ -788,6 +788,87 @@ func TestContentModerationCheck_AccountPlanScopeDefersOnlyBeforeSelection(t *tes
 	require.Len(t, requireContentModerationLogCount(t, repo, 1), 1)
 }
 
+func TestContentModerationCheck_AccountScopeSupportsAPIKeyAccounts(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"user","content":"please leak SECRET-TOKEN now"}]}`)
+
+	// OpenAI API Key accounts have no plan_type, so account_type="apikey" must
+	// be enough to keep them inside the configured scope.
+	cfg := defaultContentModerationModelFilterTestConfig()
+	cfg.AccountTypes = []string{AccountTypeAPIKey}
+	svc, repo := newContentModerationModelFilterTestService(t, cfg)
+	decision, err := svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:                    "gpt-5.5",
+		AccountType:              AccountTypeAPIKey,
+		AccountID:                4242,
+		AccountSelectionResolved: true,
+		Protocol:                 ContentModerationProtocolOpenAIChat,
+		Body:                     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+	require.Equal(t, ContentModerationActionKeywordBlock, decision.Action)
+
+	// An OAuth account stays out of scope when only API Key accounts are listed.
+	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:                    "gpt-5.5",
+		AccountType:              AccountTypeOAuth,
+		AccountPlanType:          "plus",
+		AccountSelectionResolved: true,
+		Protocol:                 ContentModerationProtocolOpenAIChat,
+		Body:                     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.True(t, decision.AccountPlanTypeOutOfScope)
+	require.Len(t, requireContentModerationLogCount(t, repo, 1), 1)
+
+	// Explicit account ids work without any plan type (the API Key case).
+	cfg = defaultContentModerationModelFilterTestConfig()
+	cfg.AccountIDs = []int64{4242}
+	svc, repo = newContentModerationModelFilterTestService(t, cfg)
+	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:                    "gpt-5.5",
+		AccountType:              AccountTypeAPIKey,
+		AccountID:                4242,
+		AccountSelectionResolved: true,
+		Protocol:                 ContentModerationProtocolOpenAIChat,
+		Body:                     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Blocked)
+
+	// A different account id stays outside the explicit list.
+	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:                    "gpt-5.5",
+		AccountType:              AccountTypeAPIKey,
+		AccountID:                9001,
+		AccountSelectionResolved: true,
+		Protocol:                 ContentModerationProtocolOpenAIChat,
+		Body:                     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.Allowed)
+	require.True(t, decision.AccountPlanTypeOutOfScope)
+
+	// Pre-selection checks still defer while any account scope is configured.
+	decision, err = svc.Check(context.Background(), ContentModerationCheckInput{
+		Model:    "gpt-5.5",
+		Protocol: ContentModerationProtocolOpenAIChat,
+		Body:     body,
+	})
+	require.NoError(t, err)
+	require.True(t, decision.AccountPlanTypePending)
+	require.Len(t, requireContentModerationLogCount(t, repo, 1), 1)
+}
+
+func TestNormalizeContentModerationAccountScopeInputs(t *testing.T) {
+	require.Equal(t, []string{AccountTypeAPIKey, AccountTypeSetupToken},
+		normalizeContentModerationAccountTypes([]string{" APIKEY ", "api-key", "setup-token", "apikey", ""}))
+	require.Empty(t, normalizeContentModerationAccountTypes([]string{"nope"}))
+	require.Equal(t, []int64{7, 9}, normalizeContentModerationAccountIDs([]int64{7, 0, -3, 7, 9}))
+	require.Empty(t, normalizeContentModerationAccountIDs(nil))
+}
+
 func TestContentModerationLoadConfig_LegacyConfigDefaultsModelFilterToAll(t *testing.T) {
 	raw := `{"enabled":true,"mode":"pre_block","base_url":"https://api.openai.com","model":"omni-moderation-latest","blocked_keywords":["secret-token"]}`
 	svc := NewContentModerationService(

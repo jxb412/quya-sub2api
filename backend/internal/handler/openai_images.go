@@ -230,7 +230,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		)
 
 		account := selection.Account
-		bindContentModerationAccountPlanType(c, account)
+		bindContentModerationAccountScope(c, account)
 		if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIImages, requestModel, parsed.ModerationBody()); securityAuditAccountPlanPending(decision) {
 			failedAccountIDs[account.ID] = struct{}{}
 			if selection.ReleaseFunc != nil {

@@ -89,6 +89,9 @@ func buildContentModerationInput(c *gin.Context, apiKey *service.APIKey, subject
 	input.Model = clientRequestedModel(c, model)
 	input.AccountPlanType = service.ContentModerationAccountPlanTypeFromContext(c.Request.Context())
 	input.AccountPlanTypeResolved = service.ContentModerationAccountPlanTypeBoundFromContext(c.Request.Context())
+	input.AccountType = service.ContentModerationAccountTypeFromContext(c.Request.Context())
+	input.AccountID = service.ContentModerationAccountIDFromContext(c.Request.Context())
+	input.AccountSelectionResolved = service.ContentModerationAccountPlanTypeBoundFromContext(c.Request.Context())
 	input.Protocol = protocol
 	input.Body = body
 	if resolvedPlatform, ok := service.ResolvedTargetPlatformFromContext(c.Request.Context()); ok {

@@ -22,6 +22,7 @@ func (a *LegacyModerationAdapter) Check(ctx context.Context, req Request) (*Lega
 		RequestID: req.RequestID, UserID: req.UserID, UserEmail: req.UserEmail,
 		APIKeyID: req.APIKeyID, APIKeyName: req.APIKeyName, GroupID: cloneInt64Ptr(req.GroupID),
 		GroupName: req.GroupName, AccountPlanType: req.AccountPlanType, AccountPlanTypeResolved: req.AccountPlanTypeResolved,
+		AccountType: req.AccountType, AccountID: req.AccountID, AccountSelectionResolved: req.AccountSelectionResolved,
 		Endpoint: req.Endpoint, Provider: req.Provider,
 		Model: req.Model, Protocol: req.Protocol, Body: req.Body,
 	})

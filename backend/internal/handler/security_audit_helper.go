@@ -65,19 +65,23 @@ func (h *OpenAIGatewayHandler) checkSecurityAuditStage(c *gin.Context, reqLog *z
 	return runSecurityAudit(c, reqLog, h.securityAuditCoordinator, h.contentModerationService, apiKey, subject, protocol, model, body, stage)
 }
 
-// bindContentModerationAccountPlanType installs the selected upstream
+// bindContentModerationAccountScope installs the selected upstream
 // account's plan type into the request context. The first audit runs before
 // account selection; a configured account-plan scope is deliberately deferred
 // until handlers call this after selection.
-func bindContentModerationAccountPlanType(c *gin.Context, account *service.Account) {
+func bindContentModerationAccountScope(c *gin.Context, account *service.Account) {
 	if c == nil || c.Request == nil {
 		return
 	}
 	planType := ""
+	accountType := ""
+	var accountID int64
 	if account != nil {
 		planType = account.GetAccountPlanType()
+		accountType = account.Type
+		accountID = account.ID
 	}
-	c.Request = c.Request.WithContext(service.WithContentModerationAccountPlanType(c.Request.Context(), planType))
+	c.Request = c.Request.WithContext(service.WithContentModerationAccountScope(c.Request.Context(), planType, accountType, accountID))
 }
 
 func securityAuditAccountPlanPending(decision *securityaudit.Decision) bool {
@@ -193,6 +197,7 @@ func buildSecurityAuditRequest(c *gin.Context, apiKey *service.APIKey, subject m
 		APIKeyID: legacy.APIKeyID, APIKeyName: legacy.APIKeyName, GroupID: cloneSecurityAuditGroupID(legacy.GroupID),
 		GroupName: legacy.GroupName, Provider: legacy.Provider, Endpoint: legacy.Endpoint,
 		AccountPlanType: legacy.AccountPlanType, AccountPlanTypeResolved: legacy.AccountPlanTypeResolved,
+		AccountType: legacy.AccountType, AccountID: legacy.AccountID, AccountSelectionResolved: legacy.AccountSelectionResolved,
 		Protocol: legacy.Protocol, Model: legacy.Model, Body: body, Stage: strings.TrimSpace(stage),
 	}
 	if apiKey != nil && apiKey.User != nil {

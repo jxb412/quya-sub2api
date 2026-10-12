@@ -389,7 +389,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 			account := selection.Account
-			bindContentModerationAccountPlanType(c, account)
+			bindContentModerationAccountScope(c, account)
 			if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolGemini, reqModel, body); securityAuditAccountPlanPending(decision) {
 				fs.FailedAccountIDs[account.ID] = struct{}{}
 				if selection.Acquired && selection.ReleaseFunc != nil {
@@ -738,7 +738,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				}
 			}
 			account := selection.Account
-			bindContentModerationAccountPlanType(c, account)
+			bindContentModerationAccountScope(c, account)
 			if decision := h.checkSecurityAudit(c, reqLog, currentAPIKey, subject, service.ContentModerationProtocolAnthropicMessages, reqModel, body); securityAuditAccountPlanPending(decision) {
 				fs.FailedAccountIDs[account.ID] = struct{}{}
 				if selection.Acquired && selection.ReleaseFunc != nil {

@@ -769,7 +769,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
-		bindContentModerationAccountPlanType(c, account)
+		bindContentModerationAccountScope(c, account)
 		if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); securityAuditAccountPlanPending(decision) {
 			failedAccountIDs[account.ID] = struct{}{}
 			if selection.ReleaseFunc != nil {
@@ -2963,7 +2963,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		// scope audits only the configured plans; accounts outside that scope
 		// remain usable without being retried or rejected.
 		c.Request = c.Request.WithContext(ctx)
-		bindContentModerationAccountPlanType(c, account)
+		bindContentModerationAccountScope(c, account)
 		ctx = c.Request.Context()
 		if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, firstMessage, "first_turn"); securityAuditAccountPlanPending(decision) {
 			failedAccountIDs[account.ID] = struct{}{}
@@ -4540,6 +4540,18 @@ func (h *OpenAIGatewayHandler) recordCyberPolicyIfMarked(c *gin.Context, apiKey 
 						return ""
 					}
 					return account.GetAccountPlanType()
+				}(),
+				AccountType: func() string {
+					if account == nil {
+						return ""
+					}
+					return account.Type
+				}(),
+				AccountID: func() int64 {
+					if account == nil {
+						return 0
+					}
+					return account.ID
 				}(),
 				Endpoint:        inboundEndpoint,
 				Model:           model,

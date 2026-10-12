@@ -230,7 +230,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		account := selection.Account
-		bindContentModerationAccountPlanType(c, account)
+		bindContentModerationAccountScope(c, account)
 		if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIChat, reqModel, body); securityAuditAccountPlanPending(decision) {
 			failedAccountIDs[account.ID] = struct{}{}
 			if selection.ReleaseFunc != nil {
