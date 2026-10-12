@@ -2308,15 +2308,33 @@ func (a *Account) GetWebSearchEmulationMode() string {
 	}
 }
 
-// IsCodexCLIOnlyEnabled 返回 OpenAI OAuth 账号是否启用"仅允许 Codex 官方客户端"。
+// IsCodexCLIOnlyEnabled 返回 OpenAI 账号（OAuth / SetupToken / API Key）是否启用"仅允许 Codex 官方客户端"。
 // 字段：accounts.extra.codex_cli_only。
 // 字段缺失或类型不正确时，按 false（关闭）处理。
 func (a *Account) IsCodexCLIOnlyEnabled() bool {
-	if a == nil || !a.IsOpenAIOAuth() || a.Extra == nil {
+	if a == nil || !a.SupportsCodexClientRestriction() || a.Extra == nil {
 		return false
 	}
 	enabled, ok := a.Extra["codex_cli_only"].(bool)
 	return ok && enabled
+}
+
+// SupportsCodexClientRestriction 返回账号是否支持"仅允许 Codex 官方客户端"与
+// "仅允许 Responses 入口"这两个独立访问限制开关。
+//
+// OpenAI OAuth、SetupToken 与 API Key 三种形态语义一致，都走同一套客户端身份
+// 判定（openai_client_restriction_detector）与入口协议判定
+// （SupportsOpenAIInboundProtocol），区别只在凭据形态，不在限制语义。
+func (a *Account) SupportsCodexClientRestriction() bool {
+	if a == nil || !a.IsOpenAI() {
+		return false
+	}
+	switch a.Type {
+	case AccountTypeOAuth, AccountTypeSetupToken, AccountTypeAPIKey:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsCodexCLIOnlyAppServerAllowed 返回 codex_cli_only 账号是否额外放行 Codex app-server

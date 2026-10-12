@@ -695,7 +695,7 @@ export default {
         planTypeClear: 'Clear (auto-detect)',
         codexCLIOnly: 'Codex official clients only',
         codexCLIOnlyDesc:
-          'Only applies to OpenAI OAuth. When enabled, only Codex official client families are allowed. This is independent from the Responses-only switch.',
+          'Applies to OpenAI OAuth / Setup Token / API Key accounts. When enabled, only Codex official client families are allowed. This is independent from the Responses-only switch.',
         responsesOnly: 'Responses endpoint only',
         responsesOnlyDesc:
           'This account only accepts /v1/responses (including compact and WebSocket). /v1/chat/completions and /v1/messages exclude it before scheduling. This setting does not inspect client identity.',

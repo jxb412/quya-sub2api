@@ -3312,7 +3312,7 @@
       </div>
 
       <div
-        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
+        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between">
@@ -3367,7 +3367,7 @@
       </div>
 
       <div
-        v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
+        v-if="form.platform === 'openai' && (accountCategory === 'oauth-based' || accountCategory === 'apikey')"
         class="border-t border-gray-200 pt-4 dark:border-dark-600"
       >
         <div class="flex items-center justify-between gap-4">
@@ -5600,14 +5600,14 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   }
   extra.openai_long_context_billing_enabled = openAILongContextBillingEnabled.value
 
-  if (accountCategory.value === 'oauth-based' && codexCLIOnlyEnabled.value) {
+  if ((accountCategory.value === 'oauth-based' || accountCategory.value === 'apikey') && codexCLIOnlyEnabled.value) {
     extra.codex_cli_only = true
   } else {
     delete extra.codex_cli_only
   }
   delete extra.codex_cli_only_allowed_clients
   if (
-    accountCategory.value === 'oauth-based' &&
+    (accountCategory.value === 'oauth-based' || accountCategory.value === 'apikey') &&
     codexCLIOnlyEnabled.value &&
     codexCLIOnlyAppServerEnabled.value
   ) {
@@ -5615,7 +5615,7 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
   } else {
     delete extra.codex_cli_only_allow_app_server
   }
-  if (accountCategory.value === 'oauth-based' && openAIResponsesOnlyEnabled.value) {
+  if ((accountCategory.value === 'oauth-based' || accountCategory.value === 'apikey') && openAIResponsesOnlyEnabled.value) {
     extra.openai_responses_only = true
   } else {
     delete extra.openai_responses_only

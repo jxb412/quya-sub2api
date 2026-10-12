@@ -886,8 +886,8 @@
         </div>
       </div>
 
-      <!-- OpenAI OAuth Codex CLI only -->
-      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <!-- Codex official-client restriction (OpenAI OAuth / SetupToken / API Key) -->
+      <div v-if="allOpenAICodexRestrictable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <label
             id="bulk-edit-openai-codex-cli-only-label"
@@ -930,8 +930,8 @@
         </div>
       </div>
 
-      <!-- OpenAI OAuth: Codex app-server -->
-      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <!-- Codex app-server access (OpenAI OAuth / SetupToken / API Key) -->
+      <div v-if="allOpenAICodexRestrictable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <label
             id="bulk-edit-openai-codex-app-server-label"
@@ -974,8 +974,8 @@
         </div>
       </div>
 
-      <!-- OpenAI OAuth: Responses endpoint only -->
-      <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+      <!-- Responses-endpoint-only restriction (OpenAI OAuth / SetupToken / API Key) -->
+      <div v-if="allOpenAICodexRestrictable" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
           <label
             id="bulk-edit-openai-responses-only-label"
@@ -1614,6 +1614,17 @@ const allOpenAIOAuth = computed(() => {
     targetSelectedPlatforms.value[0] === 'openai' &&
     targetSelectedTypes.value.length > 0 &&
     targetSelectedTypes.value.every(t => t === 'oauth' || t === 'setup-token')
+  )
+})
+
+// 客户端身份限制（codex_cli_only）与入口限制（openai_responses_only）对
+// OpenAI OAuth / SetupToken / API Key 三种形态语义一致，批量编辑一并对齐。
+const allOpenAICodexRestrictable = computed(() => {
+  return (
+    targetSelectedPlatforms.value.length === 1 &&
+    targetSelectedPlatforms.value[0] === 'openai' &&
+    targetSelectedTypes.value.length > 0 &&
+    targetSelectedTypes.value.every(t => t === 'oauth' || t === 'setup-token' || t === 'apikey')
   )
 })
 

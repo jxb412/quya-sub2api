@@ -114,7 +114,7 @@ func TestAccount_IsCodexCLIOnlyEnabled(t *testing.T) {
 		require.False(t, account.IsCodexCLIOnlyEnabled())
 	})
 
-	t.Run("非 OAuth 账号始终关闭", func(t *testing.T) {
+	t.Run("OpenAI API Key 与 OAuth 语义一致", func(t *testing.T) {
 		apiKeyAccount := &Account{
 			Platform: PlatformOpenAI,
 			Type:     AccountTypeAPIKey,
@@ -122,8 +122,21 @@ func TestAccount_IsCodexCLIOnlyEnabled(t *testing.T) {
 				"codex_cli_only": true,
 			},
 		}
-		require.False(t, apiKeyAccount.IsCodexCLIOnlyEnabled())
+		require.True(t, apiKeyAccount.IsCodexCLIOnlyEnabled())
+	})
 
+	t.Run("SetupToken 与 OAuth 语义一致", func(t *testing.T) {
+		setupToken := &Account{
+			Platform: PlatformOpenAI,
+			Type:     AccountTypeSetupToken,
+			Extra: map[string]any{
+				"codex_cli_only": true,
+			},
+		}
+		require.True(t, setupToken.IsCodexCLIOnlyEnabled())
+	})
+
+	t.Run("非 OpenAI 平台始终关闭", func(t *testing.T) {
 		otherPlatform := &Account{
 			Platform: PlatformAnthropic,
 			Type:     AccountTypeOAuth,
@@ -132,7 +145,36 @@ func TestAccount_IsCodexCLIOnlyEnabled(t *testing.T) {
 			},
 		}
 		require.False(t, otherPlatform.IsCodexCLIOnlyEnabled())
+
+		anthropicAPIKey := &Account{
+			Platform: PlatformAnthropic,
+			Type:     AccountTypeAPIKey,
+			Extra: map[string]any{
+				"codex_cli_only": true,
+			},
+		}
+		require.False(t, anthropicAPIKey.IsCodexCLIOnlyEnabled())
 	})
+}
+
+func TestAccount_SupportsCodexClientRestriction(t *testing.T) {
+	cases := []struct {
+		name string
+		acct *Account
+		want bool
+	}{
+		{"openai oauth", &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}, true},
+		{"openai setup-token", &Account{Platform: PlatformOpenAI, Type: AccountTypeSetupToken}, true},
+		{"openai apikey", &Account{Platform: PlatformOpenAI, Type: AccountTypeAPIKey}, true},
+		{"openai service account", &Account{Platform: PlatformOpenAI, Type: AccountTypeServiceAccount}, false},
+		{"anthropic apikey", &Account{Platform: PlatformAnthropic, Type: AccountTypeAPIKey}, false},
+		{"nil", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, tc.acct.SupportsCodexClientRestriction())
+		})
+	}
 }
 
 func TestAccount_IsOpenAIResponsesWebSocketV2Enabled(t *testing.T) {

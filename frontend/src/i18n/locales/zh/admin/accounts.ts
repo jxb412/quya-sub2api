@@ -805,7 +805,7 @@ export default {
         planTypeDesc: '手动纠正本账号的 ChatGPT 订阅档位（Plus / Pro / Free）。注意：令牌临期刷新或命中 429 限流时，会用真实档位自动覆盖此处设置。',
         planTypeClear: '清空（自动识别）',
         codexCLIOnly: '仅允许 Codex 官方客户端',
-        codexCLIOnlyDesc: '仅对 OpenAI OAuth 生效。开启后仅允许 Codex 官方客户端家族访问；关闭后绕过客户端身份限制。它与“仅允许 Responses 入口”是两个独立设置。',
+        codexCLIOnlyDesc: '对 OpenAI OAuth / Setup Token / API Key 账号生效。开启后仅允许 Codex 官方客户端家族访问；关闭后绕过客户端身份限制。它与“仅允许 Responses 入口”是两个独立设置。',
         responsesOnly: '仅允许 Responses 入口',
         responsesOnlyDesc: '开启后本账号只承接 /v1/responses（包括 compact 和 WebSocket），/v1/chat/completions 与 /v1/messages 会在调度前排除。它不判断客户端身份。',
         codexCLIOnlyAppServer: '允许 Codex app-server 客户端',

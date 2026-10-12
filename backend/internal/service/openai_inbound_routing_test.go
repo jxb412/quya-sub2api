@@ -48,6 +48,42 @@ func TestAccountSupportsOpenAIInboundProtocol(t *testing.T) {
 	require.True(t, legacy.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolMessages))
 }
 
+// API Key 账号与 OAuth 账号走同一套访问限制：入口协议过滤（responses only）
+// 与客户端身份过滤（codex cli only）都必须对前者同样生效。
+func TestAccountInboundPolicyForOpenAIAPIKey(t *testing.T) {
+	responsesOnly := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Extra:    map[string]any{"openai_responses_only": true},
+	}
+	require.True(t, responsesOnly.IsOpenAIResponsesOnly())
+	require.True(t, responsesOnly.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolResponses))
+	require.False(t, responsesOnly.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolChatCompletions))
+	require.False(t, responsesOnly.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolMessages))
+
+	codexOnly := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Extra:    map[string]any{"codex_cli_only": true},
+	}
+	require.True(t, codexOnly.IsCodexCLIOnlyEnabled())
+	// 只限制客户端，不限入口协议，与 OAuth 账号一致。
+	require.True(t, codexOnly.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolResponses))
+	require.True(t, codexOnly.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolChatCompletions))
+	require.True(t, codexOnly.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolMessages))
+
+	combined := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Extra: map[string]any{
+			"codex_cli_only":        true,
+			"openai_responses_only": true,
+		},
+	}
+	require.True(t, combined.IsCodexCLIOnlyEnabled())
+	require.False(t, combined.SupportsOpenAIInboundProtocol(OpenAIInboundProtocolChatCompletions))
+}
+
 func TestAccountSupportsExplicitOpenAIInboundCapabilities(t *testing.T) {
 	account := &Account{
 		Platform: PlatformOpenAI,
