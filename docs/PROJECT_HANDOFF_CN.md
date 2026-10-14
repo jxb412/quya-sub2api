@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前开发版本 | `0.4.13`（合并上游 `v0.2.15`，待发布） |
+| 当前开发版本 | `0.4.15`（合并上游 `v0.2.16`，待发布） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -198,6 +198,57 @@ OAuth 历史回放 `web_search_call` 的修复改用官方实现（`dab3b87ea`�
 `postgres:18.1-alpine3.23`、`redis:8.4-alpine` 镜像）全部通过；前端
 `pnpm install --frozen-lockfile`、`vue-tsc`、eslint 与关键 vitest（31 个文件、
 579 个用例）全部通过。
+
+`0.4.15` 基于本项目 `0.4.14`，合并上游 `v0.2.16`（81 个提交，合并基点 `f2669c8cf`，
+即上游 `v0.2.15`）。上游主要变化：Gemini 显式上下文缓存（AI Studio / Vertex / 自建
+网关）与配套计费、Claude Haiku 5.5 接入、GPT-6.1 Sol 上下文窗口扩到 500k、分组名称
+国际化（group i18n）、国际编码端点识别，以及风控、监控、Gemini 工具结果图片、
+WebSocket 并发与额度配额等多项修复。
+
+合并只在四个文件产生冲突，均按本项目处理：`README.md`、`README_CN.md`、
+`README_JA.md` 保留本项目版本，`backend/cmd/server/VERSION` 写为本项目 `0.4.15`。
+其余两侧都改过的 12 个文件由 Git 自动合并，合并后逐项复核本项目自定义逻辑仍在位：
+
+- 账号级限制：`GetAccountPlanType`、`SupportsCodexClientRestriction`，OpenAI OAuth /
+  SetupToken / API Key 三种形态共用「仅允许 Codex 官方客户端」与「仅允许 Responses
+  入口」两个开关（`backend/internal/service/account.go`）。
+- 入口与客户端 failover：`openAIInboundProtocolFailover`、
+  `openAICodexRestrictionFailoverEnabled`、`ensurePluginClientConversationContext`
+  （`openai_gateway_forward.go`、`openai_gateway_chat_completions.go`）。
+- Codex 模型缓存：`openAIModelsCacheFresh` 在单飞闭包内二次确认新鲜度。
+- 风控：`bindContentModerationAccountScope`、`securityAuditAccountPlanPending`，以及
+  `account_types` / `account_ids` / `account_plan_types` 并集范围与 Gemini、Anthropic
+  Messages 入口的账号级审计（`content_moderation.go`、`gateway_handler.go`）。
+- 默认安全开关：`database.initialization_enabled=false`、
+  `subscription_maintenance.auto_reset_enabled=false`（`config.go`、
+  `deploy/config.example.yaml`）。
+- 前端账号表单：`responsesOnly` 开关、`codexCLIOnly` 支持 API Key 类型、中英文文案。
+
+上游本次新增四个幂等迁移：
+
+- `242_group_i18n.sql`：`groups` 表新增 `i18n` JSONB 列（默认 `{}`）。
+- `243_gemini_cached_contents.sql`：新建 `gemini_cached_contents` 表及相关索引。
+- `244_gemini_cached_contents_channel_usage.sql`：新增 `channel_usage` JSONB 列。
+- `245_gemini_cached_contents_mutation_lease.sql`：新增 `mutation_token`、
+  `mutation_lease_until` 列与待处理变更索引。
+
+生产环境保持 `DATABASE_INITIALIZATION_ENABLED=false` 时，应用不会自行执行这四个迁移。
+升级前先备份 PostgreSQL 与 compose/env，在维护窗口执行并登记迁移（方式见上文
+「执行数据库迁移」），再同时替换所有连接同一数据库的应用节点；`groups.i18n` 列与
+`gemini_cached_contents` 表建立前，新版本应用写入会报错。
+
+`contrib/codex-native-transport/`（Codex Native Transport 插件）是本项目新增目录，
+上游没有该路径，合并不会改动插件源码。
+
+合并后在本机（Windows，Go 1.27.2 工具链 + 现有 `node_modules`）完成验证：
+
+- 后端 `go build ./...` 通过。
+- 后端 `go test -tags=unit ./...`：除 `TestOllamaProbeCallback_StaleLongDoesNotOverrideNewShort`
+  外全部通过；该用例在合并前的 `0.4.14` 上同样失败，属既有问题，与本次合并无关。
+  `TestCommandCodeGatewayPassesThroughCatalogProtocols` 全量运行偶发失败、单独运行
+  通过，两侧均未改动该文件，属既有偶发用例。
+- 前端 `vue-tsc --noEmit`、`vue-tsc -b`、`vitest run`（372 个文件 / 2870 个用例）与
+  `vite build` 全部通过。
 
 ## 上游同步
 
