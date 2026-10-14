@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前开发版本 | `0.4.15`（合并上游 `v0.2.16`，待发布） |
+| 当前开发版本 | `0.4.15`（合并上游 `v0.2.16`，已发布，两台正式机已升级） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -249,6 +249,28 @@ WebSocket 并发与额度配额等多项修复。
   通过，两侧均未改动该文件，属既有偶发用例。
 - 前端 `vue-tsc --noEmit`、`vue-tsc -b`、`vitest run`（372 个文件 / 2870 个用例）与
   `vite build` 全部通过。
+
+### 0.4.15 升级执行记录（2026-10-15）
+
+测试机 `154.217.250.100`：备份 `/www/wwwroot/quya-sub2api-dev-runtime/backups/20261014-071145/`
+（compose、`.env`、`sub2api_dev-pre-0.4.15.dump`），手工执行并登记 242–245 后切镜像，
+容器 healthy，健康检查、管理员登录、公开配置接口均正常。
+
+正式机 `142.54.187.42` 与 `107.150.62.202` 使用同一个数据库（142 本机 PostgreSQL 18，
+库 `sub2api`，两台应用都指向它），因此迁移只执行一次。
+
+- 升级前全量备份：`pg_dump -Fd -j 8 -Z 6` 输出到
+  `/www/wwwroot/sb/backups/0.4.15-20261014T155755Z/sub2api.d`（9.8 GB，rc=0）；两台应用
+  目录的 compose、`.env`、镜像 ID、容器清单也备份在同前缀目录下。
+- 242–245 在维护步骤中手工执行并登记 `schema_migrations`（校验和与仓库 blob 一致）：
+  `groups.i18n`（jsonb NOT NULL DEFAULT `{}`）与 `gemini_cached_contents`（含 5 个索引）
+  已建立，行数校验 users 12732 / accounts 48429 / groups 71 / user_subscriptions 4098 不变。
+- 两台在同一 UTC 时刻（`1791994760`）同时执行 `docker compose up -d --no-deps sub2api`，
+  容器均 healthy、restarts=0，`/health` 返回 200，插件面板 8848 正常；升级后 5 分钟内
+  142 侧 287 个请求全部 2xx/3xx/4xx，无 5xx。107 侧实例本身几乎不接流量（30 分钟 3 个
+  请求，均为验证探针），属既有现象。
+- 回滚方式：把 compose 镜像标签改回 `0.4.14` 后 `docker compose up -d --no-deps sub2api`
+  重建 `sub2api-sb`。本次迁移只新增列和表，与 0.4.14 向后兼容，代码回滚无需恢复数据库。
 
 ## 上游同步
 
