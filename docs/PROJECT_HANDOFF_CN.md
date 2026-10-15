@@ -272,6 +272,85 @@ WebSocket 并发与额度配额等多项修复。
 - 回滚方式：把 compose 镜像标签改回 `0.4.14` 后 `docker compose up -d --no-deps sub2api`
   重建 `sub2api-sb`。本次迁移只新增列和表，与 0.4.14 向后兼容，代码回滚无需恢复数据库。
 
+### 号池 vm2api 升级记录（2026-10-15）
+
+生产 `107.150.62.202` 的 `vm2api`（`/opt/vm2api`，host 网络 8787）从 v1.3.159 升到上游最新
+`v1.3.169`。
+
+- 补丁现状：#371 / #384 / #386 / #389 早已进上游，**#412（批量 pool-policy + 可 PATCH 权重）
+  从 v1.3.168 起也在上游**；只剩 `POST /api/panel/vms/:id/credential/clear` 需要本地补丁。
+  已按 v1.3.169 上游 `panel-routes.mjs` 重打（+84 行），放 `/opt/vm2api/patches/v1.3.169/`，
+  compose 只读挂载覆盖。
+- 备份：`/opt/vm2api/backups/pre-v1.3.169-<stamp>/`（compose、`.env`、`src/config`、`patches`），
+  数据库一致快照 `/root/vm2api-db-snapshots/kin-pre169-20261014T165749Z.db`（2.9 GB，`VACUUM INTO`）。
+- `docker compose up -d --no-deps vm2api` 只重建控制面容器。`src/config/distill-rules.json`
+  需要手工换成新版默认：旧文件是 159 版默认 + 一句 `<think>` 针，159 代码加载时会丢弃这句，
+  169 会保留，直接沿用会让 NewAPI 类转发误 403。`bin/` 与 `share/wrap-cli` 由镜像入口自动刷新，
+  Codex 槽的 `kin-codex-kernel` 随重启生效（`wrap-cli/sync` 只处理非 Codex 槽，本池只有 vm-01）。
+- 新迁移 `037_usage_logs_billing_normalize.sql` 在启动时自动执行（37.9 万行，实测 4.5 s）：
+  `input_tokens` 改存不含缓存的量，面板总量由新代码把 cache_read / cache_creation 加回来。
+- 回滚：`.env` 的 `VM2API_IMAGE_TAG` 改回 `v1.3.159` 再 `docker compose up -d --no-deps vm2api`；
+  037 已执行，回 159 会让历史 OpenAI 行的提示 token 统计偏低，要连 DB 快照一起恢复才准确。
+- 副作用：重启期间 8787 有几秒 refused，sub2api 把 `vm2api号池` / `VM2号池 LUNA` 临时停调度
+  10 分钟（`openai.account_temp_unscheduled_transport ... until=<+10min>`），之后自动恢复。
+
+### 号池 vm2api 补丁全部并入上游 · 已备 v1.3.174（2026-10-15）
+
+- 上游当天连发 v1.3.170–v1.3.174。发起的最后一个本地补丁随 **PR #438 于 2026-10-15 00:17 UTC 合并**
+  （合并提交 `ccb3f2a`，上游同时收下了本次提交的 e2e 用例），v1.3.170 起
+  `POST /api/panel/vms/:id/credential/clear` 已是上游能力 → **本地补丁清零**，历史上挂过的
+  pool-policy 批量/权重、account scope、槽位记录读缓存、GPT 槽 no_credential 判定等补丁更早已在上游。
+- 107 侧升级**已完成**（用户放行后重启）：`docker compose up -d --no-deps vm2api`，
+  容器 `image=ghcr.io/dofastted/vm2api:v1.3.174`、`restarts=0`；`.env` 的 `VM2API_IMAGE_TAG=v1.3.174`，
+  compose 已撤掉 `patches/v1.3.169/panel-routes.mjs` 只读挂载（撤挂载后 `credential/clear` 仍 404 `vm_not_found`
+  校验通过，证明路由已在镜像内）。容器启动时间 2026-10-15 16:51:42 UTC。
+- 升级后核验：`/api/panel/version` = 1.3.174；池内 101 个槽容器在运行、无重建；直连
+  `POST /v1/responses`（`gpt-6-astra`）返回 200；models.dev 价格同步首次 `status:error`，
+  用 `POST /api/panel/pricing/sync` 重跑后 `status:ok`（70 个模型），与上次升级同现象。
+- sub2api 侧副作用如预期：重启瞬间 8787 refused，`vm2api号池` / `VM2号池 LUNA` 被
+  `openai.account_temp_unscheduled_transport` 临时停调度（until 17:01 UTC），`16:56` 已自动清空；
+  恢复后 15 分钟内两账号分别接到 755 / 29 条请求，共 3804 条系统请求。20 分钟窗口内
+  `107.150.62.202:8787` 的传输错误 23 次，分布在重启窗口与重启前（16:36 / 16:40 各有一批，
+  属既有的代理偶发超时），重启后最近 5 分钟无新增。
+- 备份：`/opt/vm2api/backups/pre-v1.3.174-20261015T112515Z/`（compose、`.env`、`vms-json/` 103 个槽记录）。
+- 配置核对：v1.3.174 镜像 `src/config` 默认值与现网逐文件比对，`distill-rules.json`
+  （169 时手工换过的那份）、`intercept-rules.json`、`gateway-v2.example.json` 哈希一致，无需再动；
+  `routing.json` 是运行态文件，按上游要求不覆盖（缺 `notify.wecom` 块，企业微信通道默认关，面板保存一次即可）。
+- v1.3.170–v1.3.174 无数据库迁移、无新依赖；v1.3.170 首次启动会把挂在 `px-local` 上的节点槽
+  迁到 `px-local-<节点>` 并改写 `vms/<id>.json` 的 `proxy.id`。
+- 生效命令（待用户放行后再执行）：`cd /opt/vm2api && docker compose up -d --no-deps vm2api`。
+  副作用同前：8787 短暂 refused，sub2api 会把 `vm2api号池` / `VM2号池 LUNA` 临时停调度 10 分钟。
+- 仓库：`jxb412/vm2api` 的 `main` 已快进到上游 `38c7fb9`（v1.3.174）并推送；本地工作树
+  `D:\btc\st\.tmp\vm2api-pr` 的 `main` 同点，PR 分支 `feat/slot-credential-clear` 保留备查。
+
+### 号池 vm2api 升到 v1.3.175（2026-10-16）
+
+- v1.3.175 变更（无数据库迁移、无新依赖，不必 `wrap-cli/sync`，不必重建槽位容器）：
+  - 新增槽位「恢复服务」：`GET /api/panel/vms/:id/diagnose` 只读诊断（槽位状态、凭证、节点 SSH 与集群中继、
+    出口代理与本机 kin-egress、容器、推理内核、自动恢复、调度），`POST /api/panel/vms/:id/recover`
+    执行关机→开机；同槽并发返回 409 `recover_in_progress`；租户可对自己的槽调用（#457）。
+  - 模型测试失败时突出错误码与 HTTP 状态，5xx 自动诊断并给出恢复入口。
+  - 看门狗补缺：容器缺失或已退出时整槽开机；每轮检查本机 kin-egress 与集群 docker 桥 / 槽位中继并拉起；
+    控制面启动后对「记录为运行中但容器不存在或未运行」的槽补开机一次（`kernel_watchdog.enabled=false` 时不做）。
+- 107 生产机升级：只重建 `vm2api` 控制面（`cd /opt/vm2api && docker compose up -d --no-deps vm2api`），
+  槽位容器全部保留、未重建；`.env` → `VM2API_IMAGE_TAG=v1.3.175`，镜像 digest
+  `sha256:47aea38e5cbe918a0bb9e0172c4c31561455553023501b40db43cc8a97693806`。
+- 备份：`/opt/vm2api/backups/pre-v1.3.175-20261015T170841Z/`（compose、`.env`、`vms-json/` 103 个槽记录）。
+- 配置核对：v1.3.174→v1.3.175 的 `src/config` 四个文件（`distill-rules.json`、`intercept-rules.json`、
+  `gateway-v2.example.json`、`routing.json`）零差异，镜像内哈希与现网一致，未手改配置；
+  `routing.json`、`vms/`、`data/`、`.env` 全部保留。
+- 重启时间 2026-10-15 17:09:12 UTC（北京 10-16 01:09），容器 `restarts=0`。
+- 核验：`/api/panel/version` = 1.3.175、`update_available=false`、`needs_wrap_cli_sync=false`；
+  池内 101 槽 `running` + 1 `stopped`（与升级前一致）；直连 `POST /v1/responses`（`gpt-6-astra`）返回 200；
+  models.dev 价格同步首次即 `status:ok`（70 个模型，本轮无需手动补跑 `/api/panel/pricing/sync`）；
+  看门狗无异常补开机记录。
+- sub2api 侧副作用（与 174 同）：重启瞬间 8787 连接被拒，`vm2api号池`(47942) 被打上
+  `openai.account_temp_unscheduled_transport`，`temp_unschedulable_until = 17:19:11 UTC`（+10 分钟）；
+  实际 17:14:30 就被一次成功请求清空并恢复调度（中断 5 分 18 秒）。`VM2号池 LUNA`(48044) 只断了 35 秒，
+  17:09:47 即恢复。17:22 复查两侧 `temp_unschedulable_until` 均为空、`last_used` 实时更新，号池调度正常。
+- 回滚：`.env` 改回 `VM2API_IMAGE_TAG=v1.3.174`，重复同一条 `docker compose up -d --no-deps vm2api`。
+- 仓库：本地工作树 `D:\btc\st\.tmp\vm2api-pr` 的 `main` 已快进到上游 `60747c7`（含 v1.3.175 提交 `743652a`）。
+
 ## 上游同步
 
 ```powershell
