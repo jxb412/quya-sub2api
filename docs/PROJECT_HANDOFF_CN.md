@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前开发版本 | `0.4.15`（合并上游 `v0.2.16`，已发布，两台正式机已升级） |
+| 当前开发版本 | `0.4.16`（合并上游 `v0.2.17`，已完成源码验证） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -271,6 +271,27 @@ WebSocket 并发与额度配额等多项修复。
   请求，均为验证探针），属既有现象。
 - 回滚方式：把 compose 镜像标签改回 `0.4.14` 后 `docker compose up -d --no-deps sub2api`
   重建 `sub2api-sb`。本次迁移只新增列和表，与 0.4.14 向后兼容，代码回滚无需恢复数据库。
+
+### 0.4.16 上游同步（2026-10-17）
+
+`0.4.16` 基于本项目 `0.4.15`，合并上游 `v0.2.17` 的 47 个提交（合并基点
+`9c2cca9e6`，即上次同步的 `v0.2.16`）。上游主要变化包括 Responses 输出补齐
+`created_at`、OpenAI Web Search 模拟、GPT-5.5 退役兼容、Gemini thinking / Vertex
+修复、EasyPay、支付宝与 Stripe 支付/退款修复、Codex 导入按 workspace 隔离、
+Anthropic Base URL 修复、可配置最小输出 token、composite OAuth 歧义路由保护，
+以及智谱用量窗口修复。
+
+只合并上游代码，不重新拉取或覆盖本项目 README。三份 README 保留本项目版本，
+`backend/cmd/server/VERSION` 写为 `0.4.16`。其余 20 个两侧都改过的文件由 Git
+自动合并后逐项复核，以下定制仍然在位：入口协议与 Codex 客户端限制、限制失败
+后的同组账号 failover、插件会话上下文快照、Codex 模型缓存二次新鲜度确认、
+风控账号套餐/指定账号范围、`database.initialization_enabled=false`、
+`subscription_maintenance.auto_reset_enabled=false`，以及前端账号表单的
+`responsesOnly` / API Key 客户端限制开关。
+
+本次上游更新没有新增数据库迁移，生产升级不需要执行 SQL 字段变更。提交合并前在
+测试机隔离目录完成 `go test ./...`，全部通过；本机完成前端 i18n 校验、
+`vue-tsc -b`、`vite build`，均通过。
 
 ### 号池 vm2api 升级记录（2026-10-15）
 
