@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前开发版本 | `0.4.16`（合并上游 `v0.2.17`，已完成源码验证） |
+| 当前开发版本 | `0.4.16`（合并上游 `v0.2.17`，已发布，两台正式机已升级） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -292,6 +292,26 @@ Anthropic Base URL 修复、可配置最小输出 token、composite OAuth 歧义
 本次上游更新没有新增数据库迁移，生产升级不需要执行 SQL 字段变更。提交合并前在
 测试机隔离目录完成 `go test ./...`，全部通过；本机完成前端 i18n 校验、
 `vue-tsc -b`、`vite build`，均通过。
+
+#### 0.4.16 升级执行记录（2026-10-17）
+
+- 正式镜像 `ghcr.io/jxb412/sub2api:0.4.16`，两台服务器拉取的镜像 ID 与 digest
+  均为 `sha256:a5a03cc2ac42d49bb77b5d0f39c47d6625c5ae4693a3ba46ad1da7e473b55edb`。
+- 142 备份目录：`/www/wwwroot/sb/backups/0.4.16-20261017T105247Z/`，包含 compose、
+  `.env`、旧容器 inspect、旧镜像 inspect 和 9.8 GB 的 PostgreSQL 目录格式全量备份
+  （`pg_dump -Fd -j 8 -Z 6`，rc=0）。
+- 107 备份目录：`/www/wwwroot/sb/backups/0.4.16-20261017T105249Z/`，包含 compose、
+  `.env`、旧容器 inspect 和旧镜像 inspect。
+- 两台在同一维护窗口更新 compose 标签并执行
+  `docker compose up -d --no-deps sub2api`，只重建 `sub2api-sb`，未重启 PostgreSQL、
+  Redis、vm2api、BPS 授权或代理容器。
+- 升级后两台 `sub2api-sb` 均为 healthy、restarts=0，`/health` 返回 200，
+  `/api/v1/admin/system/version` 均返回 `0.4.16`；启动日志确认
+  `database initialization disabled; skipping startup migrations and bootstrap writes`。
+- Codex Native Transport v0.4.46 在两台均加载为 enabled/trusted，142 识别 2100 个账号、
+  107 识别 2099 个账号；升级后 10 分钟共享库记录 2596 个请求、48 个账号、95 个用户。
+- 回滚只需把两台 compose 标签同时改回 `0.4.15` 并重建 `sub2api-sb`。本次没有数据库
+  迁移，应用二进制可直接回退；若需恢复业务数据，使用上述 PostgreSQL 全量备份目录。
 
 ### 号池 vm2api 升级记录（2026-10-15）
 
