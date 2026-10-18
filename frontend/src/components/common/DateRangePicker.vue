@@ -21,7 +21,7 @@
     </button>
 
     <Transition name="date-picker-dropdown">
-      <div v-if="isOpen" class="date-picker-dropdown">
+      <div v-if="isOpen" :class="['date-picker-dropdown', isMinutePrecision && 'date-picker-dropdown-wide']">
         <!-- Quick presets -->
         <div class="date-picker-presets">
           <button
@@ -39,11 +39,14 @@
         <!-- Custom date range inputs -->
         <div class="date-picker-custom">
           <div class="date-picker-field">
-            <label class="date-picker-label">{{ t('dates.startDate') }}</label>
+            <label class="date-picker-label">
+              {{ isMinutePrecision ? t('dates.startDateTime') : t('dates.startDate') }}
+            </label>
             <input
-              type="date"
+              :type="isMinutePrecision ? 'datetime-local' : 'date'"
+              :step="isMinutePrecision ? 60 : undefined"
               v-model="localStartDate"
-              :max="localEndDate || tomorrow()"
+              :max="localEndDate || maxBoundary()"
               class="date-picker-input"
               @change="onDateChange"
             />
@@ -52,12 +55,15 @@
             <Icon name="arrowRight" size="sm" class="text-gray-400" />
           </div>
           <div class="date-picker-field">
-            <label class="date-picker-label">{{ t('dates.endDate') }}</label>
+            <label class="date-picker-label">
+              {{ isMinutePrecision ? t('dates.endDateTime') : t('dates.endDate') }}
+            </label>
             <input
-              type="date"
+              :type="isMinutePrecision ? 'datetime-local' : 'date'"
+              :step="isMinutePrecision ? 60 : undefined"
               v-model="localEndDate"
               :min="localStartDate"
-              :max="tomorrow()"
+              :max="maxBoundary()"
               class="date-picker-input"
               @change="onDateChange"
             />
@@ -89,6 +95,8 @@ interface DatePreset {
 interface Props {
   startDate: string
   endDate: string
+  /** 'date' for whole-day ranges (default), 'minute' for exact timestamps. */
+  precision?: 'date' | 'minute'
 }
 
 interface Emits {
@@ -107,16 +115,7 @@ const containerRef = ref<HTMLElement | null>(null)
 const localStartDate = ref(props.startDate)
 const localEndDate = ref(props.endDate)
 const activePreset = ref<string | null>('last24Hours')
-
-const today = () => formatDateToString(new Date())
-
-// Tomorrow's date - used for max date to handle timezone differences
-// When user is in a timezone behind the server, "today" on server might be "tomorrow" locally
-const tomorrow = () => {
-  const d = new Date()
-  d.setDate(d.getDate() + 1)
-  return formatDateToString(d)
-}
+const isMinutePrecision = computed(() => props.precision === 'minute')
 
 // Helper function to format date to YYYY-MM-DD using local timezone
 const formatDateToString = (date: Date): string => {
@@ -126,23 +125,52 @@ const formatDateToString = (date: Date): string => {
   return `${year}-${month}-${day}`
 }
 
+// Helper function to format an exact local timestamp as YYYY-MM-DDTHH:mm,
+// which is the value format used by <input type="datetime-local">.
+const formatDateTimeToString = (date: Date): string => {
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  return `${formatDateToString(date)}T${hours}:${minutes}`
+}
+
+const startOfDay = (date: Date): Date =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate())
+
+const endOfDayMinute = (date: Date): Date =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59)
+
+const formatBoundary = (date: Date): string =>
+  isMinutePrecision.value ? formatDateTimeToString(date) : formatDateToString(date)
+
+// Upper bound allows tomorrow so clients in a timezone behind the server can
+// still pick their local "today".
+const maxBoundary = () => {
+  const d = new Date()
+  d.setDate(d.getDate() + 1)
+  return isMinutePrecision.value ? `${formatDateToString(d)}T23:59` : formatDateToString(d)
+}
+
 const presets: DatePreset[] = [
   {
     labelKey: 'dates.today',
     value: 'today',
     getRange: () => {
-      const t = today()
-      return { start: t, end: t }
+      const now = new Date()
+      return { start: formatBoundary(startOfDay(now)), end: formatBoundary(now) }
     }
   },
   {
     labelKey: 'dates.yesterday',
     value: 'yesterday',
     getRange: () => {
-      const d = new Date()
-      d.setDate(d.getDate() - 1)
-      const yesterday = formatDateToString(d)
-      return { start: yesterday, end: yesterday }
+      const now = new Date()
+      const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+      return {
+        start: formatBoundary(yesterday),
+        end: isMinutePrecision.value
+          ? formatDateTimeToString(endOfDayMinute(yesterday))
+          : formatDateToString(yesterday)
+      }
     }
   },
   {
@@ -152,8 +180,8 @@ const presets: DatePreset[] = [
       const end = new Date()
       const start = new Date(end.getTime() - 24 * 60 * 60 * 1000)
       return {
-        start: formatDateToString(start),
-        end: formatDateToString(end)
+        start: formatBoundary(start),
+        end: formatBoundary(end)
       }
     }
   },
@@ -161,33 +189,27 @@ const presets: DatePreset[] = [
     labelKey: 'dates.last7Days',
     value: '7days',
     getRange: () => {
-      const end = today()
-      const d = new Date()
-      d.setDate(d.getDate() - 6)
-      const start = formatDateToString(d)
-      return { start, end }
+      const now = new Date()
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6)
+      return { start: formatBoundary(start), end: formatBoundary(now) }
     }
   },
   {
     labelKey: 'dates.last14Days',
     value: '14days',
     getRange: () => {
-      const end = today()
-      const d = new Date()
-      d.setDate(d.getDate() - 13)
-      const start = formatDateToString(d)
-      return { start, end }
+      const now = new Date()
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 13)
+      return { start: formatBoundary(start), end: formatBoundary(now) }
     }
   },
   {
     labelKey: 'dates.last30Days',
     value: '30days',
     getRange: () => {
-      const end = today()
-      const d = new Date()
-      d.setDate(d.getDate() - 29)
-      const start = formatDateToString(d)
-      return { start, end }
+      const now = new Date()
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29)
+      return { start: formatBoundary(start), end: formatBoundary(now) }
     }
   },
   {
@@ -195,8 +217,8 @@ const presets: DatePreset[] = [
     value: 'thisMonth',
     getRange: () => {
       const now = new Date()
-      const start = formatDateToString(new Date(now.getFullYear(), now.getMonth(), 1))
-      return { start, end: today() }
+      const start = new Date(now.getFullYear(), now.getMonth(), 1)
+      return { start: formatBoundary(start), end: formatBoundary(now) }
     }
   },
   {
@@ -204,9 +226,12 @@ const presets: DatePreset[] = [
     value: 'lastMonth',
     getRange: () => {
       const now = new Date()
-      const start = formatDateToString(new Date(now.getFullYear(), now.getMonth() - 1, 1))
-      const end = formatDateToString(new Date(now.getFullYear(), now.getMonth(), 0))
-      return { start, end }
+      const start = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+      const end = new Date(now.getFullYear(), now.getMonth(), 0)
+      return {
+        start: formatBoundary(start),
+        end: isMinutePrecision.value ? formatDateTimeToString(endOfDayMinute(end)) : formatDateToString(end)
+      }
     }
   }
 ]
@@ -219,17 +244,27 @@ const displayValue = computed(() => {
 
   if (localStartDate.value && localEndDate.value) {
     if (localStartDate.value === localEndDate.value) {
-      return formatDate(localStartDate.value)
+      return formatBoundaryForDisplay(localStartDate.value)
     }
-    return `${formatDate(localStartDate.value)} - ${formatDate(localEndDate.value)}`
+    return `${formatBoundaryForDisplay(localStartDate.value)} - ${formatBoundaryForDisplay(localEndDate.value)}`
   }
 
   return t('dates.selectDateRange')
 })
 
-const formatDate = (dateStr: string): string => {
-  const date = new Date(dateStr + 'T00:00:00')
+const formatBoundaryForDisplay = (dateStr: string): string => {
+  const hasTime = dateStr.includes('T')
+  const date = new Date(hasTime ? dateStr : `${dateStr}T00:00:00`)
   const dateLocale = locale.value === 'zh' ? 'zh-CN' : 'en-US'
+  if (hasTime) {
+    return date.toLocaleString(dateLocale, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false
+    })
+  }
   return date.toLocaleDateString(dateLocale, { month: 'short', day: 'numeric' })
 }
 
@@ -261,6 +296,11 @@ const toggle = () => {
 }
 
 const apply = () => {
+  if (localStartDate.value && localEndDate.value && localEndDate.value < localStartDate.value) {
+    const start = localStartDate.value
+    localStartDate.value = localEndDate.value
+    localEndDate.value = start
+  }
   emit('update:startDate', localStartDate.value)
   emit('update:endDate', localEndDate.value)
   emit('change', {
@@ -358,6 +398,28 @@ onUnmounted(() => {
   @apply shadow-lg shadow-black/10 dark:shadow-black/30;
   @apply overflow-hidden;
   @apply min-w-[320px];
+}
+
+.date-picker-dropdown-wide {
+  @apply min-w-[420px];
+}
+
+/* Stack the two datetime fields on narrow screens so the dropdown never
+   overflows the viewport. */
+@media (max-width: 640px) {
+  .date-picker-dropdown-wide {
+    min-width: 0;
+    width: calc(100vw - 2rem);
+  }
+
+  .date-picker-dropdown-wide .date-picker-custom {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .date-picker-dropdown-wide .date-picker-separator {
+    display: none;
+  }
 }
 
 .date-picker-presets {

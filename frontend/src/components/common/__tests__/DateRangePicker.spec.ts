@@ -93,4 +93,40 @@ describe('DateRangePicker', () => {
       }
     ])
   })
+
+  it('supports minute precision and keeps the selected end minute', async () => {
+    const wrapper = mount(DateRangePicker, {
+      props: {
+        startDate: '2026-03-08T09:15',
+        endDate: '2026-03-08T11:45',
+        precision: 'minute'
+      },
+      global: {
+        stubs: {
+          Icon: true
+        }
+      }
+    })
+
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('.date-picker-trigger').text()).toContain('09:15')
+
+    await wrapper.find('.date-picker-trigger').trigger('click')
+    const inputs = wrapper.findAll('input')
+    expect(inputs).toHaveLength(2)
+    expect(inputs[0].attributes('type')).toBe('datetime-local')
+    expect(inputs[0].attributes('step')).toBe('60')
+
+    await inputs[1].setValue('2026-03-08T12:05')
+    await wrapper.find('.date-picker-apply').trigger('click')
+
+    expect(wrapper.emitted('update:endDate')?.[0]).toEqual(['2026-03-08T12:05'])
+    expect(wrapper.emitted('change')?.[0]).toEqual([
+      {
+        startDate: '2026-03-08T09:15',
+        endDate: '2026-03-08T12:05',
+        preset: null
+      }
+    ])
+  })
 })

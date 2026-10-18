@@ -254,6 +254,33 @@ describe('user UsageView', () => {
     expect(getAvailable).toHaveBeenCalled()
   })
 
+  it('queries the exact minute range across every usage endpoint', async () => {
+    const wrapper = mountUsageView()
+    await flushPromises()
+
+    query.mockClear()
+    getStats.mockClear()
+    getDashboardModels.mockClear()
+    getDashboardSnapshotV2.mockClear()
+
+    wrapper.findComponent(DateRangePicker).vm.$emit('change', {
+      startDate: '2026-03-08T10:30',
+      endDate: '2026-03-08T11:45',
+      preset: null,
+    })
+    await flushPromises()
+
+    const range = { start_date: '2026-03-08T10:30', end_date: '2026-03-08T11:45' }
+    expect(query).toHaveBeenCalledWith(expect.objectContaining(range), expect.anything())
+    expect(getStats).toHaveBeenCalledWith(expect.objectContaining(range))
+    expect(getDashboardModels).toHaveBeenCalledWith(expect.objectContaining(range))
+    expect(getDashboardSnapshotV2).toHaveBeenCalledWith(expect.objectContaining({
+      ...range,
+      granularity: 'hour',
+    }))
+    wrapper.unmount()
+  })
+
   it('includes API keys after the first page in both record filters and queries by the selected key', async () => {
     const firstPageKeys = Array.from({ length: 100 }, (_, index) => ({
       id: index + 1,

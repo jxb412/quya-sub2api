@@ -2241,6 +2241,7 @@ export interface UserErrorRequestDetail extends UserErrorRequest {
 export interface UserErrorListParams {
   page?: number
   page_size?: number
+  /** YYYY-MM-DD (whole day) or YYYY-MM-DDTHH:mm (exact minute). */
   start_date?: string
   end_date?: string
   timezone?: string
@@ -2270,7 +2271,9 @@ export interface UsageQueryParams {
   billing_mode?: string | null
   reasoning_effort?: string
   include_breakdowns?: boolean
+  /** YYYY-MM-DD (whole day) or YYYY-MM-DDTHH:mm (exact minute). */
   start_date?: string
+  /** YYYY-MM-DD (whole day) or YYYY-MM-DDTHH:mm (inclusive minute). */
   end_date?: string
   timezone?: string
   sort_by?: string

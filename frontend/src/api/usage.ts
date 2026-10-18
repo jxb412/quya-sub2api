@@ -74,6 +74,8 @@ export interface TrendResponse {
   trend: TrendDataPoint[]
   start_date: string
   end_date: string
+  start_datetime?: string
+  end_datetime?: string
   granularity: string
 }
 
@@ -81,6 +83,8 @@ export interface ModelStatsResponse {
   models: ModelStat[]
   start_date: string
   end_date: string
+  start_datetime?: string
+  end_datetime?: string
 }
 
 export interface ApiKeyDailyUsagePoint {
@@ -112,6 +116,8 @@ export interface UsageDashboardSnapshotV2Response {
   generated_at: string
   start_date: string
   end_date: string
+  start_datetime?: string
+  end_datetime?: string
   granularity: string
   trend?: TrendDataPoint[]
   models?: ModelStat[]

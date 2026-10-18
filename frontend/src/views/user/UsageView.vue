@@ -11,6 +11,7 @@
               <DateRangePicker
                 v-model:start-date="startDate"
                 v-model:end-date="endDate"
+                precision="minute"
                 @change="onDateRangeChange"
               />
             </div>
@@ -352,19 +353,26 @@ let modelStatsReqSeq = 0
 const formatLocalDate = (date: Date): string =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
 
-const getLast24HoursRangeDates = () => {
+// Time ranges on this page are exact to the minute. The value format matches
+// <input type="datetime-local"> and is sent to the API as-is.
+const formatLocalDateTime = (date: Date): string =>
+  `${formatLocalDate(date)}T${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+
+const getLast24HoursRange = () => {
   const end = new Date()
   const start = new Date(end.getTime() - 24 * 60 * 60 * 1000)
-  return { start: formatLocalDate(start), end: formatLocalDate(end) }
+  return { start: formatLocalDateTime(start), end: formatLocalDateTime(end) }
 }
+
+const toRangeTimestamp = (value: string): number =>
+  new Date(value.includes('T') ? value : `${value}T00:00:00`).getTime()
 
 const getGranularityForRange = (start: string, end: string): 'day' | 'hour' => {
-  const startTime = new Date(`${start}T00:00:00`).getTime()
-  const endTime = new Date(`${end}T00:00:00`).getTime()
-  return Math.ceil((endTime - startTime) / (1000 * 60 * 60 * 24)) <= 1 ? 'hour' : 'day'
+  const span = Math.abs(toRangeTimestamp(end) - toRangeTimestamp(start))
+  return span <= 24 * 60 * 60 * 1000 ? 'hour' : 'day'
 }
 
-const defaultRange = getLast24HoursRangeDates()
+const defaultRange = getLast24HoursRange()
 const startDate = ref(defaultRange.start)
 const endDate = ref(defaultRange.end)
 const granularity = ref<'day' | 'hour'>(getGranularityForRange(startDate.value, endDate.value))
@@ -595,7 +603,7 @@ const refreshData = () => {
 }
 
 const resetFilters = () => {
-  const range = getLast24HoursRangeDates()
+  const range = getLast24HoursRange()
   startDate.value = range.start
   endDate.value = range.end
   filters.value = {
@@ -740,7 +748,8 @@ const exportToCSV = async () => {
     const url = window.URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `usage_${exportParams.start_date}_to_${exportParams.end_date}.csv`
+    const rangePart = (value?: string): string => value ? value.replace('T', '_').replace(/:/g, '') : ''
+    link.download = `usage_${rangePart(exportParams.start_date)}_to_${rangePart(exportParams.end_date)}.csv`
     link.click()
     window.URL.revokeObjectURL(url)
     appStore.showSuccess(t('usage.exportSuccess'))

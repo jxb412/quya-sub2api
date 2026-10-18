@@ -1069,6 +1069,8 @@ export default {
     custom: 'Custom',
     startDate: 'Start Date',
     endDate: 'End Date',
+    startDateTime: 'Start Time',
+    endDateTime: 'End Time',
     apply: 'Apply',
     selectDateRange: 'Select date range'
   },
