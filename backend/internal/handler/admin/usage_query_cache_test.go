@@ -25,4 +25,16 @@ func TestUsageStatsCacheKey_StableAndDistinct(t *testing.T) {
 	withUser := base
 	withUser.UserID = 7
 	require.NotEqual(t, k1, usageStatsCacheKey(withUser), "different user must change key")
+
+	withKeys := base
+	withKeys.APIKeyIDs = []int64{3, 8}
+	require.NotEqual(t, k1, usageStatsCacheKey(withKeys), "different key selection must change key")
+
+	withEffort := base
+	withEffort.ReasoningEffort = "high"
+	require.NotEqual(t, k1, usageStatsCacheKey(withEffort), "different reasoning effort must change key")
+
+	withBreakdowns := base
+	withBreakdowns.IncludeBreakdowns = true
+	require.NotEqual(t, k1, usageStatsCacheKey(withBreakdowns), "breakdown payload must not reuse the summary cache entry")
 }

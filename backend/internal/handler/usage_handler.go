@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,9 +48,17 @@ type userGroupStat struct {
 // UsageHandler handles usage-related requests
 type UsageHandler struct {
 	usageService   *service.UsageService
-	apiKeyService  *service.APIKeyService
+	apiKeyService  usageAPIKeyService
 	opsService     *service.OpsService
 	settingService *service.SettingService
+}
+
+// usageAPIKeyService is the narrow key lookup surface needed by usage routes.
+// Keeping it as an interface also lets handler tests exercise ownership rules
+// without constructing the full API key service dependency graph.
+type usageAPIKeyService interface {
+	GetByID(ctx context.Context, id int64) (*service.APIKey, error)
+	VerifyOwnership(ctx context.Context, userID int64, apiKeyIDs []int64) ([]int64, error)
 }
 
 // NewUsageHandler creates a new UsageHandler
@@ -75,6 +84,7 @@ func (h *UsageHandler) parseUserUsageFilters(c *gin.Context, requireRange bool) 
 	}
 
 	var apiKeyID int64
+	var apiKeyIDs []int64
 	if apiKeyIDStr := strings.TrimSpace(c.Query("api_key_id")); apiKeyIDStr != "" {
 		id, err := strconv.ParseInt(apiKeyIDStr, 10, 64)
 		if err != nil {
@@ -95,6 +105,43 @@ func (h *UsageHandler) parseUserUsageFilters(c *gin.Context, requireRange bool) 
 			return nil, false
 		}
 		apiKeyID = id
+	}
+
+	if rawIDs := strings.TrimSpace(c.Query("api_key_ids")); rawIDs != "" {
+		if h.apiKeyService == nil {
+			response.InternalError(c, "API key service not available")
+			return nil, false
+		}
+		seen := make(map[int64]struct{})
+		for _, part := range strings.Split(rawIDs, ",") {
+			id, err := strconv.ParseInt(strings.TrimSpace(part), 10, 64)
+			if err != nil || id <= 0 {
+				response.BadRequest(c, "Invalid api_key_ids")
+				return nil, false
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			apiKeyIDs = append(apiKeyIDs, id)
+		}
+		if len(apiKeyIDs) == 0 || len(apiKeyIDs) > 100 {
+			response.BadRequest(c, "api_key_ids must contain 1-100 key IDs")
+			return nil, false
+		}
+		ownedIDs, err := h.apiKeyService.VerifyOwnership(c.Request.Context(), subject.UserID, apiKeyIDs)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			return nil, false
+		}
+		if len(ownedIDs) != len(apiKeyIDs) {
+			response.Forbidden(c, "Not authorized to access one or more API keys' usage records")
+			return nil, false
+		}
+		apiKeyIDs = ownedIDs
+		if len(apiKeyIDs) == 1 {
+			apiKeyID = apiKeyIDs[0]
+		}
 	}
 
 	var groupID int64
@@ -153,6 +200,16 @@ func (h *UsageHandler) parseUserUsageFilters(c *gin.Context, requireRange bool) 
 		return nil, false
 	}
 
+	reasoningEffort := strings.ToLower(strings.TrimSpace(c.Query("reasoning_effort")))
+	if len(reasoningEffort) > 64 {
+		response.BadRequest(c, "Invalid reasoning_effort")
+		return nil, false
+	}
+	includeBreakdowns, ok := parseBoolQueryWithDefault(c, "include_breakdowns", false)
+	if !ok {
+		return nil, false
+	}
+
 	userTZ := c.Query("timezone")
 	now := timezone.NowInUserLocation(userTZ)
 	var startTime, endTime time.Time
@@ -207,6 +264,7 @@ func (h *UsageHandler) parseUserUsageFilters(c *gin.Context, requireRange bool) 
 		Filters: usagestats.UsageLogFilters{
 			UserID:             subject.UserID,
 			APIKeyID:           apiKeyID,
+			APIKeyIDs:          apiKeyIDs,
 			GroupID:            groupID,
 			Model:              strings.TrimSpace(c.Query("model")),
 			ModelFilterSource:  usagestats.ModelSourceRequested,
@@ -215,6 +273,8 @@ func (h *UsageHandler) parseUserUsageFilters(c *gin.Context, requireRange bool) 
 			NativeCompactionV2: nativeCompactionV2,
 			BillingType:        billingType,
 			BillingMode:        billingMode,
+			ReasoningEffort:    reasoningEffort,
+			IncludeBreakdowns:  includeBreakdowns,
 			StartTime:          startPtr,
 			EndTime:            endPtr,
 		},

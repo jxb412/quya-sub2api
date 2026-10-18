@@ -94,32 +94,42 @@
               <Select v-model="errorFilter.status_code" :options="errorStatusOptions" @change="applyErrorFilters" />
             </div>
           </div>
-          <div v-else class="flex flex-1 flex-wrap items-end gap-4">
-            <div class="w-full sm:w-auto sm:min-w-[220px]">
+          <div v-else class="grid min-w-0 flex-1 grid-cols-1 items-end gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div class="min-w-0">
               <label class="input-label">{{ t('usage.apiKeyFilter') }}</label>
-              <Select v-model="filters.api_key_id" :options="apiKeyOptions" @change="applyFilters" />
+              <UsageKeyMultiSelect
+                v-model="selectedAPIKeyIDs"
+                :api-keys="apiKeysForSelection"
+                :all-label="t('usage.allApiKeys')"
+                :search-placeholder="t('usage.searchKeys')"
+                @change="applyFilters"
+              />
             </div>
-            <div class="w-full sm:w-auto sm:min-w-[220px]">
+            <div class="min-w-0">
               <label class="input-label">{{ t('usage.model') }}</label>
               <Select v-model="filters.model" :options="modelOptions" searchable @change="applyFilters" />
             </div>
-            <div class="w-full sm:w-auto sm:min-w-[200px]">
+            <div class="min-w-0">
+              <label class="input-label">{{ t('usage.reasoningEffort') }}</label>
+              <Select v-model="filters.reasoning_effort" :options="reasoningEffortOptions" @change="applyFilters" />
+            </div>
+            <div class="min-w-0">
               <label class="input-label">{{ t('admin.usage.group') }}</label>
               <Select v-model="filters.group_id" :options="groupOptions" searchable @change="applyFilters" />
             </div>
-            <div class="w-full sm:w-auto sm:min-w-[180px]">
+            <div class="min-w-0">
               <label class="input-label">{{ t('usage.type') }}</label>
               <Select v-model="filters.request_type" :options="requestTypeOptions" @change="applyFilters" />
             </div>
-            <div class="w-full sm:w-auto sm:min-w-[180px]">
+            <div class="min-w-0">
               <label class="input-label">{{ t('usage.compactionFilter') }}</label>
               <Select v-model="filters.native_compaction_v2" :options="compactionOptions" @change="applyFilters" />
             </div>
-            <div v-if="subscriptionFeatureEnabled" class="w-full sm:w-auto sm:min-w-[200px]">
+            <div v-if="subscriptionFeatureEnabled" class="min-w-0">
               <label class="input-label">{{ t('admin.usage.billingType') }}</label>
               <Select v-model="filters.billing_type" :options="billingTypeOptions" @change="applyFilters" />
             </div>
-            <div class="w-full sm:w-auto sm:min-w-[200px]">
+            <div class="min-w-0">
               <label class="input-label">{{ t('admin.usage.billingMode') }}</label>
               <Select v-model="filters.billing_mode" :options="billingModeOptions" @change="applyFilters" />
             </div>
@@ -177,6 +187,12 @@
       </div>
 
       <template v-if="activeTab === 'usage'">
+        <UsageBreakdownPanel
+          :keys="apiKeyBreakdowns"
+          :efforts="reasoningEffortBreakdowns"
+          :total-actual-cost="usageStats?.total_actual_cost || 0"
+        />
+
         <UsageTable
           :data="usageLogs"
           :loading="loading"
@@ -230,6 +246,8 @@ import Select, { type SelectOption } from '@/components/common/Select.vue'
 import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import UsageStatsCards from '@/components/admin/usage/UsageStatsCards.vue'
 import UsageTable from '@/components/admin/usage/UsageTable.vue'
+import UsageBreakdownPanel from '@/components/admin/usage/UsageBreakdownPanel.vue'
+import UsageKeyMultiSelect from '@/components/admin/usage/UsageKeyMultiSelect.vue'
 import ModelDistributionChart from '@/components/charts/ModelDistributionChart.vue'
 import GroupDistributionChart from '@/components/charts/GroupDistributionChart.vue'
 import EndpointDistributionChart from '@/components/charts/EndpointDistributionChart.vue'
@@ -366,6 +384,7 @@ const filters = ref<UsageQueryParams>({
   billing_type: null,
   billing_mode: null,
 })
+const selectedAPIKeyIDs = ref<number[]>([])
 
 const pagination = reactive({
   page: 1,
@@ -392,6 +411,17 @@ const compactionOptions = computed<SelectOption[]>(() => [
   { value: null, label: t('usage.allCompactionTypes') },
   { value: true, label: t('usage.compactionOnly') },
 ])
+const reasoningEffortOptions = computed<SelectOption[]>(() => [
+  { value: null, label: t('usage.allReasoningEfforts') },
+  { value: 'none', label: 'None' },
+  { value: 'minimal', label: 'Minimal' },
+  { value: 'low', label: formatReasoningEffort('low') },
+  { value: 'medium', label: formatReasoningEffort('medium') },
+  { value: 'high', label: formatReasoningEffort('high') },
+  { value: 'xhigh', label: formatReasoningEffort('xhigh') },
+  { value: 'max', label: formatReasoningEffort('max') },
+  { value: '__unset__', label: t('usage.unspecifiedEffort') },
+])
 // 订阅功能关闭后只剩余额计费，「计费类型」筛选（余额/订阅）失去意义，整块隐藏。
 const subscriptionFeatureEnabled = computed(() => resolveFeatureFlag(appStore.cachedPublicSettings, FeatureFlags.subscription))
 const billingTypeOptions = computed<SelectOption[]>(() => [
@@ -411,10 +441,9 @@ const apiKeys = ref<ApiKey[]>([])
 const groups = ref<Group[]>([])
 const modelOptionValues = ref<string[]>([])
 
-const apiKeyOptions = computed<SelectOption[]>(() => [
-  { value: null, label: t('usage.allApiKeys') },
-  ...apiKeys.value.map((key) => ({ value: key.id, label: key.name })),
-])
+const apiKeysForSelection = computed(() => apiKeys.value)
+const reasoningEffortBreakdowns = computed(() => usageStats.value?.reasoning_efforts || [])
+const apiKeyBreakdowns = computed(() => usageStats.value?.api_keys || [])
 const groupOptions = computed<SelectOption[]>(() => [
   { value: null, label: t('admin.usage.allGroups') },
   ...groups.value.map((group) => ({ value: group.id, label: group.name })),
@@ -427,8 +456,13 @@ const modelOptions = computed<SelectOption[]>(() => [
 const normalizedFilters = computed<UsageQueryParams>(() => {
   const requestType = filters.value.request_type
   const legacyStream = requestType ? requestTypeToLegacyStream(requestType) : filters.value.stream
+  const apiKeyIDs = selectedAPIKeyIDs.value.length > 0
+    ? selectedAPIKeyIDs.value.join(',')
+    : undefined
   return {
     ...filters.value,
+    api_key_id: undefined,
+    api_key_ids: apiKeyIDs,
     start_date: startDate.value,
     end_date: endDate.value,
     stream: legacyStream === null ? undefined : legacyStream,
@@ -469,7 +503,10 @@ const loadStats = async () => {
   const seq = ++statsReqSeq
   endpointStatsLoading.value = true
   try {
-    const stats = await usageAPI.getStats(normalizedFilters.value)
+    const stats = await usageAPI.getStats({
+      ...normalizedFilters.value,
+      include_breakdowns: true,
+    })
     if (seq !== statsReqSeq) return
     usageStats.value = stats
     inboundEndpointStats.value = stats.endpoints || []
@@ -569,6 +606,7 @@ const resetFilters = () => {
     billing_type: null,
     billing_mode: null,
   }
+  selectedAPIKeyIDs.value = []
   granularity.value = getGranularityForRange(range.start, range.end)
   applyFilters()
   if (activeTab.value === 'errors') {
@@ -654,7 +692,9 @@ const exportToCSV = async () => {
     }
     const headers = [
       'Time',
+      'API Key ID',
       'API Key Name',
+      'Group',
       'Model',
       'Reasoning Effort',
       'Inbound Endpoint',
@@ -673,7 +713,9 @@ const exportToCSV = async () => {
     ]
     const rows = allLogs.map((log) => [
       log.created_at,
+      log.api_key_id,
       log.api_key?.name || '',
+      log.group?.name || '',
       log.model,
       formatReasoningEffort(log.reasoning_effort),
       log.inbound_endpoint || '',

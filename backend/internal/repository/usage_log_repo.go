@@ -8,6 +8,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	gocache "github.com/patrickmn/go-cache"
 )
@@ -136,6 +137,110 @@ func appendUsageLogModelQueryFilter(query string, args []any, model string, sour
 	query += fmt.Sprintf(" AND %s = $%d", resolveModelDimensionExpression(source), len(args)+1)
 	args = append(args, model)
 	return query, args
+}
+
+// buildUsageLogFilterConditions builds the shared WHERE fragments used by the
+// usage list, aggregate, trend and chart queries. Keeping these in one place
+// prevents multi-key / reasoning-effort filters from silently dropping out of
+// one of the dashboard surfaces.
+func buildUsageLogFilterConditions(filters usagestats.UsageLogFilters, alias string) ([]string, []any) {
+	return buildUsageLogFilterConditionsWithArgs(filters, alias, nil)
+}
+
+func buildUsageLogFilterConditionsWithArgs(filters usagestats.UsageLogFilters, alias string, args []any) ([]string, []any) {
+	column := func(name string) string {
+		if alias == "" {
+			return name
+		}
+		return alias + "." + name
+	}
+	conditions := make([]string, 0, 16)
+	if args == nil {
+		args = make([]any, 0, 16)
+	}
+
+	if filters.UserID > 0 {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", column("user_id"), len(args)+1))
+		args = append(args, filters.UserID)
+	}
+	keyIDs := make([]int64, 0, len(filters.APIKeyIDs))
+	seen := make(map[int64]struct{}, len(filters.APIKeyIDs))
+	for _, id := range filters.APIKeyIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		keyIDs = append(keyIDs, id)
+	}
+	if len(keyIDs) > 0 {
+		placeholders := make([]string, 0, len(keyIDs))
+		for _, id := range keyIDs {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)+1))
+			args = append(args, id)
+		}
+		conditions = append(conditions, fmt.Sprintf("%s IN (%s)", column("api_key_id"), strings.Join(placeholders, ", ")))
+	} else if filters.APIKeyID > 0 {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", column("api_key_id"), len(args)+1))
+		args = append(args, filters.APIKeyID)
+	}
+	if filters.AccountID > 0 {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", column("account_id"), len(args)+1))
+		args = append(args, filters.AccountID)
+	}
+	if filters.GroupID > 0 {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", column("group_id"), len(args)+1))
+		args = append(args, filters.GroupID)
+	}
+	if requestID := strings.TrimSpace(filters.RequestID); requestID != "" {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", column("request_id"), len(args)+1))
+		args = append(args, requestID)
+	}
+	if model := strings.TrimSpace(filters.Model); model != "" {
+		modelExpr := column(rawUsageLogModelColumn)
+		if strings.TrimSpace(filters.ModelFilterSource) != "" {
+			modelExpr = resolveModelDimensionExpressionWithAlias(filters.ModelFilterSource, alias)
+		}
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", modelExpr, len(args)+1))
+		args = append(args, model)
+	}
+	if filters.RequestType != nil {
+		condition, conditionArgs := buildRequestTypeFilterConditionWithAlias(len(args)+1, *filters.RequestType, alias)
+		conditions = append(conditions, condition)
+		args = append(args, conditionArgs...)
+	} else if filters.Stream != nil {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", column("stream"), len(args)+1))
+		args = append(args, *filters.Stream)
+	}
+	conditions, args = appendNativeCompactionV2WhereCondition(conditions, args, filters.NativeCompactionV2, alias)
+	if filters.BillingType != nil {
+		conditions = append(conditions, fmt.Sprintf("%s = $%d", column("billing_type"), len(args)+1))
+		args = append(args, int16(*filters.BillingType))
+	}
+	conditions, args = appendUsageLogBillingModeWhereConditionWithAlias(conditions, args, filters.BillingMode, alias)
+	if filters.UpstreamModelMismatch != nil {
+		conditions = append(conditions, upstreamModelMismatchCondition(column("upstream_model_mismatch"), *filters.UpstreamModelMismatch))
+	}
+	if effort := strings.ToLower(strings.TrimSpace(filters.ReasoningEffort)); effort != "" {
+		effortExpr := fmt.Sprintf("LOWER(COALESCE(NULLIF(TRIM(%s), ''), ''))", column("reasoning_effort"))
+		if effort == "__unset__" {
+			conditions = append(conditions, effortExpr+" = ''")
+		} else {
+			conditions = append(conditions, fmt.Sprintf("%s = $%d", effortExpr, len(args)+1))
+			args = append(args, effort)
+		}
+	}
+	if filters.StartTime != nil {
+		conditions = append(conditions, fmt.Sprintf("%s >= $%d", column("created_at"), len(args)+1))
+		args = append(args, *filters.StartTime)
+	}
+	if filters.EndTime != nil {
+		conditions = append(conditions, fmt.Sprintf("%s < $%d", column("created_at"), len(args)+1))
+		args = append(args, *filters.EndTime)
+	}
+	return conditions, args
 }
 
 type usageLogRepository struct {

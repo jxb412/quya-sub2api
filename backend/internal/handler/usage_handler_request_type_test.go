@@ -28,6 +28,21 @@ type userUsageRepoCapture struct {
 	groupStats   []usagestats.GroupStat
 }
 
+type userUsageAPIKeyStub struct {
+	ownedIDs []int64
+}
+
+func (s *userUsageAPIKeyStub) GetByID(_ context.Context, id int64) (*service.APIKey, error) {
+	return &service.APIKey{ID: id, UserID: 42}, nil
+}
+
+func (s *userUsageAPIKeyStub) VerifyOwnership(_ context.Context, _ int64, apiKeyIDs []int64) ([]int64, error) {
+	if s.ownedIDs != nil {
+		return s.ownedIDs, nil
+	}
+	return apiKeyIDs, nil
+}
+
 func (s *userUsageRepoCapture) ListWithFilters(ctx context.Context, params pagination.PaginationParams, filters usagestats.UsageLogFilters) ([]service.UsageLog, *pagination.PaginationResult, error) {
 	s.listParams = params
 	s.listFilters = filters
@@ -79,9 +94,16 @@ func (s *userUsageRepoCapture) GetGroupStatsWithFilters(ctx context.Context, sta
 }
 
 func newUserUsageRequestTypeTestRouter(repo *userUsageRepoCapture) *gin.Engine {
+	return newUserUsageTestRouter(repo, nil)
+}
+
+func newUserUsageTestRouter(repo *userUsageRepoCapture, apiKeyService usageAPIKeyService) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	usageSvc := service.NewUsageService(repo, nil, nil, nil)
-	handler := NewUsageHandler(usageSvc, nil, nil, nil)
+	handler := &UsageHandler{
+		usageService:  usageSvc,
+		apiKeyService: apiKeyService,
+	}
 	router := gin.New()
 	router.Use(func(c *gin.Context) {
 		c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 42})
@@ -92,6 +114,33 @@ func newUserUsageRequestTypeTestRouter(repo *userUsageRepoCapture) *gin.Engine {
 	router.GET("/usage/dashboard/models", handler.DashboardModels)
 	router.GET("/usage/dashboard/snapshot-v2", handler.DashboardSnapshotV2)
 	return router
+}
+
+func TestUserUsageListMultiKeyOwnershipAndBreakdownFilters(t *testing.T) {
+	repo := &userUsageRepoCapture{}
+	router := newUserUsageTestRouter(repo, &userUsageAPIKeyStub{})
+
+	req := httptest.NewRequest(http.MethodGet, "/usage?api_key_ids=2,7&reasoning_effort=HIGH&include_breakdowns=true", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []int64{2, 7}, repo.listFilters.APIKeyIDs)
+	require.Equal(t, "high", repo.listFilters.ReasoningEffort)
+	require.True(t, repo.listFilters.IncludeBreakdowns)
+	require.Equal(t, int64(42), repo.listFilters.UserID)
+}
+
+func TestUserUsageListRejectsPartiallyOwnedAPIKeys(t *testing.T) {
+	repo := &userUsageRepoCapture{}
+	router := newUserUsageTestRouter(repo, &userUsageAPIKeyStub{ownedIDs: []int64{2}})
+
+	req := httptest.NewRequest(http.MethodGet, "/usage?api_key_ids=2,7", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Empty(t, repo.listFilters.APIKeyIDs)
 }
 
 func TestUserUsageListRequestTypePriority(t *testing.T) {

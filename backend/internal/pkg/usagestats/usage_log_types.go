@@ -269,42 +269,80 @@ type PlatformDashboardStats struct {
 
 // UsageLogFilters represents filters for usage log queries
 type UsageLogFilters struct {
-	UserID    int64
-	APIKeyID  int64
+	UserID   int64
+	APIKeyID int64
+	// APIKeyIDs enables multi-key queries. When set it takes precedence over APIKeyID.
+	APIKeyIDs []int64
 	AccountID int64
 	GroupID   int64
 	RequestID string
 	Model     string
 	// ModelFilterSource controls how Model is matched. Empty preserves raw usage_logs.model semantics.
-	ModelFilterSource     string
-	RequestType           *int16
-	Stream                *bool
-	NativeCompactionV2    *bool
-	BillingType           *int8
-	BillingMode           string
+	ModelFilterSource  string
+	RequestType        *int16
+	Stream             *bool
+	NativeCompactionV2 *bool
+	BillingType        *int8
+	BillingMode        string
+	// ReasoningEffort matches the recorded upstream effort. The sentinel
+	// "__unset__" matches rows with no recorded effort.
+	ReasoningEffort       string
 	UpstreamModelMismatch *bool
 	StartTime             *time.Time
 	EndTime               *time.Time
 	// ExactTotal requests exact COUNT(*) for pagination. Default false for fast large-table paging.
 	ExactTotal bool
+	// IncludeBreakdowns adds per-key and per-reasoning-effort aggregates to Stats.
+	IncludeBreakdowns bool
+}
+
+// ReasoningEffortStat aggregates usage for one recorded reasoning effort.
+type ReasoningEffortStat struct {
+	ReasoningEffort     string  `json:"reasoning_effort"`
+	Requests            int64   `json:"requests"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	TotalTokens         int64   `json:"total_tokens"`
+	Cost                float64 `json:"cost"`
+	ActualCost          float64 `json:"actual_cost"`
+}
+
+// APIKeyUsageStat aggregates usage for one API key within the selected scope.
+type APIKeyUsageStat struct {
+	APIKeyID            int64   `json:"api_key_id"`
+	APIKeyName          string  `json:"api_key_name"`
+	GroupID             int64   `json:"group_id"`
+	GroupName           string  `json:"group_name"`
+	Requests            int64   `json:"requests"`
+	InputTokens         int64   `json:"input_tokens"`
+	OutputTokens        int64   `json:"output_tokens"`
+	CacheCreationTokens int64   `json:"cache_creation_tokens"`
+	CacheReadTokens     int64   `json:"cache_read_tokens"`
+	TotalTokens         int64   `json:"total_tokens"`
+	Cost                float64 `json:"cost"`
+	ActualCost          float64 `json:"actual_cost"`
 }
 
 // UsageStats represents usage statistics
 type UsageStats struct {
-	TotalRequests            int64          `json:"total_requests"`
-	TotalInputTokens         int64          `json:"total_input_tokens"`
-	TotalOutputTokens        int64          `json:"total_output_tokens"`
-	TotalCacheTokens         int64          `json:"total_cache_tokens"`
-	TotalCacheCreationTokens int64          `json:"total_cache_creation_tokens"`
-	TotalCacheReadTokens     int64          `json:"total_cache_read_tokens"`
-	TotalTokens              int64          `json:"total_tokens"`
-	TotalCost                float64        `json:"total_cost"`
-	TotalActualCost          float64        `json:"total_actual_cost"`
-	TotalAccountCost         *float64       `json:"total_account_cost,omitempty"`
-	AverageDurationMs        float64        `json:"average_duration_ms"`
-	Endpoints                []EndpointStat `json:"endpoints,omitempty"`
-	UpstreamEndpoints        []EndpointStat `json:"upstream_endpoints,omitempty"`
-	EndpointPaths            []EndpointStat `json:"endpoint_paths,omitempty"`
+	TotalRequests            int64                 `json:"total_requests"`
+	TotalInputTokens         int64                 `json:"total_input_tokens"`
+	TotalOutputTokens        int64                 `json:"total_output_tokens"`
+	TotalCacheTokens         int64                 `json:"total_cache_tokens"`
+	TotalCacheCreationTokens int64                 `json:"total_cache_creation_tokens"`
+	TotalCacheReadTokens     int64                 `json:"total_cache_read_tokens"`
+	TotalTokens              int64                 `json:"total_tokens"`
+	TotalCost                float64               `json:"total_cost"`
+	TotalActualCost          float64               `json:"total_actual_cost"`
+	TotalAccountCost         *float64              `json:"total_account_cost,omitempty"`
+	AverageDurationMs        float64               `json:"average_duration_ms"`
+	Endpoints                []EndpointStat        `json:"endpoints,omitempty"`
+	UpstreamEndpoints        []EndpointStat        `json:"upstream_endpoints,omitempty"`
+	EndpointPaths            []EndpointStat        `json:"endpoint_paths,omitempty"`
+	ReasoningEfforts         []ReasoningEffortStat `json:"reasoning_efforts,omitempty"`
+	APIKeys                  []APIKeyUsageStat     `json:"api_keys,omitempty"`
 }
 
 // PlatformUsage 表示某用户/某 API key 在单个"有效平台"维度的用量明细。

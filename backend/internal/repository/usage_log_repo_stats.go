@@ -656,44 +656,7 @@ func (r *usageLogRepository) GetGlobalStats(ctx context.Context, startTime, endT
 
 // GetStatsWithFilters gets usage statistics with optional filters
 func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters UsageLogFilters) (*UsageStats, error) {
-	conditions := make([]string, 0, 9)
-	args := make([]any, 0, 9)
-
-	if filters.UserID > 0 {
-		conditions = append(conditions, fmt.Sprintf("user_id = $%d", len(args)+1))
-		args = append(args, filters.UserID)
-	}
-	if filters.APIKeyID > 0 {
-		conditions = append(conditions, fmt.Sprintf("api_key_id = $%d", len(args)+1))
-		args = append(args, filters.APIKeyID)
-	}
-	if filters.AccountID > 0 {
-		conditions = append(conditions, fmt.Sprintf("account_id = $%d", len(args)+1))
-		args = append(args, filters.AccountID)
-	}
-	if filters.GroupID > 0 {
-		conditions = append(conditions, fmt.Sprintf("group_id = $%d", len(args)+1))
-		args = append(args, filters.GroupID)
-	}
-	conditions, args = appendUsageLogModelWhereCondition(conditions, args, filters.Model, filters.ModelFilterSource)
-	conditions, args = appendRequestTypeOrStreamWhereCondition(conditions, args, filters.RequestType, filters.Stream)
-	conditions, args = appendNativeCompactionV2WhereCondition(conditions, args, filters.NativeCompactionV2, "")
-	if filters.BillingType != nil {
-		conditions = append(conditions, fmt.Sprintf("billing_type = $%d", len(args)+1))
-		args = append(args, int16(*filters.BillingType))
-	}
-	conditions, args = appendUsageLogBillingModeWhereCondition(conditions, args, filters.BillingMode)
-	if filters.UpstreamModelMismatch != nil {
-		conditions = append(conditions, upstreamModelMismatchCondition("upstream_model_mismatch", *filters.UpstreamModelMismatch))
-	}
-	if filters.StartTime != nil {
-		conditions = append(conditions, fmt.Sprintf("created_at >= $%d", len(args)+1))
-		args = append(args, *filters.StartTime)
-	}
-	if filters.EndTime != nil {
-		conditions = append(conditions, fmt.Sprintf("created_at < $%d", len(args)+1))
-		args = append(args, *filters.EndTime)
-	}
+	conditions, args := buildUsageLogFilterConditions(filters, "")
 
 	query := fmt.Sprintf(`
 		WITH scoped AS (
@@ -822,7 +785,124 @@ func (r *usageLogRepository) GetStatsWithFilters(ctx context.Context, filters Us
 	stats.TotalAccountCost = &totalAccountCost
 	stats.TotalTokens = stats.TotalInputTokens + stats.TotalOutputTokens + stats.TotalCacheTokens
 
+	if filters.IncludeBreakdowns {
+		reasoningEfforts, err := r.getReasoningEffortStats(ctx, filters)
+		if err != nil {
+			return nil, err
+		}
+		apiKeys, err := r.getAPIKeyUsageStats(ctx, filters)
+		if err != nil {
+			return nil, err
+		}
+		stats.ReasoningEfforts = reasoningEfforts
+		stats.APIKeys = apiKeys
+	}
+
 	return stats, nil
+}
+
+func (r *usageLogRepository) getReasoningEffortStats(ctx context.Context, filters UsageLogFilters) ([]usagestats.ReasoningEffortStat, error) {
+	conditions, args := buildUsageLogFilterConditions(filters, "ul")
+	query := `
+		SELECT
+			COALESCE(NULLIF(TRIM(ul.reasoning_effort), ''), '') AS reasoning_effort,
+			COUNT(*) AS requests,
+			COALESCE(SUM(ul.input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(ul.output_tokens), 0) AS output_tokens,
+			COALESCE(SUM(ul.cache_creation_tokens), 0) AS cache_creation_tokens,
+			COALESCE(SUM(ul.cache_read_tokens), 0) AS cache_read_tokens,
+			COALESCE(SUM(ul.input_tokens + ul.output_tokens + ul.cache_creation_tokens + ul.cache_read_tokens), 0) AS total_tokens,
+			COALESCE(SUM(ul.total_cost), 0) AS cost,
+			COALESCE(SUM(ul.actual_cost), 0) AS actual_cost
+		FROM usage_logs ul
+	` + buildWhere(conditions) + `
+		GROUP BY reasoning_effort
+		ORDER BY actual_cost DESC, requests DESC, reasoning_effort ASC
+	`
+	rows, err := r.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	results := make([]usagestats.ReasoningEffortStat, 0)
+	for rows.Next() {
+		var row usagestats.ReasoningEffortStat
+		if err := rows.Scan(
+			&row.ReasoningEffort,
+			&row.Requests,
+			&row.InputTokens,
+			&row.OutputTokens,
+			&row.CacheCreationTokens,
+			&row.CacheReadTokens,
+			&row.TotalTokens,
+			&row.Cost,
+			&row.ActualCost,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func (r *usageLogRepository) getAPIKeyUsageStats(ctx context.Context, filters UsageLogFilters) ([]usagestats.APIKeyUsageStat, error) {
+	conditions, args := buildUsageLogFilterConditions(filters, "ul")
+	query := `
+		SELECT
+			ul.api_key_id,
+			COALESCE(k.name, '') AS api_key_name,
+			COALESCE(ul.group_id, 0) AS group_id,
+			COALESCE(NULLIF(TRIM(g.name), ''), '') AS group_name,
+			COUNT(*) AS requests,
+			COALESCE(SUM(ul.input_tokens), 0) AS input_tokens,
+			COALESCE(SUM(ul.output_tokens), 0) AS output_tokens,
+			COALESCE(SUM(ul.cache_creation_tokens), 0) AS cache_creation_tokens,
+			COALESCE(SUM(ul.cache_read_tokens), 0) AS cache_read_tokens,
+			COALESCE(SUM(ul.input_tokens + ul.output_tokens + ul.cache_creation_tokens + ul.cache_read_tokens), 0) AS total_tokens,
+			COALESCE(SUM(ul.total_cost), 0) AS cost,
+			COALESCE(SUM(ul.actual_cost), 0) AS actual_cost
+		FROM usage_logs ul
+		LEFT JOIN api_keys k ON k.id = ul.api_key_id
+		LEFT JOIN groups g ON g.id = ul.group_id
+	` + buildWhere(conditions) + `
+		GROUP BY ul.api_key_id, k.name, ul.group_id, g.name
+		ORDER BY actual_cost DESC, requests DESC, ul.api_key_id ASC, ul.group_id ASC
+	`
+	rows, err := r.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	results := make([]usagestats.APIKeyUsageStat, 0)
+	for rows.Next() {
+		var row usagestats.APIKeyUsageStat
+		if err := rows.Scan(
+			&row.APIKeyID,
+			&row.APIKeyName,
+			&row.GroupID,
+			&row.GroupName,
+			&row.Requests,
+			&row.InputTokens,
+			&row.OutputTokens,
+			&row.CacheCreationTokens,
+			&row.CacheReadTokens,
+			&row.TotalTokens,
+			&row.Cost,
+			&row.ActualCost,
+		); err != nil {
+			return nil, err
+		}
+		results = append(results, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 // AccountUsageHistory represents daily usage history for an account

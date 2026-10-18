@@ -2001,6 +2001,35 @@ export interface UsageStatsResponse {
   endpoints?: EndpointStat[]
   upstream_endpoints?: EndpointStat[]
   endpoint_paths?: EndpointStat[]
+  reasoning_efforts?: ReasoningEffortUsageStat[]
+  api_keys?: APIKeyUsageStat[]
+}
+
+export interface ReasoningEffortUsageStat {
+  reasoning_effort: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  total_tokens: number
+  cost: number
+  actual_cost: number
+}
+
+export interface APIKeyUsageStat {
+  api_key_id: number
+  api_key_name: string
+  group_id: number
+  group_name: string
+  requests: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+  total_tokens: number
+  cost: number
+  actual_cost: number
 }
 
 // ==================== Trend & Chart Types ====================
@@ -2228,6 +2257,8 @@ export interface UsageQueryParams {
   page?: number
   page_size?: number
   api_key_id?: number
+  /** Comma-separated key IDs for multi-key comparison. */
+  api_key_ids?: string
   user_id?: number
   account_id?: number
   group_id?: number
@@ -2237,6 +2268,8 @@ export interface UsageQueryParams {
   native_compaction_v2?: boolean | null
   billing_type?: number | null
   billing_mode?: string | null
+  reasoning_effort?: string
+  include_breakdowns?: boolean
   start_date?: string
   end_date?: string
   timezone?: string

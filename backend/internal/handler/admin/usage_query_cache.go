@@ -11,19 +11,22 @@ import (
 var usageStatsCache = newSnapshotCache(30 * time.Second)
 
 type usageStatsCacheKeyData struct {
-	StartTime             string `json:"start_time"`
-	EndTime               string `json:"end_time"`
-	UserID                int64  `json:"user_id"`
-	APIKeyID              int64  `json:"api_key_id"`
-	AccountID             int64  `json:"account_id"`
-	GroupID               int64  `json:"group_id"`
-	Model                 string `json:"model"`
-	BillingMode           string `json:"billing_mode"`
-	RequestType           *int16 `json:"request_type"`
-	Stream                *bool  `json:"stream"`
-	NativeCompactionV2    *bool  `json:"native_compaction_v2"`
-	BillingType           *int8  `json:"billing_type"`
-	UpstreamModelMismatch *bool  `json:"upstream_model_mismatch"`
+	StartTime             string  `json:"start_time"`
+	EndTime               string  `json:"end_time"`
+	UserID                int64   `json:"user_id"`
+	APIKeyID              int64   `json:"api_key_id"`
+	APIKeyIDs             []int64 `json:"api_key_ids"`
+	AccountID             int64   `json:"account_id"`
+	GroupID               int64   `json:"group_id"`
+	Model                 string  `json:"model"`
+	BillingMode           string  `json:"billing_mode"`
+	RequestType           *int16  `json:"request_type"`
+	Stream                *bool   `json:"stream"`
+	NativeCompactionV2    *bool   `json:"native_compaction_v2"`
+	BillingType           *int8   `json:"billing_type"`
+	ReasoningEffort       string  `json:"reasoning_effort"`
+	IncludeBreakdowns     bool    `json:"include_breakdowns"`
+	UpstreamModelMismatch *bool   `json:"upstream_model_mismatch"`
 }
 
 func usageStatsCacheKey(filters usagestats.UsageLogFilters) string {
@@ -40,6 +43,7 @@ func usageStatsCacheKey(filters usagestats.UsageLogFilters) string {
 		EndTime:               end,
 		UserID:                filters.UserID,
 		APIKeyID:              filters.APIKeyID,
+		APIKeyIDs:             filters.APIKeyIDs,
 		AccountID:             filters.AccountID,
 		GroupID:               filters.GroupID,
 		Model:                 filters.Model,
@@ -48,6 +52,8 @@ func usageStatsCacheKey(filters usagestats.UsageLogFilters) string {
 		Stream:                filters.Stream,
 		NativeCompactionV2:    filters.NativeCompactionV2,
 		BillingType:           filters.BillingType,
+		ReasoningEffort:       filters.ReasoningEffort,
+		IncludeBreakdowns:     filters.IncludeBreakdowns,
 		UpstreamModelMismatch: filters.UpstreamModelMismatch,
 	})
 }

@@ -542,7 +542,7 @@ func TestUsageLogRepositoryUsageAggregatesFilterNativeCompactionV2(t *testing.T)
 	t.Run("model", func(t *testing.T) {
 		db, mock := newSQLMock(t)
 		repo := &usageLogRepository{sql: db}
-		mock.ExpectQuery("(?s)FROM usage_logs.*AND native_compaction_v2 = \\$3").
+		mock.ExpectQuery("(?s)FROM usage_logs ul.*AND ul.native_compaction_v2 = \\$3").
 			WithArgs(start, end, true).
 			WillReturnRows(sqlmock.NewRows([]string{
 				"model", "requests", "input_tokens", "output_tokens", "cache_creation_tokens",
@@ -728,7 +728,7 @@ func TestUsageLogRepositoryGetModelStatsWithUsageFiltersAppliesRequestedModelFil
 	end := start.Add(24 * time.Hour)
 	filters := usagestats.UsageLogFilters{Model: "gpt-5"}
 
-	mock.ExpectQuery("AND COALESCE\\(NULLIF\\(TRIM\\(requested_model\\), ''\\), model\\) = \\$3").
+	mock.ExpectQuery("AND COALESCE\\(NULLIF\\(TRIM\\(ul.requested_model\\), ''\\), ul.model\\) = \\$3").
 		WithArgs(start, end, "gpt-5").
 		WillReturnRows(sqlmock.NewRows([]string{
 			"model", "requests", "input_tokens", "output_tokens",
