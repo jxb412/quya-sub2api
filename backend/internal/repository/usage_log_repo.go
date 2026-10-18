@@ -53,18 +53,6 @@ func safeDateFormat(granularity string) string {
 	return "YYYY-MM-DD"
 }
 
-// appendRawUsageLogModelWhereCondition keeps direct model filters on the raw model column for backward
-// compatibility with historical rows. Requested/upstream analytics must use
-// resolveModelDimensionExpression instead.
-func appendRawUsageLogModelWhereCondition(conditions []string, args []any, model string) ([]string, []any) {
-	if strings.TrimSpace(model) == "" {
-		return conditions, args
-	}
-	conditions = append(conditions, fmt.Sprintf("%s = $%d", rawUsageLogModelColumn, len(args)+1))
-	args = append(args, model)
-	return conditions, args
-}
-
 func appendUsageLogBillingModeWhereCondition(conditions []string, args []any, billingMode string) ([]string, []any) {
 	return appendUsageLogBillingModeWhereConditionWithAlias(conditions, args, billingMode, "")
 }
@@ -101,18 +89,6 @@ func appendUsageLogBillingModeQueryFilter(query string, args []any, billingMode 
 		return query, args
 	}
 	return query + " AND " + conditions[0], args
-}
-
-func appendUsageLogModelWhereCondition(conditions []string, args []any, model string, source string) ([]string, []any) {
-	if strings.TrimSpace(source) == "" {
-		return appendRawUsageLogModelWhereCondition(conditions, args, model)
-	}
-	if strings.TrimSpace(model) == "" {
-		return conditions, args
-	}
-	conditions = append(conditions, fmt.Sprintf("%s = $%d", resolveModelDimensionExpression(source), len(args)+1))
-	args = append(args, model)
-	return conditions, args
 }
 
 // appendRawUsageLogModelQueryFilter keeps direct model filters on the raw model column for backward
@@ -274,20 +250,6 @@ func buildWhere(conditions []string) string {
 		return ""
 	}
 	return "WHERE " + strings.Join(conditions, " AND ")
-}
-
-func appendRequestTypeOrStreamWhereCondition(conditions []string, args []any, requestType *int16, stream *bool) ([]string, []any) {
-	if requestType != nil {
-		condition, conditionArgs := buildRequestTypeFilterCondition(len(args)+1, *requestType)
-		conditions = append(conditions, condition)
-		args = append(args, conditionArgs...)
-		return conditions, args
-	}
-	if stream != nil {
-		conditions = append(conditions, fmt.Sprintf("stream = $%d", len(args)+1))
-		args = append(args, *stream)
-	}
-	return conditions, args
 }
 
 func appendRequestTypeOrStreamQueryFilter(query string, args []any, requestType *int16, stream *bool) (string, []any) {
