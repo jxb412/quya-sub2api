@@ -13,7 +13,7 @@
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
 | 发布镜像 | `ghcr.io/jxb412/sub2api:<version>` |
-| 当前开发版本 | `0.4.18`（用户使用记录时间范围精确到分钟，待测试机验证） |
+| 当前开发版本 | `0.4.20`（上游 Sub2API v0.2.18 同步，待测试机验证） |
 
 `origin` 是个人仓库，`upstream` 是上游仓库。个人改动必须提交到个人仓库，
 不能直接把上游分支覆盖到个人 `main`。
@@ -312,6 +312,30 @@ Anthropic Base URL 修复、可配置最小输出 token、composite OAuth 歧义
   107 识别 2099 个账号；升级后 10 分钟共享库记录 2596 个请求、48 个账号、95 个用户。
 - 回滚只需把两台 compose 标签同时改回 `0.4.15` 并重建 `sub2api-sb`。本次没有数据库
   迁移，应用二进制可直接回退；若需恢复业务数据，使用上述 PostgreSQL 全量备份目录。
+
+### 0.4.20 上游同步（2026-10-25）
+
+`0.4.20` 基于本项目 `0.4.19`，合并上游官方 `v0.2.18`。上游主要变化包括 OpenAI
+空流与 overload 安全重试、Codex 身份归一化、工具 schema 常量兼容、调度快照与
+模型映射性能优化、Vertex 账号配额、流式请求客户端断开后的计费收尾、Gemini 图片
+生成门禁、生图异步转存和依赖安全更新。
+
+本次只合并上游代码，三份 README 保留本项目版本，`backend/cmd/server/VERSION` 写为
+`0.4.20`。合并后继续保留本项目定制：入口协议与 Codex 客户端限制、限制失败后的
+同组账号 failover、插件客户端身份和会话隔离、风控账号套餐/类型/指定账号范围、
+OpenAI API Key 客户端限制开关、`database.initialization_enabled=false`、
+`subscription_maintenance.auto_reset_enabled=false`、批量账号 `LoadFactor`、
+用户使用记录多 Key 与分钟级查询，以及 BPS 插件和授权侧车。
+
+上游本次新增幂等迁移 `246_enable_gemini_image_generation_groups.sql`。生产环境仍
+保持启动期迁移关闭；测试和正式升级前需备份数据库，手工执行迁移并登记。
+
+当前上游 `main` 另有尚未进入正式版本的受限管理员 API Key 功能（PR #8319），本次
+不合并，待 `v0.2.18` 同步版验证稳定后再单独评估。
+
+本地全量单元测试还暴露了两个 Windows 时钟精度导致的既有竞态夹具：Ollama 冷却
+测试与 Command Code 模型目录测试。两者已改为显式不同时间窗口和单调序号，随后
+`go test -count=1 -tags=unit ./...` 全部通过。
 
 ### 号池 vm2api 升级记录（2026-10-15）
 
