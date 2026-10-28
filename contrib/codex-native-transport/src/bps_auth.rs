@@ -145,8 +145,9 @@ impl BatchOptions {
     /// 按插件配置取并发（钳到 1..=`MAX_BATCH_CONCURRENCY`）。
     pub fn from_config(config: &PluginConfig) -> Self {
         Self {
-            concurrency: config.bps_auth_batch_concurrency.clamp(1, MAX_BATCH_CONCURRENCY as u32)
-                as usize,
+            concurrency: config
+                .bps_auth_batch_concurrency
+                .clamp(1, MAX_BATCH_CONCURRENCY as u32) as usize,
         }
     }
 
@@ -882,8 +883,8 @@ async fn preflight_proxy(proxy_url: &str, timeout: Duration) -> Result<String, S
     if proxy_url.trim().is_empty() {
         builder = builder.no_proxy();
     } else {
-        let proxy = reqwest::Proxy::all(proxy_url.trim())
-            .map_err(|err| format!("代理格式不对: {err}"))?;
+        let proxy =
+            reqwest::Proxy::all(proxy_url.trim()).map_err(|err| format!("代理格式不对: {err}"))?;
         builder = builder.proxy(proxy);
     }
     let client = builder
@@ -959,7 +960,9 @@ async fn resolve_login_proxy_checked(
 /// 分配出口 IP，随机后缀让每个账号（每次授权）拿到不同出口，不至于几个账号挤在同一个
 /// IP 上过 Cloudflare 校验。没写占位符时原样返回（只有前后空白被去掉）。
 pub fn expand_proxy_template(template: &str, account_id: i64) -> String {
-    let mut out = template.trim().replace("{account}", &account_id.to_string());
+    let mut out = template
+        .trim()
+        .replace("{account}", &account_id.to_string());
     while out.contains("{rand}") {
         out = out.replacen("{rand}", &random_hex(8), 1);
     }
@@ -1196,7 +1199,14 @@ pub async fn login_account(
     account_id: i64,
     override_secret: Option<AccountSecret>,
 ) -> Result<(), String> {
-    login_account_with(state, config, account_id, override_secret, LoginSlot::Manual).await
+    login_account_with(
+        state,
+        config,
+        account_id,
+        override_secret,
+        LoginSlot::Manual,
+    )
+    .await
 }
 
 /// 批量授权里跑一个账号：和手动授权共用同一套材料 / 日志，但允许多个账号并行
@@ -1733,9 +1743,10 @@ mod tests {
         assert_eq!(secret.totp_secret, "DJTEFLBMN53SBSHSFL5RVSGWC2C2ZCQM");
 
         // 夹着中文说明、没有 TOTP 的账号。
-        let secret =
-            parse_account_material("这号带 2FA 关掉了，材料：foo.bar+1@aol.com----Passw0rd!2026---- 无")
-                .expect("夹说明文字");
+        let secret = parse_account_material(
+            "这号带 2FA 关掉了，材料：foo.bar+1@aol.com----Passw0rd!2026---- 无",
+        )
+        .expect("夹说明文字");
         assert_eq!(secret.email, "foo.bar+1@aol.com");
         assert_eq!(secret.password, "Passw0rd!2026");
         assert!(secret.totp_secret.is_empty());
@@ -1746,7 +1757,8 @@ mod tests {
         assert_eq!(secret.totp_secret, "JBSWY3DPEHPK3PXP");
 
         // 密码里带空格也不该被截断。
-        let secret = parse_account_material("a b account: z9@aol.com----pa ss word----").expect("密码带空格");
+        let secret = parse_account_material("a b account: z9@aol.com----pa ss word----")
+            .expect("密码带空格");
         assert_eq!(secret.email, "z9@aol.com");
         assert_eq!(secret.password, "pa ss word");
     }
@@ -1804,7 +1816,8 @@ mod tests {
     #[test]
     fn login_proxy_candidates_follow_priority_and_end_with_direct() {
         let mut config = PluginConfig::default();
-        config.bps_auth_proxy_template = "http://acct{account}:65423140@142.54.187.42:49000".to_string();
+        config.bps_auth_proxy_template =
+            "http://acct{account}:65423140@142.54.187.42:49000".to_string();
         config.bps_auth_proxy_url = "http://randbpsauth:65423140@142.54.187.42:49000".to_string();
         let mut own = AccountSecret::default();
         own.proxy_url = "http://own:1@10.0.0.1:1".to_string();
@@ -1843,7 +1856,10 @@ mod tests {
         let store = BpsAuthStore::default();
         store.ensure_loaded("");
         assert!(store.proxy_note(3).is_none());
-        store.set_proxy_note(3, "授权出口：一账号一出口 http://142.54.187.42:49000".to_string());
+        store.set_proxy_note(
+            3,
+            "授权出口：一账号一出口 http://142.54.187.42:49000".to_string(),
+        );
         let view = store.view(3, 1_000);
         assert!(view.proxy_note.contains("一账号一出口"));
         assert!(view.proxy_note_at_ms > 0);
@@ -1857,10 +1873,22 @@ mod tests {
         let store = BpsAuthStore::default();
         assert!(store.begin_run_slot(5, LoginSlot::Batch));
         assert!(!store.begin_run_slot(5, LoginSlot::Batch), "同账号不能并发");
-        assert!(store.begin_run_slot(6, LoginSlot::Batch), "不同账号可以并发");
-        assert!(!store.begin_run_slot(6, LoginSlot::Manual), "同账号仍被占着");
-        assert!(store.begin_run_slot(7, LoginSlot::Manual), "批量不挡别的手动");
-        assert!(!store.begin_run_slot(8, LoginSlot::Manual), "手动同时只跑一个");
+        assert!(
+            store.begin_run_slot(6, LoginSlot::Batch),
+            "不同账号可以并发"
+        );
+        assert!(
+            !store.begin_run_slot(6, LoginSlot::Manual),
+            "同账号仍被占着"
+        );
+        assert!(
+            store.begin_run_slot(7, LoginSlot::Manual),
+            "批量不挡别的手动"
+        );
+        assert!(
+            !store.begin_run_slot(8, LoginSlot::Manual),
+            "手动同时只跑一个"
+        );
         store.finish_run_slot(7, LoginSlot::Manual, String::new());
         store.begin_batch(2, 1, 2);
         assert!(store.is_running());

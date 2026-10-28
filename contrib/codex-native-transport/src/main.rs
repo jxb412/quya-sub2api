@@ -20,6 +20,7 @@ mod identity;
 mod intel;
 mod model_drop;
 mod panel;
+mod resistor;
 mod service;
 mod sync;
 mod transport;

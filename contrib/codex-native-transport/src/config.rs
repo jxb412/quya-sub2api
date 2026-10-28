@@ -249,6 +249,21 @@ pub struct PluginConfig {
     /// 删除这些键后按普通输入计费（与正常 Codex 线路一致）。
     /// 思路来自 codex-basispoints-transport 的 normalize_usage。
     pub bps_normalize_usage: bool,
+    /// 奥特曼变阻器（对外 usage 计量覆盖，默认关）。
+    ///
+    /// 移植自 C2A V41 的 `altman_resistor`：只改**回给宿主**的 usage 计量，
+    /// 不改上游请求、不改模型输出、不碰真实缓存。开启后按
+    /// `altman_resistor_percent` 把上报的缓存读取改写成
+    /// `floor(总输入 × 百分比 / 100)`，剩余输入仍算普通输入（与可保留的缓存写入），
+    /// 三个输入桶相加始终等于原总输入；`input_tokens` / `total_tokens` 不动。
+    /// 原始 usage 缺总输入、超出 u64、或明细自相矛盾时不改写。
+    /// 作用面是回程改写链路（BPS 通道的流式与非流式响应 + 正常通道的回程过滤层）。
+    pub altman_resistor_enabled: bool,
+    /// 变阻器百分比（0..=99，默认 90）：上报缓存读取占总输入的比例。
+    ///
+    /// 这是**计量口径**，不代表真实命中率；0 = 全部按普通输入计费，
+    /// 99 = 几乎全部算缓存读取（余下至少留 1% 给普通输入桶）。
+    pub altman_resistor_percent: u8,
     /// BPS 出站附带完整 Excel/Basis-Points 官方客户端 profile 头（默认 true）。
     ///
     /// 参考实现 Roins-hub/sub2api-oai-basispoints（CPA 插件 v0.2.8 端口）出站会带一整套
@@ -517,6 +532,9 @@ impl Default for PluginConfig {
             bps_previous_response_pin_seconds: 21_600,
             bps_scrub_echo: true,
             bps_normalize_usage: true,
+            // 变阻器默认关：计量覆盖属于运营策略，不该在没人配置时改变计费口径。
+            altman_resistor_enabled: false,
+            altman_resistor_percent: 90,
             bps_excel_client_profile: true,
             bps_honor_retry_after: true,
             bps_skip_on_hosted_tools: true,
@@ -748,6 +766,20 @@ impl PluginConfig {
         }
     }
 
+    /// 变阻器生效时的百分比（关掉返回 None）。装配回程改写器时用它。
+    ///
+    /// 百分比超界按上限收口：配置校验已经拦住保存，这里再兜一次，
+    /// 避免手工改库或旧配置把 100 以上的值带进运行时。
+    pub fn active_resistor_percent(&self) -> Option<u8> {
+        if !self.altman_resistor_enabled {
+            return None;
+        }
+        Some(
+            self.altman_resistor_percent
+                .min(crate::resistor::MAX_PERCENT),
+        )
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.connect_timeout_seconds > 300 {
             return Err("connect_timeout_seconds must be within 0..=300".to_string());
@@ -806,6 +838,14 @@ impl PluginConfig {
         }
         if self.bps_previous_response_pin_seconds > 86_400 {
             return Err("bps_previous_response_pin_seconds must be within 0..=86400".to_string());
+        }
+        // 变阻器百分比上限 99：100 等于「全额缓存」，既没有调整意义，
+        // 也会把真实用量彻底盖掉；非法值直接拒绝保存，避免运行时静默不生效。
+        if !crate::resistor::is_valid_percent(self.altman_resistor_percent) {
+            return Err(format!(
+                "altman_resistor_percent must be within 0..={}",
+                crate::resistor::MAX_PERCENT
+            ));
         }
         // 冷却上限放宽到一天：403 这类账号级拦截需要长冷却才有意义。
         for (name, value) in [
@@ -1142,6 +1182,8 @@ mod tests {
             "bps_previous_response_pin_seconds",
             "bps_scrub_echo",
             "bps_normalize_usage",
+            "altman_resistor_enabled",
+            "altman_resistor_percent",
             "bps_excel_client_profile",
             "bps_honor_retry_after",
             "bps_skip_on_hosted_tools",

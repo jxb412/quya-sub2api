@@ -367,9 +367,8 @@ fn handle_conn(
                 state.bps_auth.ensure_loaded(&path);
                 let ids: Vec<i64> = if request.all_missing {
                     // 顺带把备注里的材料刷进来，免得新写的备注还没同步就登不了。
-                    let (_report, _pending) = handle.block_on(
-                        crate::bps_auth::sync_notes_materials(&state, &config),
-                    );
+                    let (_report, _pending) =
+                        handle.block_on(crate::bps_auth::sync_notes_materials(&state, &config));
                     let base = config.admin_api_base.trim().to_string();
                     let key = config.admin_api_key.trim().to_string();
                     let targets = handle
@@ -380,9 +379,7 @@ fn handle_conn(
                         .iter()
                         .filter(|target| state.bps_auth.has_secret(target.account_id))
                         .filter(|target| {
-                            !state
-                                .bps_auth
-                                .credential_ready(target.account_id, now, 0)
+                            !state.bps_auth.credential_ready(target.account_id, now, 0)
                         })
                         .map(|target| target.account_id)
                         .collect()

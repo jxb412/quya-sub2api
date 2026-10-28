@@ -2629,6 +2629,8 @@ pub struct BpsStream {
     scrub: Option<EchoScrub>,
     /// 回程用量归一化：删掉上游 usage 里多出来的 `cache_write_tokens`。
     normalize_usage: bool,
+    /// 奥特曼变阻器：对外 usage 计量覆盖的缓存读取占比（None = 关闭）。
+    resistor_percent: Option<u8>,
     /// 流内失败的账号保护：带账号信号的 `error` / `response.failed` 改写成中性 5xx 语义。
     guard_failures: bool,
     /// 本次流是否真的中性化过失败事件（追踪用）。
@@ -2714,6 +2716,13 @@ impl BpsStream {
         self
     }
 
+    /// 奥特曼变阻器（`altman_resistor_enabled` / `altman_resistor_percent`）：
+    /// 在回程把上报的缓存读取改写成「总输入 × 百分比」，只改计量、不改请求。
+    pub fn with_altman_resistor(mut self, percent: Option<u8>) -> Self {
+        self.resistor_percent = percent.map(|value| value.min(crate::resistor::MAX_PERCENT));
+        self
+    }
+
     /// 送入一段上游字节，返回应转发给客户端的字节（可能为空）。
     pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
         self.buf.extend_from_slice(chunk);
@@ -2791,6 +2800,17 @@ impl BpsStream {
         // 上游把它的 Excel 系统提示与 21 个工具原样回显在每个带 response 对象的事件里，
         // 先换回客户端请求里的原值，再做后面的工具协议改写。
         let scrubbed = self.rewrite_echo(&mut value);
+        // Chat Completions 的帧没有 `type` 字段，usage 也可能放在帧的顶层
+        // （带 `stream_options.include_usage` 的最后一帧）。这里单独改一遍，
+        // 让下面的 `_` 分支知道要回写整帧。
+        let usage_modified = match self.resistor_percent {
+            Some(percent) => value
+                .get_mut("usage")
+                .and_then(serde_json::Value::as_object_mut)
+                .map(|usage| crate::resistor::apply(usage, percent))
+                .unwrap_or(false),
+            None => false,
+        };
         // 输出开始后的失败事件（`error` / `response.failed` / `response.cancelled`）：
         // 带账号信号时中性化，避免宿主按 401/403/429/529 处罚整个 OAuth 账号。
         let guarded = if self.guard_failures
@@ -2932,7 +2952,7 @@ impl BpsStream {
             }
             "response.completed" => Some(self.finish_response(value)),
             _ => {
-                if scrubbed || guarded {
+                if scrubbed || guarded || usage_modified {
                     Some(vec![value])
                 } else {
                     None
@@ -2956,10 +2976,21 @@ impl BpsStream {
         if self.normalize_usage {
             modified |= normalize_usage(response);
         }
+        // 归一化之后再套变阻器：先把网关多出来的缓存写入桶删掉，
+        // 这里算出来的「剩余输入」才是宿主真正会看到的普通输入。
+        modified |= self.apply_resistor(response);
         modified
     }
 
-    /// 非流式响应体（整段 JSON）：清洗回显 + usage 归一化。没有改动时返回 None（原样透传）。
+    /// 对宿主可见的 usage 施加变阻器（百分比为 None 时什么都不做）。
+    fn apply_resistor(&self, object: &mut serde_json::Map<String, serde_json::Value>) -> bool {
+        match self.resistor_percent {
+            Some(percent) => crate::resistor::apply_in_response(object, percent),
+            None => false,
+        }
+    }
+
+    /// 非流式响应体（整段 JSON）：清洗回显 + usage 归一化 + 变阻器。没有改动时返回 None（原样透传）。
     fn rewrite_json_body(&mut self, frame: &str) -> Option<Vec<u8>> {
         if !frame.trim_start().starts_with('{') {
             return None;
@@ -2976,6 +3007,8 @@ impl BpsStream {
             if self.normalize_usage {
                 modified |= normalize_usage(object);
             }
+            // Chat Completions / 裸 usage 体：usage 直接在顶层，没有 response 包装。
+            modified |= self.apply_resistor(object);
         }
         if !modified {
             return None;
@@ -4955,11 +4988,23 @@ mod tests {
         )
         .unwrap();
 
-        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["input", "metadata", "model", "reasoning_effort", "store", "stream"]
+            [
+                "input",
+                "metadata",
+                "model",
+                "reasoning_effort",
+                "store",
+                "stream"
+            ]
         );
         assert!(value["metadata"]["task_id"]
             .as_str()

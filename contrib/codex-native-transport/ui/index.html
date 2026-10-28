@@ -198,6 +198,13 @@
   </fieldset>
 
   <fieldset>
+    <legend>奥特曼变阻器（对外 usage 计量覆盖，默认关）</legend>
+    <label><span class="k">启用变阻器</span><input type="checkbox" id="altman_resistor_enabled"></label>
+    <label><span class="k">上报缓存读取占比(%)</span><input type="number" id="altman_resistor_percent" min="0" max="99" placeholder="90"></label>
+    <p class="hint">只改<b>回给宿主</b>的 usage：缓存读取 = <code>floor(总输入 × 百分比 / 100)</code>，剩余输入仍算普通输入（上游给了 <code>cache_write_tokens</code> 时先补它，其余算普通输入），三个输入桶相加始终等于原总输入，<code>input_tokens</code> / <code>prompt_tokens</code> / <code>total_tokens</code> 一律不动。上游请求、模型输出、真实缓存都不受影响。<br>适用范围：<b>BPS 通道</b>由回程改写器顺带处理，<b>正常 Codex 通道</b>另挂一层按 <code>\n\n</code> 分帧的窄过滤器（只在开关打开时创建）。百分比 <b>0</b> = 全部按普通输入计费，<b>99</b> = 几乎全部算缓存读取；这是<b>计量口径</b>，不代表真实命中率。原始 usage 缺总输入或明细自相矛盾（缓存读取 + 写入 &gt; 总输入）时保持上游原值，不伪造。思路来自 C2A V41 的 <code>altman_resistor</code>。</p>
+  </fieldset>
+
+  <fieldset>
     <legend>跨机状态同步（多台服务器共用同一批账号）</legend>
     <label><span class="k">开启跨机同步</span><input type="checkbox" id="sync_enabled"></label>
     <label><span class="k">对端面板地址（逗号分隔）</span><input type="text" id="sync_peers" placeholder="http://142.54.187.42:8848, http://107.150.62.202:8848"></label>
@@ -360,6 +367,8 @@ byId("bps_skip_on_previous_response_id").checked = config.bps_skip_on_previous_r
     byId("bps_previous_response_pin_seconds").value = config.bps_previous_response_pin_seconds != null ? config.bps_previous_response_pin_seconds : 21600;
     byId("bps_scrub_echo").checked = config.bps_scrub_echo !== false;
     byId("bps_normalize_usage").checked = config.bps_normalize_usage !== false;
+byId("altman_resistor_enabled").checked = config.altman_resistor_enabled === true;
+byId("altman_resistor_percent").value = config.altman_resistor_percent != null ? config.altman_resistor_percent : 90;
     byId("bps_skip_on_hosted_tools").checked = config.bps_skip_on_hosted_tools !== false;
     byId("bps_protect_account_status").checked = config.bps_protect_account_status !== false;
     byId("bps_honor_retry_after").checked = config.bps_honor_retry_after !== false;
@@ -448,6 +457,8 @@ bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").check
       bps_previous_response_pin_seconds: numOr(byId("bps_previous_response_pin_seconds").value, 21600),
       bps_scrub_echo: byId("bps_scrub_echo").checked,
       bps_normalize_usage: byId("bps_normalize_usage").checked,
+altman_resistor_enabled: byId("altman_resistor_enabled").checked,
+altman_resistor_percent: Math.min(99, Math.max(0, numOr(byId("altman_resistor_percent").value, 90))),
       bps_skip_on_hosted_tools: byId("bps_skip_on_hosted_tools").checked,
       bps_protect_account_status: byId("bps_protect_account_status").checked,
       bps_honor_retry_after: byId("bps_honor_retry_after").checked,

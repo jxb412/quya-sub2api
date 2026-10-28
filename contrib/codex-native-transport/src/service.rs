@@ -993,6 +993,7 @@ async fn run_forward(
                                     prepared.call_cache_scope,
                                 )
                                 .with_response_rewrite(scrub, config.bps_normalize_usage)
+                                .with_altman_resistor(config.active_resistor_percent())
                                 .with_failure_guard(config.bps_protect_account_status),
                             );
                         }
@@ -1401,6 +1402,15 @@ async fn run_forward(
     let mut stream = response.bytes_stream();
     let mut bytes_received: i64 = 0;
     let mut bps = bps_stream;
+    // 奥特曼变阻器：BPS 通道由 BpsStream 顺手改写；正常通道原样透传，
+    // 所以这里单独挂一层只在开启时存在的窄过滤器（默认关 = 完全不上这条路径）。
+    let mut resistor_stream = if bps.is_none() {
+        config
+            .active_resistor_percent()
+            .map(crate::resistor::FrameStream::new)
+    } else {
+        None
+    };
     let mut ticker = if bps_active && response_is_sse && config.bps_keepalive_seconds > 0 {
         let period = std::time::Duration::from_secs(config.bps_keepalive_seconds as u64);
         Some(tokio::time::interval_at(
@@ -1437,9 +1447,12 @@ async fn run_forward(
         };
         match chunk {
             Some(Ok(bytes)) => {
-                let payload = match bps.as_mut() {
-                    Some(rewriter) => rewriter.push(&bytes),
-                    None => bytes.to_vec(),
+                let payload = if let Some(rewriter) = bps.as_mut() {
+                    rewriter.push(&bytes)
+                } else if let Some(filter) = resistor_stream.as_mut() {
+                    filter.push(&bytes)
+                } else {
+                    bytes.to_vec()
                 };
                 if payload.is_empty() {
                     continue;
@@ -1483,6 +1496,22 @@ async fn run_forward(
     // BPS 通道：吐出末尾未成行/未完整分帧的残留字节。
     if let Some(rewriter) = bps.as_mut() {
         let rest = rewriter.finish();
+        if !rest.is_empty() {
+            bytes_received += rest.len() as i64;
+            if tx
+                .send(Ok(ForwardResponse {
+                    frame: Some(forward_response::Frame::BodyChunk(rest)),
+                }))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+    // 正常通道的变阻器过滤层：吐出末尾残留（非流式整段 JSON 也走这里）。
+    if let Some(filter) = resistor_stream.as_mut() {
+        let rest = filter.finish();
         if !rest.is_empty() {
             bytes_received += rest.len() as i64;
             if tx
