@@ -649,6 +649,9 @@ func configuredCodexGPTReasoningLevels(modelID string) []configuredCodexReasonin
 			Description: "Maximum reasoning with automatic task delegation",
 		})
 	}
+	if openai.IsGPT61TerraModelSpelling(modelID) {
+		levels = append([]configuredCodexReasoningLevel{{Effort: "none", Description: "No reasoning"}}, levels...)
+	}
 	return levels
 }
 
@@ -1890,16 +1893,17 @@ func (s *OpenAIGatewayService) fetchCachedOpenAIModels(ctx context.Context, requ
 
 func (s *OpenAIGatewayService) refreshCachedOpenAIModels(cacheKey string, request openAIModelsRequest, fetch func(ctx context.Context, ifNoneMatch string) (*OpenAIModelsResponse, error)) <-chan singleflight.Result {
 	return s.openAIModelsCache.refresh.DoChan(cacheKey, func() (any, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), codexModelsManifestRequestTimeout)
-		defer cancel()
+		cached, state := s.openAIModelsCache.get(cacheKey, time.Now())
 		// 单飞只覆盖「同时在飞」的请求：调用方可能在读到 miss/stale 之后、
 		// DoChan 之前被调度切走，等它真正进来时上一轮刷新已经写回缓存。这里
 		// 重新确认一次新鲜度，避免为同一 cacheKey 再打一次上游（冷缓存并发
-		// 请求本来只应有一次上游调用）。
-		cached, state := s.openAIModelsCache.get(cacheKey, time.Now())
+		// 请求本来只应有一次上游调用）。上游在 v0.2.19 加了同一位置的判定，
+		// 合并时保留我们更严格的 `cached != nil` 守卫，去掉重复声明。
 		if state == openAIModelsCacheFresh && cached != nil {
 			return cached, nil
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), codexModelsManifestRequestTimeout)
+		defer cancel()
 		ifNoneMatch := ""
 		if cached != nil {
 			ifNoneMatch = cached.upstreamETag
