@@ -27,6 +27,8 @@ pub struct AdminTarget {
     pub access_token: String,
     pub chatgpt_account_id: Option<String>,
     pub proxy_url: String,
+    /// 账号「简介 / 备注」原文（BPS 登录材料的来源；只在内存里流转）。
+    pub notes: String,
 }
 
 /// 由宿主导出的代理记录拼出 reqwest 可用的代理 URL。
@@ -91,13 +93,26 @@ pub struct AccountPlanRow {
 
 /// 枚举账号列表（分页取全；name -> id / status / plan_type / schedulable）。
 /// **不带 status 过滤**：暂停 / 限流 / 报错的号也要能列出来。
+/// 账号列表行（含备注）：备注里可能写着 BPS 登录材料。
+#[derive(Debug, Clone, Default)]
+pub struct AccountRow {
+    pub account_id: i64,
+    pub status: String,
+    pub plan_type: String,
+    pub schedulable: bool,
+    /// 账号「简介 / 备注」原文（可能空）。
+    pub notes: String,
+}
+
+/// 枚举账号列表（分页取全；name -> id / status / plan_type / schedulable / notes）。
+/// **不带 status 过滤**：暂停 / 限流 / 报错的号也要能列出来。
 async fn fetch_account_rows(
     client: &reqwest::Client,
     base: &str,
     key: &str,
-) -> Result<HashMap<String, (i64, String, String, bool)>, String> {
+) -> Result<HashMap<String, AccountRow>, String> {
     // 1) 列表：id / name / status / schedulable / plan_type（分页取全，不带 status 过滤）。
-    let mut rows: HashMap<String, (i64, String, String, bool)> = HashMap::new();
+    let mut rows: HashMap<String, AccountRow> = HashMap::new();
     let mut page = 1u32;
     loop {
         let url = format!(
@@ -149,7 +164,21 @@ async fn fetch_account_rows(
                 .map(str::trim)
                 .unwrap_or("")
                 .to_string();
-            rows.insert(name.to_string(), (id, status, plan_type, schedulable));
+            let notes = item
+                .get("notes")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            rows.insert(
+                name.to_string(),
+                AccountRow {
+                    account_id: id,
+                    status,
+                    plan_type,
+                    schedulable,
+                    notes,
+                },
+            );
         }
         let pages = data
             .get("pages")
@@ -173,13 +202,43 @@ pub async fn fetch_plan_rows(base: &str, key: &str) -> Result<Vec<AccountPlanRow
     let rows = fetch_account_rows(&client, base, key).await?;
     let mut out: Vec<AccountPlanRow> = rows
         .into_iter()
-        .map(
-            |(name, (account_id, _status, plan_type, _schedulable))| AccountPlanRow {
-                account_id,
-                name,
-                plan_type,
-            },
-        )
+        .map(|(name, row)| AccountPlanRow {
+            account_id: row.account_id,
+            name,
+            plan_type: row.plan_type,
+        })
+        .collect();
+    out.sort_by_key(|row| row.account_id);
+    Ok(out)
+}
+
+/// 枚举全部（含暂停/报错）OpenAI OAuth 账号，并取回可出站身份。
+/// 账号备注行：BPS 登录材料（`邮箱----密码----TOTP`）的同步目标。
+#[derive(Debug, Clone)]
+pub struct AccountNoteRow {
+    pub account_id: i64,
+    pub name: String,
+    pub notes: String,
+}
+
+/// 只取「账号 id / 名 / 备注」：备注同步按它解析 BPS 登录材料。
+///
+/// 与 `fetch_all_targets` 的区别：不拉 `/accounts/data` 的原文凭据，
+/// 少一次大响应，也避免把 access_token 读进备注同步这条链路。
+pub async fn fetch_account_notes(base: &str, key: &str) -> Result<Vec<AccountNoteRow>, String> {
+    let client = admin_client().map_err(|e| format!("build client: {e}"))?;
+    let base = base.trim().trim_end_matches('/');
+    if base.is_empty() || key.trim().is_empty() {
+        return Err("未配置 Sub2API 管理 API（admin_api_base / admin_api_key）".to_string());
+    }
+    let rows = fetch_account_rows(&client, base, key).await?;
+    let mut out: Vec<AccountNoteRow> = rows
+        .into_iter()
+        .map(|(name, row)| AccountNoteRow {
+            account_id: row.account_id,
+            name,
+            notes: row.notes,
+        })
         .collect();
     out.sort_by_key(|row| row.account_id);
     Ok(out)
@@ -261,7 +320,7 @@ pub async fn fetch_all_targets(base: &str, key: &str) -> Result<Vec<AdminTarget>
         let Some(name) = acc.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some((id, status, plan_type, schedulable)) = rows.get(name) else {
+        let Some(row) = rows.get(name) else {
             continue;
         };
         let creds = acc.get("credentials");
@@ -282,14 +341,15 @@ pub async fn fetch_all_targets(base: &str, key: &str) -> Result<Vec<AdminTarget>
             .cloned()
             .unwrap_or_default();
         out.push(AdminTarget {
-            account_id: *id,
+            account_id: row.account_id,
             name: name.to_string(),
-            plan_type: plan_type.clone(),
-            status: status.clone(),
-            schedulable: *schedulable,
+            plan_type: row.plan_type.clone(),
+            status: row.status.clone(),
+            schedulable: row.schedulable,
             access_token,
             chatgpt_account_id,
             proxy_url,
+            notes: row.notes.clone(),
         });
     }
     out.sort_by_key(|target| target.account_id);

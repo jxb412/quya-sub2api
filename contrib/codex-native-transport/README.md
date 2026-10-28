@@ -57,6 +57,19 @@
 面板里对单个账号点「降智处理」后，该账号智力不合格时不再被自动暂停，而是把
 `bps_models` 列出的模型请求改走 `bps_endpoint`；直到该号恢复合格为止。
 
+### 请求参数形态（`bps_request_style`）
+
+- `native`（默认）：保持当前生产参数，含 developer transport shim、
+  `model_selection=explicit`、`metadata`、`prompt_cache_key` 和
+  `context_management`。
+- `minimal`：复现精简中转的请求体，只发送
+  `model/input/stream/store/reasoning_effort/metadata`；纯对话不再注入
+  developer shim，也不发送 `model_selection`、`prompt_cache_key` 或
+  `context_management`。实测 BPS 缺 `metadata` 会直接 422，因此该字段必须保留。
+  工具请求仍按 `bps_tool_mode=declared` 写入 `additional_tools`，保证工具可用。
+
+该选项只用于 A/B 验证上游路由是否受请求参数影响，默认仍是 `native`。
+
 出站会按上游白名单重写请求体，这是实测出来的硬约束：
 
 - 接受：`model` / `input` / `stream` / `reasoning_effort` / `prompt_cache_key` /
@@ -276,6 +289,64 @@ UTC 时间戳 + 账号 id，超过 1MB 滚动成 `.1`）。
   输入 token 计费。删掉 `cache_write_tokens` / `cache_creation_tokens` 后按普通输入计费，
   与走正常 Codex 线路的计费口径一致。**注意**：这意味着降智通道下的计费会比之前更接近
   真实用量（之前那条线路是少收的）；如果暂时不想改变计费口径，把这个开关关掉即可。
+
+## BPS 授权（Excel 加载项 OAuth）
+
+BPS 端点只认「官方 Excel 加载项」那一路 OAuth 凭据：同账号对照实测，宿主给的 Codex
+token 打过去是 403，Excel token 打过去才是 200。授权没法在插件进程里跑（容器里没有
+node/python，也过不了 `auth.openai.com` 的 Cloudflare 托管挑战），所以交给宿主机上的
+`bps-auth` 侧车（`contrib/bps-auth`，`run-container.sh` 装法最省事）。插件只负责四件事：
+保存登录材料、触发一次授权、到期前自动刷新、BPS 出站时把宿主 bearer 换成 Excel
+access_token。
+
+主要开关：`bps_auth_enabled`（总开关，默认关）、`bps_auth_service_url` /
+`bps_auth_service_token`（侧车地址与 token）、`bps_auth_use_for_bps`（出站改用 Excel 凭据）、
+`bps_auth_auto_refresh` + `bps_auth_refresh_margin_seconds` + `bps_auth_refresh_interval_seconds`
+（到期前自动刷新）。
+
+### 登录材料来自账号备注
+
+运营把材料写在 Sub2API 账号的「简介 / 备注」里，格式 `邮箱----密码----TOTP`：
+
+- `bps_auth_notes_enabled`（默认开）按 `bps_auth_notes_sync_seconds`（默认 300s）抓回来；
+  备注里可以夹别的说明文字、可以换行；只写「邮箱----密码」时不会把已存的 TOTP 抹掉；
+- `bps_auth_notes_auto_login`（默认开）给「备注有材料、但还没有 Excel 凭据」的账号自动授权；
+- 备注里没有材料的账号不会被碰；出站时 `bps_auth_skip_without_material`（默认开）直接跳过
+  BPS 走正常通道（面板写明「没有 BPS 登录材料 / Excel 凭据，跳过 BPS」），
+  免得每个请求先白撞一次 403 再回退。
+
+### 批量登录 BPS
+
+面板 BPS 授权页：勾选若干账号点「批量登录 BPS（选中）」，或点「批量登录：所有缺凭据的账号」。
+并发由 `bps_auth_batch_concurrency` 控制（默认 2，钳 1..8；bps-auth 侧车自己也有并发上限，
+压在它附近最稳）。同一个账号不会被并发登两次 —— 手动授权与批量授权共用同一套槽位，
+跑批进度与每个账号的失败原因实时显示在页面上。
+
+### 一账号一出口（`bps_auth_proxy_template`）
+
+授权要过 `auth.openai.com` 的 Cloudflare 校验，几个号挤一个出口容易被判成机器。填了模板后
+每次授权都按它现算一个代理：
+
+```
+bps_auth_proxy_template = http://acct{account}:65423140@142.54.187.42:49000
+```
+
+- `{account}` = 账号 id，`{rand}` = 8 位随机十六进制；
+- 我们那台随机 IPv6 代理容器（142 / 107 上的 `ipv6-lease-proxy-node`，宿主端口 49000）
+  按**用户名**发独立出口、密码固定 `65423140`：同一个用户名永远对应同一个出口，租约 30 天。
+  不带 `{rand}` = 每个账号固定一个自己的出口；带 `{rand}` = 每次授权换一个新出口；
+- 另一路 `suijidaili:suijidaili2026！`（全角 `！`）是**轮换**出口、每次连接换 IP，
+  适合当全局兜底（`bps_auth_proxy_url`），不适合做「一账号一出口」；
+- 出口候选顺序：账号自己的代理 → 一账号一出口模板 → 全局 `bps_auth_proxy_url` → 直连。
+  `bps_auth_proxy_fallback`（默认开）授权前把候选各探一次（`api64.ipify.org`，20s 超时），
+  用第一个能连通的，并把「实际走了哪个出口、为什么换」写进面板的账号行（已去掉用户名密码）；
+  关掉 = 盲用优先级最高的那个（模板写错就整批授权失败）。
+
+0.4.44 在测试机实测：两个账号并发批量授权，各自落在自己的 IPv6 出口（容器里能查到
+`acct98` / `acct100` 两条租约）；把模板故意写成死代理后，插件探测失败改走全局出口并授权成功，
+面板记录「已回退，一账号一出口不可用：…」。一个已知噪声：同一个账号在一分钟内连续登两次，
+第二次可能报 `sentinel_error (stage=excel_authorize)` —— 这时账号仍保留上一枚有效凭据、
+出站不受影响，隔一会儿再登即可。
 
 ## 跨机状态同步
 

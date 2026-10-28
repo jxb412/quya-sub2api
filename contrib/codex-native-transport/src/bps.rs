@@ -100,10 +100,43 @@ impl ToolMode {
     }
 }
 
+/// BPS 请求参数形态。
+///
+/// `Native` 保持当前生产参数：transport shim、显式模型选择、会话 metadata 与
+/// prompt cache key 均发送。`Minimal` 用于复现精简中转的参数形态，只发送
+/// BPS 必需的 model/input/stream/store/reasoning_effort/metadata；纯对话不再额外注入
+/// developer shim，也不再发送 model_selection、prompt_cache_key 或
+/// context_management。metadata 不能省：BPS 缺它会直接 422。工具请求仍按桥接模式
+/// 保证工具可用。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum RequestStyle {
+    #[default]
+    Native,
+    Minimal,
+}
+
+impl RequestStyle {
+    pub fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "minimal" | "compact" | "relay" => Self::Minimal,
+            _ => Self::Native,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Minimal => "minimal",
+        }
+    }
+}
+
 /// 一次 BPS 出站的桥接选项（从插件配置派生）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeOptions {
     pub mode: ToolMode,
+    /// BPS 请求参数形态（默认 native，保持现有生产行为）。
+    pub request_style: RequestStyle,
     /// 工具目录放到提示词末尾（默认 false = 目录前置）。
     pub catalog_at_prompt_end: bool,
     /// 是否把客户端的 `prompt_cache_key` 转发给 BPS。
@@ -130,6 +163,7 @@ impl Default for BridgeOptions {
     fn default() -> Self {
         Self {
             mode: ToolMode::Text,
+            request_style: RequestStyle::Native,
             catalog_at_prompt_end: false,
             forward_prompt_cache_key: true,
             pseudonym_prompt_cache_key: true,
@@ -145,6 +179,7 @@ impl BridgeOptions {
     pub fn from_config(config: &PluginConfig) -> Self {
         Self {
             mode: ToolMode::parse(&config.bps_tool_mode),
+            request_style: RequestStyle::parse(&config.bps_request_style),
             catalog_at_prompt_end: config.bps_catalog_at_prompt_end,
             forward_prompt_cache_key: config.bps_forward_prompt_cache_key,
             pseudonym_prompt_cache_key: config.bps_pseudonym_prompt_cache_key,
@@ -669,7 +704,11 @@ pub fn prepare_request_with_session_key_scoped(
         &identity.task_id,
     );
     let mut input = Vec::with_capacity(history.len() + 2);
-    if options.catalog_at_prompt_end {
+    let minimal_without_shim = options.request_style == RequestStyle::Minimal
+        && (tools.is_empty() || options.mode == ToolMode::Declared);
+    if minimal_without_shim {
+        input.extend(history);
+    } else if options.catalog_at_prompt_end {
         // 目录后置（ghcp_proxy 的旧布局）：说明与协议照常前置，目录单独压到历史之后。
         input.push(text_message(
             "developer",
@@ -707,36 +746,8 @@ pub fn prepare_request_with_session_key_scoped(
         "reasoning_effort".to_string(),
         serde_json::Value::String(reasoning_effort),
     );
-    // Excel 插件固定声明「模型选择是显式的」，避免后端对合法模型再走一次自动路由。
-    out.insert(
-        "model_selection".to_string(),
-        serde_json::Value::String("explicit".to_string()),
-    );
-    if options.forward_prompt_cache_key {
-        if let Some(key) = conversation_key {
-            // 假名化：上游只看到「按账号作用域派生」的 UUID 形态会话键，
-            // 语义与真实 Codex 的 conversation id 一致；同一会话多轮同值，
-            // 所以缓存亲和不受影响（关掉即原样透传，用于 A/B）。
-            let outgoing = if options.pseudonym_prompt_cache_key {
-                crate::identity::scoped_identifier(&options.id_seed, &identity.scope, "cache", key)
-            } else {
-                key.to_string()
-            };
-            out.insert(
-                "prompt_cache_key".to_string(),
-                serde_json::Value::String(outgoing),
-            );
-        }
-    }
-    if options.context_management_threshold > 0 {
-        out.insert(
-            "context_management".to_string(),
-            serde_json::json!([{
-                "type": "compaction",
-                "compact_threshold": options.context_management_threshold,
-            }]),
-        );
-    }
+    // BPS 的请求体校验要求 metadata；缺掉会直接 422。metadata 同时承载本插件
+    // 的账号/会话隔离，因此 native 与 minimal 都必须发送。
     let mut metadata = serde_json::Map::new();
     metadata.insert(
         "task_id".to_string(),
@@ -753,6 +764,43 @@ pub fn prepare_request_with_session_key_scoped(
         );
     }
     out.insert("metadata".to_string(), serde_json::Value::Object(metadata));
+    if options.request_style == RequestStyle::Native {
+        // Excel 插件固定声明「模型选择是显式的」，避免后端对合法模型再走一次自动路由。
+        out.insert(
+            "model_selection".to_string(),
+            serde_json::Value::String("explicit".to_string()),
+        );
+        if options.forward_prompt_cache_key {
+            if let Some(key) = conversation_key {
+                // 假名化：上游只看到「按账号作用域派生」的 UUID 形态会话键，
+                // 语义与真实 Codex 的 conversation id 一致；同一会话多轮同值，
+                // 所以缓存亲和不受影响（关掉即原样透传，用于 A/B）。
+                let outgoing = if options.pseudonym_prompt_cache_key {
+                    crate::identity::scoped_identifier(
+                        &options.id_seed,
+                        &identity.scope,
+                        "cache",
+                        key,
+                    )
+                } else {
+                    key.to_string()
+                };
+                out.insert(
+                    "prompt_cache_key".to_string(),
+                    serde_json::Value::String(outgoing),
+                );
+            }
+        }
+        if options.context_management_threshold > 0 {
+            out.insert(
+                "context_management".to_string(),
+                serde_json::json!([{
+                    "type": "compaction",
+                    "compact_threshold": options.context_management_threshold,
+                }]),
+            );
+        }
+    }
     let body = serde_json::to_vec(&serde_json::Value::Object(out))
         .map_err(|_| PrepareError::NotApplicable)?;
     Ok(PreparedRequest {
@@ -2497,6 +2545,76 @@ impl Default for Decision {
     }
 }
 
+/// 观测上游实际服务的模型。BPS 即使 HTTP 200，也可能把请求模型路由成另一个模型；
+/// 判断路由必须看响应里的 `response.model` / `model`，不能根据回答正文猜测。
+///
+/// 规则与 sub4api 的 observer 一致：终态事件优先；终态到达前保留首个声明，
+/// 前后声明不一致时单独标记 conflict，供账号页和自检结果告警。
+#[derive(Default)]
+struct UpstreamModelObserver {
+    first: String,
+    terminal: String,
+    conflict: bool,
+}
+
+impl UpstreamModelObserver {
+    fn observe(&mut self, value: &serde_json::Value) {
+        let kind = value
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let model = value
+            .get("response")
+            .and_then(|response| response.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| value.get("model").and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(|model| model.chars().take(200).collect::<String>());
+        let Some(model) = model else {
+            return;
+        };
+        let current = self.model();
+        if !current.is_empty() && !current.eq_ignore_ascii_case(&model) {
+            self.conflict = true;
+        }
+        if matches!(
+            kind,
+            "response.completed"
+                | "response.done"
+                | "response.failed"
+                | "response.incomplete"
+                | "response.cancelled"
+                | "response.canceled"
+        ) {
+            self.terminal = model;
+        } else if self.first.is_empty() {
+            self.first = model;
+        }
+    }
+
+    fn model(&self) -> String {
+        if !self.terminal.is_empty() {
+            self.terminal.clone()
+        } else {
+            self.first.clone()
+        }
+    }
+
+    fn route_status(&self, requested_model: &str) -> &'static str {
+        let served = self.model();
+        if served.is_empty() {
+            "unknown"
+        } else if requested_model.trim().is_empty() {
+            "observed"
+        } else if requested_model.trim().eq_ignore_ascii_case(served.trim()) {
+            "matched"
+        } else {
+            "routed_elsewhere"
+        }
+    }
+}
+
 /// SSE 流式改写器。
 ///
 /// 上游把「工作簿工具调用 / 联网检索」混在同一个流里，模型又可能按协议把客户端
@@ -2515,6 +2633,8 @@ pub struct BpsStream {
     guard_failures: bool,
     /// 本次流是否真的中性化过失败事件（追踪用）。
     guarded_failure: bool,
+    /// 上游实际声明并服务的模型（BPS 路由诊断）。
+    upstream_model: UpstreamModelObserver,
     /// 目录里的调用名 → 客户端寻址目标（回程还原 namespace / custom_tool_call）。
     targets: std::collections::HashMap<String, CallTarget>,
     /// 原生工具回放缓存的账号会话作用域。绝不能只按 call_id 做进程级共享。
@@ -2660,6 +2780,9 @@ impl BpsStream {
 
     /// None = 该帧原样放行；Some(events) = 用 events 替换（空 vec = 丢弃该帧）。
     fn transform(&mut self, mut value: serde_json::Value) -> Option<Vec<serde_json::Value>> {
+        // 路由诊断只看上游声明的真实模型。HTTP 200 且正文正常并不代表模型没有被
+        // 替换，因此这里必须在所有回程改写之前观测。
+        self.upstream_model.observe(&value);
         let kind = value
             .get("type")
             .and_then(serde_json::Value::as_str)
@@ -2837,11 +2960,12 @@ impl BpsStream {
     }
 
     /// 非流式响应体（整段 JSON）：清洗回显 + usage 归一化。没有改动时返回 None（原样透传）。
-    fn rewrite_json_body(&self, frame: &str) -> Option<Vec<u8>> {
+    fn rewrite_json_body(&mut self, frame: &str) -> Option<Vec<u8>> {
         if !frame.trim_start().starts_with('{') {
             return None;
         }
         let mut value: serde_json::Value = serde_json::from_str(frame.trim()).ok()?;
+        self.upstream_model.observe(&value);
         let mut modified = false;
         if value.get("response").is_some() {
             modified |= self.rewrite_echo(&mut value);
@@ -2889,10 +3013,14 @@ impl BpsStream {
 
     /// 追踪快照（面板 `/api/bps/stream`），用于排查「工具调用没被执行」。
     pub fn trace(&self, account_id: i64, model: &str) -> serde_json::Value {
+        let served_model = self.upstream_model.model();
         serde_json::json!({
             "at_ms": crate::donor::now_ms(),
             "account_id": account_id,
-            "model": model,
+            "requested_model": model,
+            "served_model": served_model,
+            "route_status": self.upstream_model.route_status(model),
+            "model_conflict": self.upstream_model.conflict,
             "mode": self.mode.as_str(),
             "guarded_failure": self.guarded_failure,
             "inbound": self.trace_in,
@@ -4062,7 +4190,12 @@ fn iso_utc(ms: u64) -> String {
 /// 用目标账号自己的 bearer + chatgpt-account-id，按 `prepare_request` 的真实请求形状
 /// 依次试 `bps_models` 里的每个模型，回传第一个 2xx 的模型与响应片段。
 /// **不落盘、不改业务流量**，纯诊断用。
-pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: i64) -> String {
+pub async fn check(
+    state: &Arc<SharedState>,
+    config: &PluginConfig,
+    account_id: i64,
+    requested_model: Option<&str>,
+) -> String {
     let endpoint = config.bps_endpoint.trim().to_string();
     let base = config.admin_api_base.trim().to_string();
     let key = config.admin_api_key.trim().to_string();
@@ -4102,14 +4235,18 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
         "host"
     };
 
-    let models = {
-        let configured = config.bps_model_list();
-        if configured.is_empty() {
-            vec![crate::intel::DEFAULT_INTEL_MODEL.to_string()]
-        } else {
-            configured
-        }
-    };
+    let models = requested_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(|model| vec![model.to_string()])
+        .unwrap_or_else(|| {
+            let configured = config.bps_model_list();
+            if configured.is_empty() {
+                vec![crate::intel::DEFAULT_INTEL_MODEL.to_string()]
+            } else {
+                configured
+            }
+        });
     let donor = state.template.any_recent();
     let client =
         match state
@@ -4129,6 +4266,8 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
 
     let mut last_status = 0u16;
     let mut last_snippet = String::new();
+    let mut checks: Vec<serde_json::Value> = Vec::new();
+    let mut first_success: Option<(u16, String)> = None;
     for model in models {
         let probe = serde_json::json!({
             "model": model,
@@ -4231,14 +4370,24 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
                 let status = response.status().as_u16();
                 let text = response.text().await.unwrap_or_default();
                 let snippet: String = text.chars().take(600).collect();
+                let mut observed = UpstreamModelObserver::default();
+                observe_upstream_model_body(&text, &mut observed);
+                let served_model = observed.model();
+                let route_status = observed.route_status(&model);
+                checks.push(serde_json::json!({
+                    "model": model,
+                    "requested_model": model,
+                    "served_model": served_model,
+                    "route_status": route_status,
+                    "model_conflict": observed.conflict,
+                    "http_status": status,
+                    "ok": (200..300).contains(&status),
+                }));
                 if (200..300).contains(&status) {
-                    return check_report_with(
-                        true,
-                        status,
-                        "",
-                        format!("model={model}\n{snippet}"),
-                        credential_label,
-                    );
+                    if first_success.is_none() {
+                        first_success = Some((status, format!("model={model}\n{snippet}")));
+                    }
+                    continue;
                 }
                 last_status = status;
                 last_snippet = format!("model={model}\n{snippet}");
@@ -4250,14 +4399,57 @@ pub async fn check(state: &Arc<SharedState>, config: &PluginConfig, account_id: 
                     crate::transport::classify_reqwest_error(&err).code,
                     crate::transport::safe_reqwest_error(&err)
                 );
+                checks.push(serde_json::json!({
+                    "model": model,
+                    "requested_model": model,
+                    "served_model": "",
+                    "route_status": "unknown",
+                    "model_conflict": false,
+                    "http_status": 0,
+                    "ok": false,
+                    "error": last_snippet,
+                }));
             }
         }
     }
-    check_report_with(false, last_status, "", last_snippet, credential_label)
+    if let Some((status, snippet)) = first_success {
+        return check_report_with(true, status, "", snippet, credential_label, &checks);
+    }
+    check_report_with(
+        false,
+        last_status,
+        "所有模型自检均失败",
+        last_snippet,
+        credential_label,
+        &checks,
+    )
+}
+
+fn observe_upstream_model_body(body: &str, observed: &mut UpstreamModelObserver) {
+    let trimmed = body.trim_start();
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            observed.observe(&value);
+        }
+        return;
+    }
+    for line in body.lines() {
+        let Some(payload) = line
+            .trim_start()
+            .strip_prefix("data:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "[DONE]")
+        else {
+            continue;
+        };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(payload) {
+            observed.observe(&value);
+        }
+    }
 }
 
 fn check_report(ok: bool, status: u16, error: &str, snippet: String) -> String {
-    check_report_with(ok, status, error, snippet, "")
+    check_report_with(ok, status, error, snippet, "", &[])
 }
 
 /// `credential` 说明这次自检用的是哪一份凭据：`excel` = BPS 官方 Excel 授权，
@@ -4268,6 +4460,7 @@ fn check_report_with(
     error: &str,
     snippet: String,
     credential: &str,
+    checks: &[serde_json::Value],
 ) -> String {
     serde_json::json!({
         "ok": ok,
@@ -4275,6 +4468,7 @@ fn check_report_with(
         "error": error,
         "snippet": snippet,
         "credential": credential,
+        "checks": checks,
     })
     .to_string()
 }
@@ -4282,6 +4476,29 @@ fn check_report_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upstream_model_observer_prefers_terminal_and_detects_routing() {
+        let mut observed = UpstreamModelObserver::default();
+        observed.observe(&serde_json::json!({
+            "type": "response.created",
+            "response": {"model": "gpt-5.6-luna"}
+        }));
+        observed.observe(&serde_json::json!({
+            "type": "response.completed",
+            "response": {"model": "gpt-6-astra"}
+        }));
+        assert_eq!(observed.model(), "gpt-6-astra");
+        assert!(observed.conflict);
+        assert_eq!(observed.route_status("gpt-6-astra"), "matched");
+
+        let mut routed = UpstreamModelObserver::default();
+        observe_upstream_model_body(
+            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"model\":\"gpt-5.6-luna\"}}\n\n",
+            &mut routed,
+        );
+        assert_eq!(routed.route_status("gpt-6-astra"), "routed_elsewhere");
+    }
 
     fn frames(bytes: &[u8]) -> Vec<serde_json::Value> {
         String::from_utf8_lossy(bytes)
@@ -4708,6 +4925,62 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("图片附件已由传输层省略"));
+    }
+
+    #[test]
+    fn minimal_style_sends_only_relay_core_fields_and_keeps_declared_tools() {
+        let body = serde_json::json!({
+            "model": "gpt-6-astra",
+            "instructions": "client instructions must not be forwarded in minimal style",
+            "input": "只回复知识库年份",
+            "stream": true,
+            "store": false,
+            "prompt_cache_key": "caller-cache-key",
+            "reasoning": {"effort": "low"},
+            "tools": [{
+                "type": "function",
+                "name": "ping",
+                "description": "ping",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        })
+        .to_string();
+        let options = BridgeOptions {
+            mode: ToolMode::Declared,
+            request_style: RequestStyle::Minimal,
+            ..BridgeOptions::default()
+        };
+        let value: serde_json::Value = serde_json::from_slice(
+            &prepare_request(body.as_bytes(), Some("acct:1"), &options).unwrap(),
+        )
+        .unwrap();
+
+        let mut keys: Vec<&str> = value.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["input", "metadata", "model", "reasoning_effort", "store", "stream"]
+        );
+        assert!(value["metadata"]["task_id"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()));
+        assert!(value["metadata"]["turn_id"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()));
+        assert!(value["metadata"]["agent_iteration"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()));
+        assert!(value.get("model_selection").is_none());
+        assert!(value.get("prompt_cache_key").is_none());
+        assert!(!value
+            .to_string()
+            .contains("client instructions must not be forwarded"));
+        assert!(value["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.get("type").and_then(serde_json::Value::as_str)
+                == Some("additional_tools")));
     }
 
     #[test]

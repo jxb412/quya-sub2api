@@ -192,10 +192,16 @@ fn handle_conn(
         }
         ("POST", "/api/bps/check") => {
             let account_id = query_get(&req.query, "id").and_then(|v| v.parse::<i64>().ok());
+            let model = query_get(&req.query, "model");
             match account_id {
                 Some(account_id) => {
                     let cfg = state.current_config();
-                    let report = handle.block_on(crate::bps::check(&state, &cfg, account_id));
+                    let report = handle.block_on(crate::bps::check(
+                        &state,
+                        &cfg,
+                        account_id,
+                        model.as_deref(),
+                    ));
                     write_response(&mut stream, 200, "application/json", report.as_bytes())
                 }
                 None => write_response(
@@ -322,6 +328,85 @@ fn handle_conn(
                 crate::bps_auth::probe_health(&spawned, &config).await;
             });
             write_response(&mut stream, 200, "application/json", b"{\"started\":true}")
+        }
+        ("POST", "/api/bps-auth/notes-sync") => {
+            let config = state.current_config();
+            let spawned = Arc::clone(state);
+            handle.spawn(async move {
+                let report = crate::bps_auth::sync_notes_once(&spawned, &config).await;
+                if !report.ok {
+                    eprintln!(
+                        "[codex-native-transport] bps notes sync failed: {}",
+                        report.error
+                    );
+                }
+            });
+            write_response(&mut stream, 200, "application/json", b"{\"started\":true}")
+        }
+        ("POST", "/api/bps-auth/batch-login") => {
+            // 批量授权：把勾选的账号（或「所有还没有凭据的账号」）交给同一条批量通道，
+            // 并发按配置、每个账号单独取出口（配了代理模板的话）。
+            #[derive(serde::Deserialize, Default)]
+            struct BatchLoginRequest {
+                #[serde(default)]
+                ids: Vec<i64>,
+                #[serde(default)]
+                all_missing: bool,
+                #[serde(default)]
+                concurrency: Option<u32>,
+            }
+            let config = state.current_config();
+            let body = if !config.bps_auth_enabled {
+                json_error("BPS 授权未开启（插件配置里打开「BPS 授权」总开关）")
+            } else if state.bps_auth.is_running() {
+                json_error("已有授权任务在进行中，等它跑完再批量登录")
+            } else {
+                let request: BatchLoginRequest =
+                    serde_json::from_slice(&req.body).unwrap_or_default();
+                let path = crate::bps_auth::state_file(&config);
+                state.bps_auth.ensure_loaded(&path);
+                let ids: Vec<i64> = if request.all_missing {
+                    // 顺带把备注里的材料刷进来，免得新写的备注还没同步就登不了。
+                    let (_report, _pending) = handle.block_on(
+                        crate::bps_auth::sync_notes_materials(&state, &config),
+                    );
+                    let base = config.admin_api_base.trim().to_string();
+                    let key = config.admin_api_key.trim().to_string();
+                    let targets = handle
+                        .block_on(crate::admin::fetch_all_targets(&base, &key))
+                        .unwrap_or_default();
+                    let now = crate::donor::now_ms();
+                    targets
+                        .iter()
+                        .filter(|target| state.bps_auth.has_secret(target.account_id))
+                        .filter(|target| {
+                            !state
+                                .bps_auth
+                                .credential_ready(target.account_id, now, 0)
+                        })
+                        .map(|target| target.account_id)
+                        .collect()
+                } else {
+                    request.ids.clone()
+                };
+                if ids.is_empty() {
+                    json_error("没有需要授权的账号（勾选的账号没有登录材料 / 都已有凭据）")
+                } else {
+                    let options = crate::bps_auth::BatchOptions::from_config(&config)
+                        .with_concurrency(request.concurrency);
+                    let spawned = Arc::clone(state);
+                    handle.spawn(async move {
+                        let outcome =
+                            crate::bps_auth::run_batch_login(&spawned, &config, ids, options).await;
+                        eprintln!(
+                            "[codex-native-transport] bps batch login done: total={} ok={} failed={} skipped={}",
+                            outcome.total, outcome.ok, outcome.failed, outcome.skipped
+                        );
+                    });
+                    "{\"started\":true}".to_string()
+                }
+            };
+            write_response(&mut stream, 200, "application/json", body.as_bytes())
         }
         ("POST", "/api/bps-auth/clear") => {
             let account_id =
@@ -486,6 +571,7 @@ fn status_json(state: &Arc<SharedState>) -> String {
         "bps_enabled": config.bps_enabled,
         "bps_endpoint": config.bps_endpoint,
         "bps_models": config.bps_model_list(),
+        "bps_request_style": config.bps_request_style,
         "bps_official_client_only": config.bps_official_client_only,
         "bps_origin": config.bps_origin,
         "bps_user_agent": config.bps_user_agent,
@@ -727,6 +813,9 @@ fn bps_auth_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
     let accounts: Vec<serde_json::Value> = targets
         .iter()
         .map(|target| {
+            // 备注里的登录材料（`邮箱----密码----TOTP`）：面板只回「有没有 / 带不带 TOTP」，
+            // 密码本身绝不出现在 JSON 里。
+            let material = crate::bps_auth::parse_account_material(&target.notes);
             serde_json::json!({
                 "id": target.account_id,
                 "name": target.name,
@@ -735,6 +824,10 @@ fn bps_auth_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
                 "plan_label": plan_label(&target.plan_type),
                 "status": target.status,
                 "schedulable": target.schedulable,
+                "notes_material": material.is_some(),
+                "notes_totp": material
+                    .map(|secret| !secret.totp_secret.is_empty())
+                    .unwrap_or(false),
                 "auth": state.bps_auth.view(target.account_id, now),
             })
         })
@@ -760,6 +853,14 @@ fn bps_auth_accounts_json(state: &Arc<SharedState>, handle: &Handle) -> String {
         "default_proxy": config.bps_auth_proxy_url,
         "health": state.bps_auth.health(),
         "run": state.bps_auth.run_state(),
+        "notes_enabled": config.bps_auth_notes_enabled,
+        "notes_auto_login": config.bps_auth_notes_auto_login,
+        "notes_sync_seconds": config.bps_auth_notes_sync_seconds,
+        "skip_without_material": config.bps_auth_skip_without_material,
+        "notes_sync": state.bps_auth.notes_sync_report(),
+        "batch": state.bps_auth.batch_state(),
+        "batch_concurrency": config.bps_auth_batch_concurrency,
+        "proxy_per_account": !config.bps_auth_proxy_template.trim().is_empty(),
         "plans": plans,
         "error": error,
         "accounts": accounts,
@@ -1141,9 +1242,12 @@ async function rowAction(btn){
     } else if(act === 'degrade'){
       await api(`/api/degrade?id=${id}&enabled=${btn.dataset.on}`, {method:'POST'});
     } else if(act === 'bps'){
-      const resp = await api('/api/bps/check?id=' + id, {method:'POST'});
+      const model = prompt('BPS 自检模型（留空则检查配置列表）', 'gpt-6-astra');
+      if(model === null) { btn.disabled = false; return; }
+      const resp = await api('/api/bps/check?id=' + id + (model.trim() ? '&model=' + encodeURIComponent(model.trim()) : ''), {method:'POST'});
       const report = await resp.json();
-      alert('HTTP ' + (report.status || '-') + '\n' + (report.error || '') + '\n' + (report.snippet || ''));
+      const checks = (report.checks || []).map(c => `${c.requested_model} -> ${c.served_model || '未知'}  ${c.route_status || ''}  HTTP ${c.http_status || '-'}`).join('\n');
+      alert('HTTP ' + (report.status || '-') + '\n' + (report.error || '') + '\n' + checks + (checks ? '\n\n' : '') + (report.snippet || ''));
       btn.disabled = false;
       return;
     } else if(act === 'restore-models'){
@@ -1251,7 +1355,9 @@ const BPS_AUTH_HTML: &str = r##"<!DOCTYPE html>
   <div class="sub">
     BPS 端点只认官方 Excel 加载项那一路 OAuth 凭据，宿主给的 Codex bearer 打过去会被 403。
     在这里给账号填一次登录密码（+ TOTP 密钥），插件会走宿主机 <span class="mono">bps-auth</span>
-    服务自动完成授权，并在到期前自动刷新。<b>页面不保存也不回显密码，只上行一次。</b>
+    服务自动完成授权，并在到期前自动刷新。<b>页面不保存也不回显密码，只上行一次。</b><br>
+    登录材料也可以直接写在 Sub2API 账号的「简介 / 备注」里（<span class="mono">邮箱----密码----TOTP</span>），
+    插件会定时抓取并自动授权；备注里没有材料的账号<b>不走 BPS</b>，直接走正常通道。
   </div>
 
   <div class="card" id="head"></div>
@@ -1266,6 +1372,7 @@ const BPS_AUTH_HTML: &str = r##"<!DOCTYPE html>
       <label><input type="checkbox" id="only-pending"> 只看未授权 / 失败</label>
       <button class="ghost" id="reload">刷新</button>
       <button class="ghost" id="probe">探活 bps-auth</button>
+      <button class="ghost" id="notes-sync">立即同步账号备注</button>
       <span class="muted" id="count"></span>
     </div>
   </div>
@@ -1290,6 +1397,11 @@ const BPS_AUTH_HTML: &str = r##"<!DOCTYPE html>
       <button id="auth-sel">批量：保存并授权（选中）</button>
       <button class="ghost" id="refresh-sel">批量：立即刷新（选中）</button>
       <span class="muted">批量只对已经填过密码的账号生效。一次授权约 60~150 秒（要过 Cloudflare 校验），插件同一时间只跑一个。</span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="batch-sel">批量登录 BPS（选中的账号）</button>
+      <button class="ghost" id="batch-missing">批量登录：所有缺凭据的账号</button>
+      <span class="muted">走后台批量通道：并发按插件配置，配了「授权出口模板」时每个账号单独取一个出口，同时处理的账号不会挤同一个 IP。</span>
     </div>
   </div>
 </div>
@@ -1355,11 +1467,48 @@ function renderHead(){
     runText = (run.error ? '<span class="err">上次失败：' + esc(run.error) + '</span>' : '<span class="oktext">上次成功</span>') + '（' + fmtTs(run.finished_at_ms) + '）';
   }
   const err = data.error ? '<div class="err">读取账号失败：' + esc(data.error) + '</div>' : '';
+  const b = data.batch || {};
+  let batchText;
+  if(b.running){
+    batchText = '<span class="pill warn">进行中</span> ' + Number(b.done || 0) + '/' + Number(b.total || 0) +
+      '（成功 ' + Number(b.ok || 0) + ' · 失败 ' + Number(b.failed || 0) + ' · 并发 ' + Number(b.concurrency || 0) + '）' +
+      ' · 当前 <span class="mono">#' + Number(b.account_id || 0) + '</span> ' + esc(b.stage || '');
+  } else if(b.finished_at_ms){
+    batchText = '<span class="pill ' + (b.failed ? 'warn' : 'ok') + '">' + fmtTs(b.finished_at_ms) + '</span>' +
+      ' 共 ' + Number(b.total || 0) + ' · 成功 ' + Number(b.ok || 0) + ' · 失败 ' + Number(b.failed || 0) +
+      (b.skipped ? ' · 跳过（没有登录材料）' + Number(b.skipped) : '') +
+      (b.error ? '<div class="err">最近失败：' + esc(b.error) + '</div>' : '');
+  } else {
+    batchText = '<span class="pill off">还没跑过</span>';
+  }
+  const n = data.notes_sync || {};
+  let notesText;
+  if(!data.notes_enabled){
+    notesText = '<span class="pill off">未开启</span>（不读账号备注，只能手动填密码）';
+  } else if(!n.at_ms){
+    notesText = '<span class="pill off">还没跑过</span>（等后台巡检，或点「立即同步账号备注」）';
+  } else if(!n.ok){
+    notesText = '<span class="pill bad">失败</span> <span class="err">' + esc(n.error || '') + '</span>';
+  } else {
+    notesText = '<span class="pill ' + (n.with_material ? 'ok' : 'off') + '">' + fmtTs(n.at_ms) + '</span>' +
+      ' 扫描 ' + Number(n.scanned || 0) + ' · 有材料 ' + Number(n.with_material || 0) +
+      ' · 材料变更 ' + Number(n.changed || 0) + ' · 排队授权 ' + Number(n.queued || 0) +
+      (n.login_ok ? ' · 授权成功 ' + Number(n.login_ok) : '') +
+      (n.login_failed ? ' · <span class="err">授权失败 ' + Number(n.login_failed) + '</span>' : '') +
+      (n.login_error ? '<div class="err">最近失败：' + esc(n.login_error) + '</div>' : '') +
+      '<div class="muted">没有材料的账号共 ' + Number(n.skipped || 0) + ' 个，跳过 BPS 走正常通道；每 ' +
+      Number(data.notes_sync_seconds || 300) + ' 秒自动同步一次。</div>';
+  }
   document.getElementById('head').innerHTML =
-    '插件版本 <b>' + esc(data.version) + '</b> · BPS 授权 ' + enabled + ' · ' + esc(useForBps) + ' · 自动刷新 ' + (data.auto_refresh ? '开' : '关') + '<br>' +
+    '插件版本 <b>' + esc(data.version) + '</b> · BPS 授权 ' + enabled + ' · ' + esc(useForBps) +
+    ' · 自动刷新 ' + (data.auto_refresh ? '开' : '关') +
+    ' · 无材料跳过 BPS ' + (data.skip_without_material ? '开' : '关') + '<br>' +
     'bps-auth 服务 <span class="mono">' + esc(data.service_url || '') + '</span> ' + service +
     (h.detail ? '<div class="muted mono">' + esc(h.detail) + '</div>' : '') +
     '<div class="muted">状态文件（含密码，权限 0600）<span class="mono">' + esc(data.state_file || '（未配置，授权无法保存）') + '</span> · 授权出口代理 <span class="mono">' + esc(data.default_proxy || '直连') + '</span></div>' +
+    '<div class="muted">备注同步 ' + notesText + '</div>' +
+    '<div class="muted">批量授权 ' + batchText + ' · 并发 ' + Number(data.batch_concurrency || 2) +
+    ' · ' + (data.proxy_per_account ? '<span class="oktext">每个账号单独取出口</span>' : '用账号自己 / 全局代理') + '</div>' +
     '当前任务 ' + runText + (busyMsg ? ' <span class="muted">' + esc(busyMsg) + '</span>' : '') + err;
 }
 
@@ -1421,14 +1570,19 @@ function render(){
       '<span class="muted">密码只在上行时使用一次，不写入日志。</span>',
       '</div>'
     ].join('');
+    const notesPill = r.notes_material
+      ? '<span class="pill ok">备注有材料' + (r.notes_totp ? ' +TOTP' : '') + '</span>'
+      : '<span class="pill off">备注无材料</span>';
     const authInfo = [
       authPill(a),
+      ' ' + notesPill,
       '<div class="muted">',
       a.has_credential ? ('剩余 ' + fmtLeft(a.remaining_seconds) + '（' + fmtTs(a.expires_at_ms) + ' 到期）') : '还没有 Excel 凭据',
       a.obtained_at_ms ? '<br>授权于 ' + fmtTs(a.obtained_at_ms) : '',
       a.refreshed_at_ms ? '<br>最近刷新 ' + fmtTs(a.refreshed_at_ms) : '',
       a.workspace_hint ? '<br>workspace ' + esc(a.workspace_hint) + '…' : '',
       a.last_error ? '<br><span class="err">' + esc(a.last_error) + '</span>（' + fmtTs(a.last_error_at_ms) + '）' : '',
+      a.proxy_note ? '<br>' + esc(a.proxy_note) + (a.proxy_note_at_ms ? '（' + fmtTs(a.proxy_note_at_ms) + '）' : '') : '',
       '</div>'
     ].join('');
     return [
@@ -1565,6 +1719,28 @@ document.getElementById('probe').onclick = async () => {
   try { await post('/api/bps-auth/probe', {}); } catch(ex){ busyMsg = ex.message; }
   setTimeout(() => load(), 1500);
 };
+document.getElementById('notes-sync').onclick = async () => {
+  try { await post('/api/bps-auth/notes-sync', {}); } catch(ex){ busyMsg = ex.message; }
+  busyMsg = '已开始同步账号备注（含自动授权，可能要几十秒到几分钟）';
+  render();
+  setTimeout(() => load(), 3000);
+};
+async function batchLogin(payload){
+  const out = await post('/api/bps-auth/batch-login', payload);
+  busyMsg = (out && out.error)
+    ? out.error
+    : '批量授权已开始（' + (payload.all_missing ? '所有缺凭据的账号' : payload.ids.length + ' 个账号') + '），进度见上面的「批量授权」';
+  render();
+  setTimeout(() => load(), 2000);
+}
+document.getElementById('batch-sel').onclick = () => {
+  const ids = Array.from(selected);
+  if(!ids.length){ alert('先勾选账号'); return; }
+  batchLogin({ids: ids}).catch(ex => { busyMsg = ex.message; render(); });
+};
+document.getElementById('batch-missing').onclick = () => {
+  batchLogin({all_missing: true}).catch(ex => { busyMsg = ex.message; render(); });
+};
 
 async function load(){
   try{
@@ -1573,6 +1749,8 @@ async function load(){
     data = await r.json();
     document.getElementById('errbox').style.display = 'none';
     render();
+    // 批量在跑时快一点轮询，方便盯着进度。
+    if(data.batch && data.batch.running){ setTimeout(() => load(), 3000); }
   }catch(ex){
     document.getElementById('errbox').style.display = '';
     document.getElementById('errbox').innerHTML = '<span class="err">加载失败: ' + esc(ex.message) + '（检查 URL 里的 ?token=）</span>';

@@ -148,6 +148,15 @@ pub struct PluginConfig {
     pub bps_endpoint: String,
     /// 走 BPS 通道的模型列表（空 = gpt-6-astra + gpt-5.6-sol）。
     pub bps_models: Vec<String>,
+    /// BPS 请求参数形态：
+    /// native  = 当前生产参数，带 developer shim、model_selection、metadata 与
+    ///           prompt_cache_key（默认）；
+    /// minimal = 精简中转 A/B 参数，只发送 model/input/stream/store/
+    ///           reasoning_effort/metadata，纯对话不注入 developer shim，也不发送
+    ///           model_selection / prompt_cache_key / context_management。工具请求
+    ///           仍按 bps_tool_mode 保证可用；metadata 是 BPS 必填校验，不能省略。
+    /// 该选项用于验证中转参数是否影响上游路由，默认保持 native。
+    pub bps_request_style: String,
     /// BPS 工具桥接方案（默认 text）：
     /// text     = 客户端工具目录 + 一行 JSON 文本协议，历史工具项转文本（默认）；
     /// native   = 历史 function_call / function_call_output 保持原生 item 形状回放，
@@ -321,6 +330,47 @@ pub struct PluginConfig {
     pub bps_auth_login_timeout_seconds: u32,
     /// 授权用的出口代理（空 = 直连；机房 IP 常过不了 Cloudflare 校验，建议填住宅代理池）。
     pub bps_auth_proxy_url: String,
+    /// 从宿主账号备注（notes）里读 BPS 登录材料：`邮箱----密码----TOTP`。
+    ///
+    /// 运营把账号的登录材料写进 Sub2API 账号的「简介 / 备注」字段（可以夹在别的
+    /// 说明文字里），插件按 `bps_auth_notes_sync_seconds` 周期调宿主管理 API 抓回来，
+    /// 自动写进凭据仓并按需触发一次 BPS 授权。备注里没有材料的账号保持原样
+    /// （可以继续在面板手填），不会因为备注为空就把已有材料清掉。
+    pub bps_auth_notes_enabled: bool,
+    /// 备注里有材料、但账号还没有可用 Excel 凭据时，自动跑一次授权（默认 true）。
+    pub bps_auth_notes_auto_login: bool,
+    /// 备注同步周期（秒，钳到 60..=86400，默认 300）。
+    pub bps_auth_notes_sync_seconds: u32,
+    /// 没有可用 Excel 凭据的账号跳过 BPS、直接走正常通道（默认 true）。
+    ///
+    /// BPS 端点只认官方 Excel 插件那一路 OAuth：宿主 bearer 打过去一律 403（实测），
+    /// 而 403 会连带触发「自动摘除模型」，把账号上的模型摘 6 小时。
+    ///
+    /// 这个门禁**不受 BPS 授权总开关影响**（`bps_auth_use_for_bps` 为 false 时除外，
+    /// 那表示明确要求沿用宿主 bearer）：总开关关着时没有任何账号有 Excel 凭据，
+    /// 等价于 BPS 通道整体停用，不会再拿宿主 bearer 去撞 403。
+    pub bps_auth_skip_without_material: bool,
+    /// 批量授权（面板「批量登录 BPS」与备注自动授权共用）的并发数（默认 2，钳到 1..=8）。
+    ///
+    /// bps-auth 服务自己也有并发上限（`BPS_AUTH_CONCURRENCY`，默认 2），插件这侧压在
+    /// 它附近即可：超出的请求只会在服务端排队，一次压太多反而让每个授权都变慢。
+    pub bps_auth_batch_concurrency: u32,
+    /// 「一个账号一个登录出口」的代理模板（空 = 用账号自己的 / 全局 `bps_auth_proxy_url`）。
+    ///
+    /// 授权要过 `auth.openai.com` 的 Cloudflare 校验：同一个出口连着登好几个账号容易被
+    /// 判成机器。填了模板后，每次授权都按它现算一个代理，例（我们的随机 IPv6 代理容器）：
+    /// `http://acct{account}-{rand}:65423140@142.54.187.42:49000`。
+    /// 占位符：`{account}` = 账号 id，`{rand}` = 8 位随机十六进制。
+    /// 不带 `{rand}` 时同一个账号每次都用同一个出口（代理容器按用户名发一张 30 天租约的
+    /// 独立 IPv6）；带上 `{rand}` 则每次授权换一个新出口（旧租约到期自动回收）。
+    pub bps_auth_proxy_template: String,
+    /// 出口连不通时按优先级往下回退（默认 true）。
+    ///
+    /// 候选顺序：账号自己的代理 → 一账号一出口模板 → 全局 `bps_auth_proxy_url` → 直连。
+    /// 开着时每次授权前先拿候选出口探一次（`https://api64.ipify.org`，20 秒超时），
+    /// 用第一个能连通的，并把「实际用了哪个出口、为什么换」写进面板的账号行。
+    /// 关掉 = 盲用优先级最高的那个（旧行为），模板写错就整批授权失败。
+    pub bps_auth_proxy_fallback: bool,
     /// 跨机状态同步总开关（默认关）。
     ///
     /// 两台服务器共用同一批账号（同一份 PG）时，同一个账号在两台上是同一个上游
@@ -449,6 +499,7 @@ impl Default for PluginConfig {
             bps_enabled: false,
             bps_endpoint: "https://bps.openai.com/basispoints/api/responses".to_string(),
             bps_models: Vec::new(),
+            bps_request_style: "native".to_string(),
             bps_tool_mode: "text".to_string(),
             bps_catalog_at_prompt_end: false,
             bps_forward_prompt_cache_key: true,
@@ -483,6 +534,13 @@ impl Default for PluginConfig {
             bps_auth_refresh_interval_seconds: 300,
             bps_auth_login_timeout_seconds: 300,
             bps_auth_proxy_url: String::new(),
+            bps_auth_notes_enabled: true,
+            bps_auth_notes_auto_login: true,
+            bps_auth_notes_sync_seconds: 300,
+            bps_auth_skip_without_material: true,
+            bps_auth_batch_concurrency: 2,
+            bps_auth_proxy_template: String::new(),
+            bps_auth_proxy_fallback: true,
             sync_enabled: false,
             sync_peers: Vec::new(),
             sync_token: String::new(),
@@ -505,6 +563,7 @@ const VALID_PROFILES: &[&str] = &[
 const VALID_FINGERPRINT_MODES: &[&str] = &["passthrough", "machine"];
 
 const VALID_BPS_TOOL_MODES: &[&str] = &["text", "native", "officejs", "declared"];
+const VALID_BPS_REQUEST_STYLES: &[&str] = &["native", "minimal"];
 
 impl PluginConfig {
     pub fn parse(raw: &[u8]) -> Result<Self, String> {
@@ -531,6 +590,11 @@ impl PluginConfig {
         if self.identity.installation_id_seed.trim().is_empty() {
             self.identity.installation_id_seed = generate_seed();
         }
+        // 备注同步周期：太密没意义（一次要拉全量账号），太疏新号迟迟拿不到凭据。
+        self.bps_auth_notes_sync_seconds = self.bps_auth_notes_sync_seconds.clamp(60, 86_400);
+        // 批量授权并发：下限 1，上限 8（再多也只是在 bps-auth 侧排队）。
+        self.bps_auth_batch_concurrency = self.bps_auth_batch_concurrency.clamp(1, 8);
+        self.bps_auth_proxy_template = self.bps_auth_proxy_template.trim().to_string();
     }
 
     /// 指纹总开关（normalize 后恒为 Some；新安装默认 true = 每账号隔离）。
@@ -789,6 +853,12 @@ impl PluginConfig {
             if self.bps_origin.len() > 256 {
                 return Err("bps_origin must be within 0..=256 bytes".to_string());
             }
+        }
+        if !VALID_BPS_REQUEST_STYLES.contains(&self.bps_request_style.trim()) {
+            return Err(format!(
+                "bps_request_style must be one of {}",
+                VALID_BPS_REQUEST_STYLES.join("/")
+            ));
         }
         if !VALID_PROFILES.contains(&self.identity.profile.as_str()) {
             return Err(format!(
@@ -1054,6 +1124,7 @@ mod tests {
             "bps_enabled",
             "bps_endpoint",
             "bps_models",
+            "bps_request_style",
             "bps_tool_mode",
             "bps_catalog_at_prompt_end",
             "bps_forward_prompt_cache_key",
@@ -1077,6 +1148,23 @@ mod tests {
             "bps_protect_account_status",
             "bps_keepalive_seconds",
             "bps_http2_fallback",
+            "bps_auth_enabled",
+            "bps_auth_service_url",
+            "bps_auth_service_token",
+            "bps_auth_state_path",
+            "bps_auth_use_for_bps",
+            "bps_auth_auto_refresh",
+            "bps_auth_refresh_margin_seconds",
+            "bps_auth_refresh_interval_seconds",
+            "bps_auth_login_timeout_seconds",
+            "bps_auth_proxy_url",
+            "bps_auth_notes_enabled",
+            "bps_auth_notes_auto_login",
+            "bps_auth_notes_sync_seconds",
+            "bps_auth_skip_without_material",
+            "bps_auth_batch_concurrency",
+            "bps_auth_proxy_template",
+            "bps_auth_proxy_fallback",
             "degrade_state_path",
             "sync_enabled",
             "sync_peers",

@@ -849,6 +849,26 @@ async fn run_forward(
                 );
             }
         }
+        // 登录材料门禁（默认开）：BPS 端点只认官方 Excel 加载项那一路 OAuth，没有 Excel
+        // 凭据的账号拿宿主 bearer 打过去必 403（同账号对照实测），白撞一次再回退。材料来自
+        // 账号「简介 / 备注」（`邮箱----密码----TOTP`，后台备注同步抓取）或面板手填；
+        // 两处都没有、或授权还没跑出凭据的账号，这条直接走正常通道。
+        if use_bps
+            && config.bps_auth_skip_without_material
+            && !crate::bps_auth::outbound_credential_ready(&state, &config, start.account_id, now)
+        {
+            use_bps = false;
+            // 原因里区分「总开关没开」和「这个号还没授权」：前者是配置问题，
+            // 后者等一轮自动授权就能自己好，两种在处理上完全不一样。
+            let reason = if config.bps_auth_enabled {
+                "该账号还没有 BPS 登录材料 / Excel 凭据，跳过 BPS 走正常通道"
+            } else {
+                "BPS 授权总开关未开（没有任何账号有 Excel 凭据），跳过 BPS 走正常通道"
+            };
+            state
+                .channels
+                .set_last_reason(start.account_id, reason.to_string(), now);
+        }
         // previous_response_id 门禁的现场记录：只在少见的续写会话上写一行，
         // 方便排查「这条会话为什么没走 BPS / 为什么钉不住」。
         if has_prev_id || previous_response_blocks_bps || pinned_normal {

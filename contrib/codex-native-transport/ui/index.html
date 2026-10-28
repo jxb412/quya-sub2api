@@ -92,6 +92,12 @@
     <div class="row">
       <button id="gen-token">生成随机 token</button>
       <button id="open-intel">打开智力巡检页</button>
+      <span class="hint" id="open-intel-hint"></span>
+    </div>
+    <div class="row" id="panel-url-row" style="display:none">
+      <input type="text" id="panel-url" readonly>
+      <button class="ghost" id="panel-url-copy">复制地址</button>
+      <span class="hint" id="panel-url-hint"></span>
     </div>
   </fieldset>
 
@@ -135,6 +141,13 @@
     <label><span class="k">开启 BPS 降智通道</span><input type="checkbox" id="bps_enabled"></label>
     <label><span class="k">BPS 端点</span><input type="text" id="bps_endpoint" placeholder="https://bps.openai.com/basispoints/api/responses"></label>
     <label><span class="k">走 BPS 的模型（逗号分隔）</span><input type="text" id="bps_models" placeholder="gpt-6-astra, gpt-5.6-sol"></label>
+    <label><span class="k">BPS 请求参数形态</span>
+      <select id="bps_request_style">
+        <option value="native">native：当前生产参数（shim + explicit + metadata）</option>
+        <option value="minimal">minimal：精简中转 A/B（核心字段 + 必填 metadata）</option>
+      </select>
+    </label>
+    <p class="hint">minimal 只发送 <code>model/input/stream/store/reasoning_effort/metadata</code>，纯对话不注入 developer shim，也不发送 <code>model_selection/prompt_cache_key/context_management</code>。实测 BPS 缺 <code>metadata</code> 会直接 422，因此该字段必须保留；用于验证其余参数是否影响上游路由。默认 native。</p>
     <label><span class="k">工具桥接方案</span>
       <select id="bps_tool_mode">
         <option value="text">text：一行 JSON 文本协议（默认，实测最稳）</option>
@@ -209,7 +222,19 @@
     <label><span class="k">刷新巡检周期(秒)</span><input type="number" id="bps_auth_refresh_interval_seconds" min="60" max="86400" placeholder="300"></label>
     <label><span class="k">单次授权超时(秒)</span><input type="number" id="bps_auth_login_timeout_seconds" min="60" max="1800" placeholder="300"></label>
     <label><span class="k">密码 / 凭据落盘路径</span><input type="text" id="bps_auth_state_path" placeholder="（空=与巡检结论同目录）"></label>
-    <div class="row"><button id="open-bpsauth">打开 BPS 授权页</button></div>
+    <label><span class="k">从账号备注读登录材料</span><input type="checkbox" id="bps_auth_notes_enabled"></label>
+    <p class="hint">把 <code>邮箱----密码----TOTP</code> 写在 Sub2API 账号的「简介 / 备注」里（可以夹在别的说明文字、可以换行），插件按下面的周期抓回来写进凭据仓。备注里没有材料的账号不动、也不会清掉已存材料。</p>
+    <label><span class="k">备注里有材料就自动授权</span><input type="checkbox" id="bps_auth_notes_auto_login"></label>
+    <label><span class="k">备注同步周期(秒)</span><input type="number" id="bps_auth_notes_sync_seconds" min="60" max="86400" placeholder="300"></label>
+    <label><span class="k">没有材料 / 凭据就跳过 BPS</span><input type="checkbox" id="bps_auth_skip_without_material"></label>
+    <p class="hint">BPS 只认 Excel 那一路 OAuth：没有 Excel 凭据的账号用宿主 bearer 打过去必 403，而 403 会连带触发「自动摘除模型」（把账号上的模型摘 6 小时）。勾上后这类账号直接走正常通道（面板会写明原因），不再白撞一次再回退。<br>这个门禁<b>不看上面的总开关</b>：总开关关着时没有任何账号有 Excel 凭据，等于 BPS 通道整体停用；只有取消勾选、或明确关掉「BPS 出站改用 Excel 凭据」，才会回到用宿主 bearer 打 BPS 的旧行为。</p>
+    <label><span class="k">批量授权并发</span><input type="number" id="bps_auth_batch_concurrency" min="1" max="8" placeholder="2"></label>
+    <p class="hint">面板上的「批量登录 BPS」与「备注里有材料就自动授权」共用它。bps-auth 服务自己也有并发上限（默认 2），压在它附近最稳：再多就只是在服务端排队。</p>
+    <label><span class="k">授权出口模板（一账号一出口）</span><input type="text" id="bps_auth_proxy_template" placeholder="http://acct{account}:65423140@142.54.187.42:49000"></label>
+    <p class="hint">填了之后每次授权都按它现算一个代理：<code>{account}</code> = 账号 id，<code>{rand}</code> = 8 位随机十六进制。我们那台随机 IPv6 代理容器按<b>用户名</b>发独立出口、密码固定 <code>65423140</code>，所以 <code>acct{account}</code> = 每个账号固定一个自己的出口（30 天租约），加 <code>{rand}</code> = 每次授权换一个新出口。一账号一出口，不会几个号挤同一个 IP 过 Cloudflare 校验。留空 = 用账号自己填的 / 上面那个全局代理。</p>
+    <label><span class="k">出口连不通就往下回退</span><input type="checkbox" id="bps_auth_proxy_fallback"></label>
+    <p class="hint">按 <b>账号自己的代理 → 一账号一出口模板 → 全局代理 → 直连</b> 的顺序各探一次（20 秒超时、只读出口 IP），用第一个能连通的；面板的账号行会写明这次实际走了哪个出口、为什么换。关掉 = 盲用优先级最高的那个（模板写错就整批授权失败）。</p>
+    <div class="row"><button id="open-bpsauth">打开 BPS 授权页</button><span class="hint" id="open-bpsauth-hint"></span></div>
     <p class="hint">这个文件里有登录密码与 refresh_token，落盘权限收紧到 0600；面板只展示授权状态，绝不回显密码。</p>
   </fieldset>
 
@@ -323,6 +348,7 @@
     byId("bps_enabled").checked = config.bps_enabled === true;
     byId("bps_endpoint").value = config.bps_endpoint || "https://bps.openai.com/basispoints/api/responses";
     byId("bps_models").value = (config.bps_models || []).join(", ");
+    byId("bps_request_style").value = config.bps_request_style || "native";
     byId("bps_tool_mode").value = config.bps_tool_mode || "text";
     byId("bps_catalog_at_prompt_end").checked = config.bps_catalog_at_prompt_end === true;
     byId("bps_forward_prompt_cache_key").checked = config.bps_forward_prompt_cache_key !== false;
@@ -362,6 +388,13 @@ byId("bps_skip_on_previous_response_id").checked = config.bps_skip_on_previous_r
     byId("bps_auth_refresh_interval_seconds").value = config.bps_auth_refresh_interval_seconds != null ? config.bps_auth_refresh_interval_seconds : 300;
     byId("bps_auth_login_timeout_seconds").value = config.bps_auth_login_timeout_seconds != null ? config.bps_auth_login_timeout_seconds : 300;
     byId("bps_auth_proxy_url").value = config.bps_auth_proxy_url || "";
+    byId("bps_auth_notes_enabled").checked = config.bps_auth_notes_enabled !== false;
+    byId("bps_auth_notes_auto_login").checked = config.bps_auth_notes_auto_login !== false;
+    byId("bps_auth_notes_sync_seconds").value = config.bps_auth_notes_sync_seconds != null ? config.bps_auth_notes_sync_seconds : 300;
+    byId("bps_auth_skip_without_material").checked = config.bps_auth_skip_without_material !== false;
+    byId("bps_auth_batch_concurrency").value = config.bps_auth_batch_concurrency != null ? config.bps_auth_batch_concurrency : 2;
+    byId("bps_auth_proxy_template").value = config.bps_auth_proxy_template || "";
+    byId("bps_auth_proxy_fallback").checked = config.bps_auth_proxy_fallback !== false;
     byId("bps_daily_limit_per_account").value = config.bps_daily_limit_per_account != null ? config.bps_daily_limit_per_account : 0;
     byId("degrade_state_path").value = config.degrade_state_path || "";
     byId("sync_enabled").checked = config.sync_enabled === true;
@@ -403,6 +436,7 @@ byId("bps_skip_on_previous_response_id").checked = config.bps_skip_on_previous_r
       bps_enabled: byId("bps_enabled").checked,
       bps_endpoint: byId("bps_endpoint").value.trim(),
       bps_models: byId("bps_models").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
+      bps_request_style: byId("bps_request_style").value,
       bps_tool_mode: byId("bps_tool_mode").value,
       bps_catalog_at_prompt_end: byId("bps_catalog_at_prompt_end").checked,
       bps_forward_prompt_cache_key: byId("bps_forward_prompt_cache_key").checked,
@@ -444,6 +478,13 @@ bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").check
     bps_auth_refresh_interval_seconds: numOr(byId("bps_auth_refresh_interval_seconds").value, 300),
     bps_auth_login_timeout_seconds: numOr(byId("bps_auth_login_timeout_seconds").value, 300),
     bps_auth_proxy_url: byId("bps_auth_proxy_url").value.trim(),
+    bps_auth_notes_enabled: byId("bps_auth_notes_enabled").checked,
+    bps_auth_notes_auto_login: byId("bps_auth_notes_auto_login").checked,
+    bps_auth_notes_sync_seconds: numOr(byId("bps_auth_notes_sync_seconds").value, 300),
+    bps_auth_skip_without_material: byId("bps_auth_skip_without_material").checked,
+    bps_auth_batch_concurrency: numOr(byId("bps_auth_batch_concurrency").value, 2),
+    bps_auth_proxy_template: byId("bps_auth_proxy_template").value.trim(),
+    bps_auth_proxy_fallback: byId("bps_auth_proxy_fallback").checked,
       sync_enabled: byId("sync_enabled").checked,
       sync_peers: byId("sync_peers").value.split(",").map(function (v) { return v.trim(); }).filter(function (v) { return v; }),
       sync_token: byId("sync_token").value.trim(),
@@ -504,19 +545,16 @@ bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").check
     setStatus("已生成面板 token，记得点「保存」", true);
   });
 
-  // 单独打开智力巡检页：用当前填写的面板监听地址 + token 拼 URL。
-  // 监听地址是 0.0.0.0/127.0.0.1 这类通配地址时，回退到当前浏览器的主机名。
-  byId("open-intel").addEventListener("click", function () {
+  function setHint(id, text, ok) {
+    var el = byId(id);
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = ok === false ? "#dc2626" : "";
+  }
+
+  // 面板地址可能是 0.0.0.0 / 127.0.0.1 这类通配写法：回退到当前浏览器的主机名。
+  function panelUrl(path) {
     var addr = byId("panel_addr").value.trim();
-    var tok = byId("panel_token").value.trim();
-    if (!addr) {
-      setStatus("先填「面板监听地址」（例 127.0.0.1:8848 或 0.0.0.0:8848）再保存", false);
-      return;
-    }
-    if (!tok) {
-      setStatus("先填「面板 token」（可点『生成随机 token』）再保存", false);
-      return;
-    }
     var host = location.hostname;
     var port = "";
     var parts = addr.split(":");
@@ -525,32 +563,62 @@ bps_skip_on_previous_response_id: byId("bps_skip_on_previous_response_id").check
       var head = parts[0];
       if (head && head !== "0.0.0.0" && head !== "127.0.0.1" && head !== "localhost") host = head;
     }
-    window.open("http://" + host + (port ? ":" + port : "") + "/accounts?token=" + encodeURIComponent(tok), "_blank");
-    setStatus("已尝试打开面板；没反应请确认端口已放行、插件配置已保存", true);
+    return "http://" + host + (port ? ":" + port : "") + path +
+      "?token=" + encodeURIComponent(byId("panel_token").value.trim());
+  }
+
+  // 打开一个插件页面：宿主把插件配置页放在只有 allow-scripts 的 sandbox iframe 里，
+  // 没有 allow-popups，`window.open` 会被浏览器静默拦掉（按钮看起来「没反应」）。
+  // 所以先试一次新标签，再无条件把地址亮出来，让人自己点开 —— 无论浏览器给不给弹窗，
+  // 这个按钮都有可见结果。
+  function openPanelPage(path, hintId) {
+    if (!byId("panel_addr").value.trim()) {
+      setHint(hintId, "先填「面板监听地址」（例 127.0.0.1:8848 或 0.0.0.0:8848）并保存", false);
+      return;
+    }
+    if (!byId("panel_token").value.trim()) {
+      setHint(hintId, "先填「面板 token」（可点『生成随机 token』）并保存", false);
+      return;
+    }
+    var url = panelUrl(path);
+    var opened = null;
+    try { opened = window.open(url, "_blank"); } catch (err) { opened = null; }
+    var box = byId("panel-url");
+    box.value = url;
+    byId("panel-url-row").style.display = "flex";
+    box.focus();
+    box.select();
+    setHint("panel-url-hint", "");
+    setHint(hintId, opened
+      ? "已在新标签打开；没弹出来就用下面这段地址。"
+      : "宿主 sandbox 不让插件弹新标签：下面这段地址已选中，复制到浏览器打开即可。", !!opened);
+  }
+
+  byId("panel-url-copy").addEventListener("click", function () {
+    var box = byId("panel-url");
+    box.focus();
+    box.select();
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
+    if (ok) { setHint("panel-url-hint", "已复制", true); return; }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(box.value).then(function () {
+        setHint("panel-url-hint", "已复制", true);
+      }).catch(function () {
+        setHint("panel-url-hint", "复制失败，请手动选中复制", false);
+      });
+      return;
+    }
+    setHint("panel-url-hint", "复制失败，请手动选中复制", false);
+  });
+
+  byId("open-intel").addEventListener("click", function () {
+    openPanelPage("/accounts", "open-intel-hint");
   });
 
   // 单独打开 BPS 授权页：账号密码填在那里，日志与状态文件都不回显密码。
   byId("open-bpsauth").addEventListener("click", function () {
-    var addr = byId("panel_addr").value.trim();
-    var tok = byId("panel_token").value.trim();
-    if (!addr) {
-      setStatus("先填「面板监听地址」（例 127.0.0.1:8848 或 0.0.0.0:8848）再保存", false);
-      return;
-    }
-    if (!tok) {
-      setStatus("先填「面板 token」（可点『生成随机 token』）再保存", false);
-      return;
-    }
-    var host = location.hostname;
-    var port = "";
-    var parts = addr.split(":");
-    if (parts.length >= 2) {
-      port = parts[parts.length - 1];
-      var head = parts[0];
-      if (head && head !== "0.0.0.0" && head !== "127.0.0.1" && head !== "localhost") host = head;
-    }
-    window.open("http://" + host + (port ? ":" + port : "") + "/bps-auth?token=" + encodeURIComponent(tok), "_blank");
-    setStatus("已尝试打开 BPS 授权页；没反应请确认端口已放行、插件配置已保存", true);
+    openPanelPage("/bps-auth", "open-bpsauth-hint");
   });
 
   byId("save").addEventListener("click", function () {
