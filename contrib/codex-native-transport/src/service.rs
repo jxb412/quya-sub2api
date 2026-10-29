@@ -993,7 +993,7 @@ async fn run_forward(
                                     prepared.call_cache_scope,
                                 )
                                 .with_response_rewrite(scrub, config.bps_normalize_usage)
-                                .with_altman_resistor(config.active_resistor_percent())
+                                .with_altman_resistor(config.active_resistor_rule())
                                 .with_failure_guard(config.bps_protect_account_status),
                             );
                         }
@@ -1406,8 +1406,8 @@ async fn run_forward(
     // 所以这里单独挂一层只在开启时存在的窄过滤器（默认关 = 完全不上这条路径）。
     let mut resistor_stream = if bps.is_none() {
         config
-            .active_resistor_percent()
-            .map(crate::resistor::FrameStream::new)
+            .active_resistor_rule()
+            .map(crate::resistor::FrameStream::with_rule)
     } else {
         None
     };

@@ -2630,7 +2630,8 @@ pub struct BpsStream {
     /// 回程用量归一化：删掉上游 usage 里多出来的 `cache_write_tokens`。
     normalize_usage: bool,
     /// 奥特曼变阻器：对外 usage 计量覆盖的缓存读取占比（None = 关闭）。
-    resistor_percent: Option<u8>,
+    /// 奥特曼变阻器规则（目标百分比 + 触发门限；None = 关闭）。
+    resistor_rule: Option<crate::resistor::Rule>,
     /// 流内失败的账号保护：带账号信号的 `error` / `response.failed` 改写成中性 5xx 语义。
     guard_failures: bool,
     /// 本次流是否真的中性化过失败事件（追踪用）。
@@ -2716,10 +2717,11 @@ impl BpsStream {
         self
     }
 
-    /// 奥特曼变阻器（`altman_resistor_enabled` / `altman_resistor_percent`）：
-    /// 在回程把上报的缓存读取改写成「总输入 × 百分比」，只改计量、不改请求。
-    pub fn with_altman_resistor(mut self, percent: Option<u8>) -> Self {
-        self.resistor_percent = percent.map(|value| value.min(crate::resistor::MAX_PERCENT));
+    /// 奥特曼变阻器（`altman_resistor_enabled` / `altman_resistor_percent` /
+    /// `altman_resistor_above_percent`）：在回程把上报的缓存读取改写成
+    /// 「总输入 × 目标百分比」，只改计量、不改请求；命中占比未超过门限时原样放行。
+    pub fn with_altman_resistor(mut self, rule: Option<crate::resistor::Rule>) -> Self {
+        self.resistor_rule = rule;
         self
     }
 
@@ -2803,11 +2805,11 @@ impl BpsStream {
         // Chat Completions 的帧没有 `type` 字段，usage 也可能放在帧的顶层
         // （带 `stream_options.include_usage` 的最后一帧）。这里单独改一遍，
         // 让下面的 `_` 分支知道要回写整帧。
-        let usage_modified = match self.resistor_percent {
-            Some(percent) => value
+        let usage_modified = match self.resistor_rule {
+            Some(rule) => value
                 .get_mut("usage")
                 .and_then(serde_json::Value::as_object_mut)
-                .map(|usage| crate::resistor::apply(usage, percent))
+                .map(|usage| crate::resistor::apply_rule(usage, rule))
                 .unwrap_or(false),
             None => false,
         };
@@ -2984,8 +2986,8 @@ impl BpsStream {
 
     /// 对宿主可见的 usage 施加变阻器（百分比为 None 时什么都不做）。
     fn apply_resistor(&self, object: &mut serde_json::Map<String, serde_json::Value>) -> bool {
-        match self.resistor_percent {
-            Some(percent) => crate::resistor::apply_in_response(object, percent),
+        match self.resistor_rule {
+            Some(rule) => crate::resistor::apply_in_response_rule(object, rule),
             None => false,
         }
     }

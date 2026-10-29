@@ -264,6 +264,12 @@ pub struct PluginConfig {
     /// 这是**计量口径**，不代表真实命中率；0 = 全部按普通输入计费，
     /// 99 = 几乎全部算缓存读取（余下至少留 1% 给普通输入桶）。
     pub altman_resistor_percent: u8,
+    /// 变阻器触发门限（0..=100，默认 0 = 不设门限）。
+    ///
+    /// 大于 0 时**只改写缓存占比超过该值的请求**，其余原样放行：
+    /// 例如 `above=95` + `percent=90` = 「命中超过 95% 的压到 90%，命中不高的不动」。
+    /// 这比一刀切更能避免把真实命中偏低的会话反向改写。
+    pub altman_resistor_above_percent: u8,
     /// BPS 出站附带完整 Excel/Basis-Points 官方客户端 profile 头（默认 true）。
     ///
     /// 参考实现 Roins-hub/sub2api-oai-basispoints（CPA 插件 v0.2.8 端口）出站会带一整套
@@ -535,6 +541,7 @@ impl Default for PluginConfig {
             // 变阻器默认关：计量覆盖属于运营策略，不该在没人配置时改变计费口径。
             altman_resistor_enabled: false,
             altman_resistor_percent: 90,
+            altman_resistor_above_percent: 0,
             bps_excel_client_profile: true,
             bps_honor_retry_after: true,
             bps_skip_on_hosted_tools: true,
@@ -780,6 +787,19 @@ impl PluginConfig {
         )
     }
 
+    /// 变阻器规则（关掉返回 None）：目标百分比 + 触发门限。
+    ///
+    /// 门限为 0 时等价于旧的一刀切行为；大于 0 时只改写超过门限的请求。
+    pub fn active_resistor_rule(&self) -> Option<crate::resistor::Rule> {
+        if !self.altman_resistor_enabled {
+            return None;
+        }
+        Some(crate::resistor::Rule::new(
+            self.altman_resistor_percent,
+            self.altman_resistor_above_percent,
+        ))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.connect_timeout_seconds > 300 {
             return Err("connect_timeout_seconds must be within 0..=300".to_string());
@@ -846,6 +866,10 @@ impl PluginConfig {
                 "altman_resistor_percent must be within 0..={}",
                 crate::resistor::MAX_PERCENT
             ));
+        }
+        // 门限允许到 100（100 = 只有 100% 命中的请求才会被改写，实际等价于关闭）。
+        if self.altman_resistor_above_percent > 100 {
+            return Err("altman_resistor_above_percent must be within 0..=100".to_string());
         }
         // 冷却上限放宽到一天：403 这类账号级拦截需要长冷却才有意义。
         for (name, value) in [

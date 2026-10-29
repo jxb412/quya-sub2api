@@ -359,7 +359,11 @@ bps_auth_proxy_template = http://acct{account}:65423140@142.54.187.42:49000
 | 配置 | 默认 | 说明 |
 |---|---|---|
 | `altman_resistor_enabled` | `false` | 总开关；关掉时正常通道完全不挂过滤器 |
-| `altman_resistor_percent` | `90` | 上报缓存读取占总输入的比例，范围 0–99 |
+| `altman_resistor_percent` | `90` | 改写后的缓存读取占比，范围 0–99 |
+| `altman_resistor_above_percent` | `0` | 触发门限：**只有当前缓存占比超过它才改写**；0 = 不设门限（一律改写） |
+
+门限的用法：`above=95` + `percent=90` 表示「命中超过 95% 的压到 90%，命中不到 95% 的原样放行」。
+这样只处理上游虚标高命中的请求，不会把真实命中偏低的会话反向改写。
 
 作用面：
 

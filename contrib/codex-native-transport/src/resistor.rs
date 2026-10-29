@@ -31,6 +31,37 @@ const CACHED_KEY: &str = "cached_tokens";
 /// 网关/Anthropic 式「缓存写入」键，出现了才保留。
 const CACHE_WRITE_KEYS: [&str; 2] = ["cache_write_tokens", "cache_creation_tokens"];
 
+/// 变阻器规则：`above_percent` 为 0 时等于「一律改写」，与旧行为一致；
+/// 大于 0 时**只有当前上报的缓存占比超过它**才改写为 `target_percent`。
+///
+/// 这样运营可以只压「上游虚标高命中」的请求，而不去动本来就命中不高的会话：
+/// 设 `above=95, target=90` 表示「超过 95% 的压到 90%，其余原样」。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rule {
+    /// 改写后的缓存读取占比（0..=99）。
+    pub target_percent: u8,
+    /// 触发门限（0..=100，0 = 不设门限，一律改写）。
+    pub above_percent: u8,
+}
+
+impl Rule {
+    pub fn new(target_percent: u8, above_percent: u8) -> Self {
+        Self {
+            target_percent: target_percent.min(MAX_PERCENT),
+            above_percent: above_percent.min(100),
+        }
+    }
+}
+
+/// 当前上报缓存占比是否达到改写门限。门限为 0 时总是达到。
+fn above_threshold(total: u64, cached: u64, above_percent: u8) -> bool {
+    if above_percent == 0 {
+        return true;
+    }
+    // cached / total > above% ⇔ cached * 100 > above * total
+    (cached as u128) * 100 > (above_percent as u128) * (total as u128)
+}
+
 /// 百分比换算：`floor(total × percent / 100)`，用 u128 中间量避免乘法溢出。
 fn percent_of(total: u64, percent: u8) -> u64 {
     let percent = percent.min(MAX_PERCENT) as u128;
@@ -52,10 +83,15 @@ fn read_u64(value: &Value) -> Option<u64> {
     }
 }
 
-/// 对单个 usage 对象应用变阻器。返回是否真的改动过。
+/// 对单个 usage 对象应用变阻器（无门限，一律改写）。返回是否真的改动过。
 ///
 /// `usage` 必须是 usage 本体（`{"input_tokens":…,"input_tokens_details":{…}}`）。
 pub fn apply(usage: &mut Map<String, Value>, percent: u8) -> bool {
+    apply_rule(usage, Rule::new(percent, 0))
+}
+
+/// 按规则应用变阻器：门限不满足时原样放行（返回 false）。
+pub fn apply_rule(usage: &mut Map<String, Value>, rule: Rule) -> bool {
     // 1. 总输入：两种命名都认，缺了就不动（无法安全重算）。
     let Some(total) = TOTAL_KEYS
         .iter()
@@ -102,8 +138,13 @@ pub fn apply(usage: &mut Map<String, Value>, percent: u8) -> bool {
         return false;
     }
 
+    // 3b. 门限判定：只在「当前缓存占比 > above_percent」时改写，否则原样放行。
+    if !above_threshold(total, cached_before, rule.above_percent) {
+        return false;
+    }
+
     // 4. 重算：缓存读取按百分比，剩余输入先补缓存写入，再算普通输入。
-    let cached_after = percent_of(total, percent);
+    let cached_after = percent_of(total, rule.target_percent);
     let remaining = total.saturating_sub(cached_after);
     let write_after = write_before.min(remaining);
 
@@ -126,8 +167,13 @@ pub fn apply(usage: &mut Map<String, Value>, percent: u8) -> bool {
 
 /// 对 Responses 形状的对象应用变阻器：改它内部的 `usage`。
 pub fn apply_in_response(response: &mut Map<String, Value>, percent: u8) -> bool {
+    apply_in_response_rule(response, Rule::new(percent, 0))
+}
+
+/// 按规则对 Responses 形状的对象应用变阻器。
+pub fn apply_in_response_rule(response: &mut Map<String, Value>, rule: Rule) -> bool {
     match response.get_mut("usage").and_then(Value::as_object_mut) {
-        Some(usage) => apply(usage, percent),
+        Some(usage) => apply_rule(usage, rule),
         None => false,
     }
 }
@@ -144,14 +190,19 @@ pub fn is_valid_percent(percent: u8) -> bool {
 /// 的 JSON 帧，其余字节原样转发。关闭时这条路径完全不被创建，行为与改动前一致。
 #[derive(Default)]
 pub struct FrameStream {
-    percent: Option<u8>,
+    rule: Option<Rule>,
     buf: Vec<u8>,
 }
 
 impl FrameStream {
     pub fn new(percent: u8) -> Self {
+        Self::with_rule(Rule::new(percent, 0))
+    }
+
+    /// 带门限的构造：`rule.above_percent > 0` 时只改写超过门限的帧。
+    pub fn with_rule(rule: Rule) -> Self {
         Self {
-            percent: Some(percent.min(MAX_PERCENT)),
+            rule: Some(rule),
             buf: Vec::new(),
         }
     }
@@ -179,12 +230,12 @@ impl FrameStream {
     }
 
     fn emit(&self, frame: &[u8], out: &mut Vec<u8>) {
-        let Some(percent) = self.percent else {
+        let Some(rule) = self.rule else {
             out.extend_from_slice(frame);
             return;
         };
         let text = String::from_utf8_lossy(frame);
-        match rewrite_frame_text(&text, percent) {
+        match rewrite_frame_text_rule(&text, rule) {
             Some(rewritten) => out.extend_from_slice(rewritten.as_bytes()),
             None => out.extend_from_slice(frame),
         }
@@ -200,6 +251,11 @@ fn find_frame_end(buf: &[u8]) -> Option<usize> {
 
 /// 改写一帧里的 usage；没有 usage 或没改动时返回 None（调用方原样转发）。
 fn rewrite_frame_text(text: &str, percent: u8) -> Option<String> {
+    rewrite_frame_text_rule(text, Rule::new(percent, 0))
+}
+
+/// 按规则改写一帧里的 usage（门限不满足时返回 None）。
+fn rewrite_frame_text_rule(text: &str, rule: Rule) -> Option<String> {
     let mut changed_any = false;
     let mut lines: Vec<String> = Vec::new();
     for line in text.split('\n') {
@@ -212,13 +268,13 @@ fn rewrite_frame_text(text: &str, percent: u8) -> Option<String> {
                         .get_mut("response")
                         .and_then(serde_json::Value::as_object_mut)
                     {
-                        changed |= apply_in_response(response, percent);
+                        changed |= apply_in_response_rule(response, rule);
                     }
                     if let Some(usage) = value
                         .get_mut("usage")
                         .and_then(serde_json::Value::as_object_mut)
                     {
-                        changed |= apply(usage, percent);
+                        changed |= apply_rule(usage, rule);
                     }
                     if changed {
                         if let Ok(rewritten) = serde_json::to_string(&value) {
@@ -242,13 +298,13 @@ fn rewrite_frame_text(text: &str, percent: u8) -> Option<String> {
                     .get_mut("response")
                     .and_then(serde_json::Value::as_object_mut)
                 {
-                    changed |= apply_in_response(response, percent);
+                    changed |= apply_in_response_rule(response, rule);
                 }
                 if let Some(usage) = value
                     .get_mut("usage")
                     .and_then(serde_json::Value::as_object_mut)
                 {
-                    changed |= apply(usage, percent);
+                    changed |= apply_rule(usage, rule);
                 }
                 if changed {
                     return serde_json::to_string(&value).ok();
@@ -393,6 +449,38 @@ mod tests {
         assert!(is_valid_percent(0));
         assert!(is_valid_percent(99));
         assert!(!is_valid_percent(100));
+    }
+
+    #[test]
+    fn rule_skips_when_cache_ratio_not_above_threshold() {
+        // 80% 命中，门限 95 → 原样放行
+        let mut u = usage(json!({
+            "input_tokens": 1000,
+            "input_tokens_details": {"cached_tokens": 800},
+        }));
+        assert!(!apply_rule(&mut u, Rule::new(90, 95)));
+        assert_eq!(u["input_tokens_details"]["cached_tokens"], 800);
+    }
+
+    #[test]
+    fn rule_applies_when_cache_ratio_above_threshold() {
+        // 98% 命中，门限 95 → 改成 90%
+        let mut u = usage(json!({
+            "input_tokens": 1000,
+            "input_tokens_details": {"cached_tokens": 980},
+        }));
+        assert!(apply_rule(&mut u, Rule::new(90, 95)));
+        assert_eq!(u["input_tokens_details"]["cached_tokens"], 900);
+    }
+
+    #[test]
+    fn rule_with_zero_threshold_always_applies() {
+        let mut u = usage(json!({
+            "input_tokens": 1000,
+            "input_tokens_details": {"cached_tokens": 100},
+        }));
+        assert!(apply_rule(&mut u, Rule::new(90, 0)));
+        assert_eq!(u["input_tokens_details"]["cached_tokens"], 900);
     }
 
     #[test]
