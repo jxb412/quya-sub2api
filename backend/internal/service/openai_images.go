@@ -92,6 +92,9 @@ type OpenAIImagesRequest struct {
 	InputFidelity      string
 	Style              string
 	Complexity         string
+	FrameCount         *int
+	FrameDurationMs    *int
+	SafetyIdentifier   string
 	OutputCompression  *int
 	PartialImages      *int
 	HasMask            bool
@@ -281,6 +284,15 @@ func parseOpenAIImagesJSONRequest(body []byte, req *OpenAIImagesRequest) error {
 	req.InputFidelity = strings.TrimSpace(gjson.GetBytes(body, "input_fidelity").String())
 	req.Style = strings.TrimSpace(gjson.GetBytes(body, "style").String())
 	req.Complexity = strings.TrimSpace(gjson.GetBytes(body, "complexity").String())
+	req.SafetyIdentifier = strings.TrimSpace(gjson.GetBytes(body, "safety_identifier").String())
+	if frameCount := gjson.GetBytes(body, "frame_count"); frameCount.Exists() && frameCount.Type == gjson.Number {
+		value := int(frameCount.Int())
+		req.FrameCount = &value
+	}
+	if frameDuration := gjson.GetBytes(body, "frame_duration_ms"); frameDuration.Exists() && frameDuration.Type == gjson.Number {
+		value := int(frameDuration.Int())
+		req.FrameDurationMs = &value
+	}
 	req.HasMask = gjson.GetBytes(body, "mask").Exists()
 	if outputCompression := gjson.GetBytes(body, "output_compression"); outputCompression.Exists() {
 		if outputCompression.Type != gjson.Number {
@@ -440,6 +452,20 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 		case "complexity":
 			req.Complexity = value
 			req.HasNativeOptions = true
+		case "safety_identifier":
+			req.SafetyIdentifier = value
+		case "frame_count":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 2 || n > 64 {
+				return fmt.Errorf("frame_count must be between 2 and 64")
+			}
+			req.FrameCount = &n
+		case "frame_duration_ms":
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 20 || n > 2000 {
+				return fmt.Errorf("frame_duration_ms must be between 20 and 2000")
+			}
+			req.FrameDurationMs = &n
 		case "output_compression":
 			n, err := strconv.Atoi(value)
 			if err != nil {

@@ -88,6 +88,15 @@ func buildOpenAIImagesOAuthPayload(parsed *OpenAIImagesRequest, model string) ([
 	if parsed.Stream {
 		payload["stream"] = true
 	}
+	if parsed.FrameCount != nil {
+		payload["frame_count"] = *parsed.FrameCount
+	}
+	if parsed.FrameDurationMs != nil {
+		payload["frame_duration_ms"] = *parsed.FrameDurationMs
+	}
+	if value := strings.TrimSpace(parsed.SafetyIdentifier); value != "" {
+		payload["safety_identifier"] = value
+	}
 
 	endpoint := "/images/generations"
 	if parsed.IsEdits() {
