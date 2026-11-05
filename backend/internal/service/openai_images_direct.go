@@ -32,7 +32,9 @@ func usesCodexDirectImages(model string) bool {
 	switch strings.TrimSpace(model) {
 	case "gpt-image-1.5", "gpt-image-2",
 		"gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
-		"gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08":
+		"gpt-image-2.5-flare-2026-09-08", "gpt-image-2.5-sunburst-2026-09-08",
+		"gpt-image-2.6-flare", "gpt-image-2.6-sunburst",
+		"gpt-image-2.6-flare-2026-11-02", "gpt-image-2.6-sunburst-2026-11-02":
 		return true
 	default:
 		return false
@@ -68,7 +70,7 @@ func buildOpenAIImagesOAuthPayload(parsed *OpenAIImagesRequest, model string) ([
 		{"size", parsed.Size}, {"quality", parsed.Quality},
 		{"background", parsed.Background}, {"output_format", parsed.OutputFormat},
 		{"moderation", parsed.Moderation}, {"input_fidelity", parsed.InputFidelity},
-		{"style", parsed.Style},
+		{"style", parsed.Style}, {"complexity", parsed.Complexity},
 	} {
 		if value := strings.TrimSpace(field.value); value != "" {
 			payload[field.key] = value

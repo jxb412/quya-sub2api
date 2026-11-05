@@ -24,6 +24,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpclient"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -459,6 +460,40 @@ func (in ContentModerationInput) Hash() string {
 		_, _ = h.Write([]byte(hex.EncodeToString(imageHash[:])))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// moderationSessionScope 提取调用方的会话标识，用于把违规哈希限定在
+// 同一个 API Key + 会话内。历史较长的会话（>256 条消息）在缺少会话维度时
+// 会和同源的其它会话共享哈希，导致一次命中把它们一并判为违规并累积到
+// 自动封禁（上游 issue #8519 / #6831）。
+func moderationSessionScope(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	for _, path := range []string{
+		"prompt_cache_key",
+		"session_id",
+		"conversation_id",
+		"metadata.session_id",
+		"client_metadata.session_id",
+	} {
+		if value := strings.TrimSpace(gjson.GetBytes(body, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// scopedModerationHash 把「API Key + 会话」并入输入哈希，避免跨会话误命中。
+// 作用域为空（无 API Key 且无会话标识）时退化为原始哈希，保持旧行为。
+func scopedModerationHash(in ContentModerationCheckInput, content ContentModerationInput) string {
+	scope := strings.TrimSpace(moderationSessionScope(in.Body))
+	if in.APIKeyID <= 0 && scope == "" {
+		return content.Hash()
+	}
+	seed := fmt.Sprintf("key:%d|sess:%s|%s", in.APIKeyID, scope, content.Hash())
+	sum := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(sum[:])
 }
 
 type ContentModerationDecision struct {
@@ -1148,7 +1183,7 @@ func (s *ContentModerationService) Check(ctx context.Context, input ContentModer
 		"protocol", input.Protocol,
 		"text_runes", len([]rune(content.Text)),
 		"image_count", len(content.Images))
-	hashText := content.Hash()
+	hashText := scopedModerationHash(input, content)
 	if cfg.PreHashCheckEnabled && s.hashCache != nil {
 		matched, err := s.hashCache.HasFlaggedInputHash(ctx, hashText)
 		if err != nil {

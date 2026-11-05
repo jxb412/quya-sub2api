@@ -91,6 +91,7 @@ type OpenAIImagesRequest struct {
 	Moderation         string
 	InputFidelity      string
 	Style              string
+	Complexity         string
 	OutputCompression  *int
 	PartialImages      *int
 	HasMask            bool
@@ -279,6 +280,7 @@ func parseOpenAIImagesJSONRequest(body []byte, req *OpenAIImagesRequest) error {
 	req.Moderation = strings.TrimSpace(gjson.GetBytes(body, "moderation").String())
 	req.InputFidelity = strings.TrimSpace(gjson.GetBytes(body, "input_fidelity").String())
 	req.Style = strings.TrimSpace(gjson.GetBytes(body, "style").String())
+	req.Complexity = strings.TrimSpace(gjson.GetBytes(body, "complexity").String())
 	req.HasMask = gjson.GetBytes(body, "mask").Exists()
 	if outputCompression := gjson.GetBytes(body, "output_compression"); outputCompression.Exists() {
 		if outputCompression.Type != gjson.Number {
@@ -434,6 +436,9 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 			req.HasNativeOptions = true
 		case "style":
 			req.Style = value
+			req.HasNativeOptions = true
+		case "complexity":
+			req.Complexity = value
 			req.HasNativeOptions = true
 		case "output_compression":
 			n, err := strconv.Atoi(value)
