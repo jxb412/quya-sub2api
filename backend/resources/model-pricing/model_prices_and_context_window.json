@@ -6713,7 +6713,7 @@
     "supports_vision": true,
     "supports_web_search": true
   },
-    "gpt-image-2.5-flare": {
+    "gpt-image-2.6-flare": {
         "cache_read_input_image_token_cost": 2e-06,
         "cache_read_input_token_cost": 1.25e-06,
         "input_cost_per_image_token": 8e-06,
@@ -6729,7 +6729,7 @@
         "supports_vision": true,
         "supports_prompt_caching": true
     },
-    "gpt-image-2.6-flare": {
+    "gpt-image-2.5-flare": {
         "cache_read_input_image_token_cost": 2e-06,
         "cache_read_input_token_cost": 1.25e-06,
         "input_cost_per_image_token": 8e-06,
@@ -6761,7 +6761,7 @@
         "supports_vision": true,
         "supports_prompt_caching": true
     },
-    "gpt-image-2.5-sunburst": {
+    "gpt-image-2.6-sunburst": {
         "cache_read_input_image_token_cost": 2e-06,
         "cache_read_input_token_cost": 1.25e-06,
         "input_cost_per_image_token": 8e-06,
@@ -6777,7 +6777,7 @@
         "supports_vision": true,
         "supports_prompt_caching": true
     },
-    "gpt-image-2.6-sunburst": {
+    "gpt-image-2.5-sunburst": {
         "cache_read_input_image_token_cost": 2e-06,
         "cache_read_input_token_cost": 1.25e-06,
         "input_cost_per_image_token": 8e-06,
