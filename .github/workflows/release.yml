@@ -29,7 +29,8 @@ permissions:
   contents: read
 
 env:
-  SIMPLE_RELEASE: ${{ inputs.simple_release == true || vars.SIMPLE_RELEASE == 'true' }}
+  # Quya production runs linux/amd64; tagged Quya builds publish only its GHCR image.
+  SIMPLE_RELEASE: ${{ inputs.simple_release == true || vars.SIMPLE_RELEASE == 'true' || (github.event_name == 'push' && contains(github.ref_name, '-quya.')) }}
   DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == true }}
 
 jobs:
