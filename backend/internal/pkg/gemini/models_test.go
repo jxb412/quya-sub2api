@@ -12,6 +12,8 @@ func TestDefaultModels_ContainsFallbackCatalogModels(t *testing.T) {
 	}
 
 	required := []string{
+		"models/gemini-4-carbon",
+		"models/gemini-4-hydrogen",
 		"models/gemini-3-pro-image",
 		"models/gemini-3.1-pro-preview-customtools",
 		"models/gemini-3.1-flash-image",
@@ -39,5 +41,30 @@ func TestHasFallbackModel_RecognizesCustomtoolsModel(t *testing.T) {
 	}
 	if HasFallbackModel("gemini-unknown") {
 		t.Fatalf("did not expect unknown model to exist in fallback catalog")
+	}
+}
+
+func TestHasFallbackModel_Carbon(t *testing.T) {
+	for _, model := range []string{"gemini-4-carbon", "models/gemini-4-carbon"} {
+		if !HasFallbackModel(model) {
+			t.Fatalf("expected Carbon fallback: %s", model)
+		}
+	}
+	if HasFallbackModel("gemini-4-carbon-preview") {
+		t.Fatal("must not invent a preview alias")
+	}
+}
+
+func TestHasFallbackModel_HydrogenUsesPublishedModelID(t *testing.T) {
+	t.Parallel()
+	for _, model := range []string{"gemini-4-hydrogen", "models/gemini-4-hydrogen"} {
+		if !HasFallbackModel(model) {
+			t.Fatalf("expected Hydrogen fallback: %s", model)
+		}
+	}
+	for _, suffix := range []string{"-preview", "-low", "-medium", "-high", "-xhigh"} {
+		if HasFallbackModel("gemini-4-hydrogen" + suffix) {
+			t.Fatalf("thinking level must not become a native model ID: %s", suffix)
+		}
 	}
 }
