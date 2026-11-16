@@ -60,6 +60,14 @@ func (s *GeminiMessagesCompatService) ForwardAsChatCompletions(
 		return nil, s.writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	anthropicReq.Stream = clientStream
+	// Anthropic's generic bridge translates xhigh to max. Preserve the Gemini
+	// intent until the mapped upstream model decides whether xhigh is supported.
+	if responsesReq.Reasoning != nil && strings.EqualFold(strings.TrimSpace(responsesReq.Reasoning.Effort), "xhigh") {
+		if anthropicReq.OutputConfig == nil {
+			anthropicReq.OutputConfig = &apicompat.AnthropicOutputConfig{}
+		}
+		anthropicReq.OutputConfig.Effort = "xhigh"
+	}
 
 	claudeBody, err := json.Marshal(anthropicReq)
 	if err != nil {
