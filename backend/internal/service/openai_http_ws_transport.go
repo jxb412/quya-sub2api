@@ -85,6 +85,11 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 		return nil, errors.New("unsupported HTTP Responses WebSocket URL scheme")
 	}
 	headers := openAIHTTPWSHandshakeHeaders(req.Header)
+	// A pooled connection keeps its original handshake headers. Carry the
+	// current turn metadata in every response.create, as native WS ingress does.
+	if err := setOpenAIHTTPWSTurnMetadata(payload, headers.Get(openAIWSTurnMetadataHeader)); err != nil {
+		return nil, err
+	}
 	// Messages HTTP compatibility restores the legacy Responses beta. Carrying
 	// it into a WS handshake conflicts with the WSv2 protocol and can make the
 	// upstream close with 1011 immediately after response.create.
@@ -123,6 +128,7 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 		lease.Release()
 		return nil, errors.New("HTTP Responses WebSocket request already dispatched")
 	}
+	attempt.reused.Store(lease.Reused())
 	if err := lease.WriteJSONWithContextTimeout(req.Context(), payload, s.openAIWSWriteTimeout()); err != nil {
 		lease.MarkBroken()
 		lease.Release()
@@ -180,6 +186,33 @@ func openAIHTTPWSHandshakeHeaders(source http.Header) http.Header {
 	return headers
 }
 
+func setOpenAIHTTPWSTurnMetadata(payload map[string]json.RawMessage, turnMetadata string) error {
+	metadata := strings.TrimSpace(turnMetadata)
+	if metadata == "" {
+		return nil
+	}
+	var clientMetadata map[string]json.RawMessage
+	if raw, ok := payload["client_metadata"]; ok {
+		if err := json.Unmarshal(raw, &clientMetadata); err != nil {
+			return errors.New("HTTP Responses WebSocket client_metadata must be an object or null")
+		}
+	}
+	if clientMetadata == nil {
+		clientMetadata = make(map[string]json.RawMessage)
+	}
+	encodedMetadata, err := json.Marshal(metadata)
+	if err != nil {
+		return errors.New("encode HTTP Responses WebSocket turn metadata")
+	}
+	clientMetadata[openAIWSTurnMetadataHeader] = encodedMetadata
+	encodedClientMetadata, err := json.Marshal(clientMetadata)
+	if err != nil {
+		return errors.New("encode HTTP Responses WebSocket client metadata")
+	}
+	payload["client_metadata"] = encodedClientMetadata
+	return nil
+}
+
 func openAIHTTPWSIdentity(wsURL, proxyURL, host string, headers http.Header, scope string) string {
 	canonical := make(map[string][]string, len(headers))
 	keys := make([]string, 0, len(headers))
@@ -193,6 +226,10 @@ func openAIHTTPWSIdentity(wsURL, proxyURL, host string, headers http.Header, sco
 		// Authentication, cookies, session and fingerprint headers remain exact.
 		switch lower {
 		case "x-request-id", "x-client-request-id", "request-id", "traceparent", "tracestate", "baggage", "x-b3-traceid", "x-b3-spanid", "x-b3-parentspanid", "x-b3-sampled", "x-b3-flags":
+			continue
+		case openAIWSTurnMetadataHeader, openAICodexRoutingHintHeader:
+			// Turn metadata travels with each response.create; routing hints are
+			// advisory preferences in the native pool, not session identity.
 			continue
 		}
 		canonical[lower] = append(canonical[lower], headers[key]...)

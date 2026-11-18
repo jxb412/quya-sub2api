@@ -26,6 +26,7 @@ type openAIHTTPWSAttempt struct {
 	sent          atomic.Bool
 	used          atomic.Bool
 	fallback      atomic.Bool
+	reused        atomic.Bool
 	responseID    atomic.Value
 	terminalEvent atomic.Value
 }
@@ -150,7 +151,7 @@ func (s *OpenAIGatewayService) connectOpenAIHTTPWSPool(req *http.Request, proxyU
 	for i := 0; i <= 3; i++ {
 		resp, err := s.doOpenAIHTTPWSPool(req, proxyURL, account)
 		if attempt.sent.Load() {
-			logger.LegacyPrintf("service.openai_gateway", "[OpenAI ctx_pool] upstream=websocket account=%d connection_attempt=%d", account.ID, i+1)
+			logger.LegacyPrintf("service.openai_gateway", "[OpenAI ctx_pool] upstream=websocket account=%d connection_attempt=%d reused=%t", account.ID, i+1, attempt.reused.Load())
 			return resp, true, err
 		}
 		var connectErr *openAIHTTPWSConnectError

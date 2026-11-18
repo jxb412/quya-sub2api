@@ -175,7 +175,7 @@ func TestOpenAIHTTPWSPoolPreservesPayloadUsageAndReusesScopedConnection(t *testi
 }
 
 func TestOpenAIHTTPWSPoolStrictIsolation(t *testing.T) {
-	for _, change := range []string{"scope", "token", "cookie", "proxy", "url"} {
+	for _, change := range []string{"scope", "token", "cookie", "proxy", "url", "session", "fingerprint", "turn_state"} {
 		t.Run(change, func(t *testing.T) {
 			dialer := &httpWSTestDialer{}
 			svc, account := newHTTPWSTestService(t, dialer)
@@ -195,6 +195,12 @@ func TestOpenAIHTTPWSPoolStrictIsolation(t *testing.T) {
 						proxy = "http://proxy-two.invalid:80"
 					case "url":
 						req.URL.Host = "different.invalid"
+					case "session":
+						req.Header.Set("session_id", "other-session")
+					case "fingerprint":
+						req.Header.Set("x-codex-installation-id", "other-installation")
+					case "turn_state":
+						req.Header.Set(openAIWSTurnStateHeader, "other-turn-state")
 					}
 				}
 				resp, err := svc.doOpenAIHTTPWSPool(req, proxy, account)
