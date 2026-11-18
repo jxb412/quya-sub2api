@@ -271,7 +271,16 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 	if !json.Valid(message) {
 		return errors.New("malformed HTTP Responses WebSocket JSON event")
 	}
+	document := gjson.ParseBytes(message)
+	if !document.IsObject() || document.Get("type").Type != gjson.String || strings.TrimSpace(document.Get("type").String()) == "" {
+		return errors.New("HTTP Responses WebSocket event must be an object with a nonempty string type")
+	}
 	typeName, _, response := parseOpenAIWSEventEnvelope(message)
+	if !strings.HasPrefix(typeName, "response.") && typeName != "error" {
+		// Native Responses WS also emits ancillary events. Preserve them as SSE
+		// without treating their IDs as generation identity or terminal state.
+		return nil
+	}
 	// A top-level id may identify the event/item, never infer a response ID
 	// from it. Stream events carry response_id or response.id explicitly.
 	responseID := response.Get("id").String()
@@ -280,9 +289,6 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 			return errors.New("HTTP Responses WebSocket event has conflicting response identities")
 		}
 		responseID = explicit
-	}
-	if typeName == "" || (!strings.HasPrefix(typeName, "response.") && typeName != "error" && typeName != "codex.rate_limits" && typeName != "rate_limits.updated") {
-		return errors.New("unexpected HTTP Responses WebSocket event type")
 	}
 	if responseID != "" {
 		if b.responseID != "" && responseID != b.responseID {

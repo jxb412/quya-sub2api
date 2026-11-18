@@ -358,6 +358,11 @@ func TestOpenAIHTTPWSPoolNeverResendsAmbiguousWriteOrRead(t *testing.T) {
 
 func TestOpenAIHTTPWSPoolRejectsCorruptTurnAndClosesConnection(t *testing.T) {
 	cases := map[string][]string{
+		"invalid_json":        {`{"type":`},
+		"missing_type":        {`{"response":{"id":"resp_a","status":"in_progress"}}`},
+		"empty_type":          {`{"type":"  "}`},
+		"non_string_type":     {`{"type":123}`},
+		"non_object_event":    {`[{"type":"response.created"}]`},
 		"mismatched_response": {`{"type":"response.created","response":{"id":"resp_a","status":"in_progress"}}`, `{"type":"response.completed","response":{"id":"resp_b","status":"completed"}}`},
 		"false_completed":     {`{"type":"response.completed","response":{"id":"resp_a","status":"in_progress"}}`},
 		"missing_response":    {`{"type":"response.completed"}`},
@@ -373,6 +378,67 @@ func TestOpenAIHTTPWSPoolRejectsCorruptTurnAndClosesConnection(t *testing.T) {
 			_, err = io.ReadAll(resp.Body)
 			require.Error(t, err)
 			require.True(t, dialer.conns[0].closed)
+		})
+	}
+}
+
+func TestOpenAIHTTPWSPoolAncillaryEventsDoNotBindResponseIdentity(t *testing.T) {
+	first := `{"type":"codex.response.metadata","id":"event_start","response_id":"metadata_a","response":{"id":"metadata_b","status":"completed"}}`
+	last := `{"type":"responsesapi.websocket_timing","response_id":"metadata_c","timing":{"elapsed_ms":7}}`
+	dialer := &httpWSTestDialer{events: []string{
+		first,
+		`{"type":"response.created","response":{"id":"resp_current","status":"in_progress"}}`,
+		last,
+		`{"type":"response.completed","response":{"id":"resp_current","status":"completed","usage":{"input_tokens":7,"output_tokens":2}}}`,
+	}}
+	svc, account := newHTTPWSTestService(t, dialer)
+	req, attempt := newHTTPWSTestRequest(t, "key:1/session:1", `{"input":[]}`)
+	resp, err := svc.doOpenAIHTTPWSPool(req, "", account)
+	require.NoError(t, err)
+	data, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Contains(t, string(data), "data: "+first+"\n\n")
+	require.Contains(t, string(data), "data: "+last+"\n\n")
+	require.Equal(t, "resp_current", attempt.responseID.Load())
+	require.Equal(t, "response.completed", attempt.terminalEvent.Load())
+	require.False(t, dialer.conns[0].closed)
+	require.Len(t, dialer.conns[0].writes, 1)
+}
+
+func TestOpenAIHTTPWSPoolForwardAcceptsAncillaryEvents(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream_%t", stream), func(t *testing.T) {
+			svc, account, upstream := newHTTPWSPolicyTestService(t, "https://unused.example")
+			dialer := &httpWSTestDialer{events: []string{
+				`{"type":"codex.rate_limits","rate_limits":{}}`,
+				`{"type":"codex.response.metadata","response_id":"metadata_only","response":{"id":"not_the_response","status":"completed"}}`,
+				`{"type":"response.created","response":{"id":"resp_http_ws_policy","status":"in_progress"}}`,
+				`{"type":"response.metadata","response_id":"resp_http_ws_policy"}`,
+				`{"type":"response.output_text.delta","response_id":"resp_http_ws_policy","output_index":0,"content_index":0,"delta":"hello from pool"}`,
+				`{"type":"responsesapi.websocket_timing","response_id":"metadata_only","elapsed_ms":3}`,
+				`{"type":"response.completed","response":` + httpWSPolicyResponse + `}`,
+			}}
+			svc.getOpenAIWSConnPool().setClientDialerForTest(dialer)
+			c, recorder := newHTTPWSPolicyTestContext("/v1/responses")
+			body := []byte(fmt.Sprintf(`{"model":"gpt-6.1-sol","stream":%t,"input":"hello"}`, stream))
+			result, err := svc.Forward(context.Background(), c, account, body)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Contains(t, recorder.Body.String(), "hello from pool")
+			require.True(t, result.OpenAIWSMode)
+			require.Equal(t, "resp_http_ws_policy", result.RequestID)
+			require.Equal(t, "resp_http_ws_policy", result.ResponseID)
+			require.Equal(t, "response.completed", result.UpstreamTerminalEvent)
+			require.Equal(t, 12, result.Usage.InputTokens)
+			require.Equal(t, 7, result.Usage.OutputTokens)
+			require.Empty(t, upstream.requests)
+			require.Equal(t, 1, dialer.count)
+			require.Len(t, dialer.conns[0].writes, 1)
+			if stream {
+				require.Contains(t, recorder.Body.String(), `"type":"codex.response.metadata"`)
+				require.Contains(t, recorder.Body.String(), `"type":"responsesapi.websocket_timing"`)
+			}
 		})
 	}
 }
