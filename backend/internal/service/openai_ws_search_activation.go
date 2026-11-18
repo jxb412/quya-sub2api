@@ -27,6 +27,20 @@ func (c *openAIWSConn) recordInitialWebSearch(value any) {
 		body = payload
 	case []byte:
 		body = payload
+	case map[string]json.RawMessage:
+		// Quya 2026-11-19：HTTP→WS 使用 RawMessage map；补齐首轮搜索能力
+		// 记录，使中途开启 web_search 时可沿用官方换连接与上下文恢复规则。
+		if string(payload["type"]) != `"response.create"` {
+			return
+		}
+		c.responseCreateSent = true
+		c.initialWebSearch = gjsonToolsContainWebSearch(gjson.ParseBytes(payload["tools"]))
+		for _, item := range gjson.ParseBytes(payload["input"]).Array() {
+			if item.Get("type").String() == openAIAdditionalToolsItemType && gjsonToolsContainWebSearch(item.Get("tools")) {
+				c.initialWebSearch = true
+			}
+		}
+		return
 	case map[string]any:
 		if payload["type"] != "response.create" {
 			return

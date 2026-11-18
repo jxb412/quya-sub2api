@@ -15,6 +15,14 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 		if handled {
 			return response, err
 		}
+		// 2026-11-19：WS 恢复后若握手仍失败，HTTP 必须收到完整历史，
+		// 不能把原 previous_response_id 的增量体送往另一条传输链路。
+		request, err = cloneOpenAIHTTPWSFallbackRequest(request, proxyURL, account, attempt)
+		if err != nil {
+			return nil, err
+		}
+		// 2026-11-19：以真正发送的完整 body 建立有界恢复记录，兼容重试会替换旧记录。
+		request = s.prepareOpenAIHTTPWSHTTPHistory(request, proxyURL, account, attempt)
 	}
 	if s.pluginManager != nil {
 		// 插件需要客户端自报身份（例如 BPS 降温通道只放行官方 Codex 客户端）：出站身份
@@ -26,7 +34,19 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 			return response, err
 		}
 	}
-	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+	response, err := s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+	// 2026-11-19：部分 HTTPUpstream 未回填 Request 或丢失上下文；仅为 HTTP
+	// 兜底补齐本次请求的恢复记录，普通 HTTP 不受影响。
+	if replay, _ := request.Context().Value(openAIHTTPWSHTTPReplayContextKey{}).(*openAIHTTPWSHTTPReplay); response != nil && replay != nil {
+		var returnedReplay *openAIHTTPWSHTTPReplay
+		if response.Request != nil {
+			returnedReplay, _ = response.Request.Context().Value(openAIHTTPWSHTTPReplayContextKey{}).(*openAIHTTPWSHTTPReplay)
+		}
+		if returnedReplay != replay {
+			response.Request = request
+		}
+	}
+	return response, err
 }
 
 // doOpenAIAccountTestUpstream 让 OpenAI OAuth 账号测试与真实转发使用同一插件路径。

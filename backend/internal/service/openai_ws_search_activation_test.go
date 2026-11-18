@@ -175,7 +175,7 @@ func TestOpenAIWSConnWebSearchInitialization(t *testing.T) {
 		{"Lite hosted search", `{"type":"response.create","input":[{"type":"additional_tools","tools":[{"type":"web_search"}]}]}`, false},
 		{"function lookalike", `{"type":"response.create","tools":[{"type":"function","name":"web_search"}]}`, true},
 	} {
-		for _, format := range []string{"map", "raw", "bytes"} {
+		for _, format := range []string{"map", "raw", "bytes", "rawmap"} {
 			t.Run(first.name+"/"+format, func(t *testing.T) {
 				conn := newOpenAIWSConn("test", 1, &openAIWSCaptureConn{}, nil)
 				defer conn.close()
@@ -189,6 +189,10 @@ func TestOpenAIWSConnWebSearchInitialization(t *testing.T) {
 					payload = json.RawMessage(first.body)
 				case "bytes":
 					payload = []byte(first.body)
+				case "rawmap":
+					var rawMap map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal([]byte(first.body), &rawMap))
+					payload = rawMap
 				}
 				require.NoError(t, lease.WriteJSON(payload, time.Second))
 				// Capability belongs to the socket, even after it is leased again.

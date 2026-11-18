@@ -9,6 +9,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 )
 
+// Quya 2026-11-19：为定位 WS 握手 403/HTTP 兜底，记录固定分类与字节数；
+// 不记录正文、提示词、凭据或原始响应头，避免诊断泄露客户内容。
 // Diagnostics contain only fixed categories, booleans and counts.
 // Never log request/response bodies, credentials, arbitrary upstream error
 // strings, full response headers, session identifiers or fingerprint seeds.

@@ -682,7 +682,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin
 	if clampedCap, ok := ollamaCloudResponsesMaxOutputTokensClamp(account, upstreamModel, body); ok {
 		markPatchSet("max_output_tokens", clampedCap)
 	}
+	// Quya 2026-11-19：HTTP 入站选择 ctx_pool 后仍由 WS 上游续聊；保留
+	// previous_response_id，避免沿用传统 HTTP 清理规则提前丢掉续聊关系。
 	if wsDecision.Transport != OpenAIUpstreamTransportResponsesWebsocketV2 &&
+		openAIHTTPWSAttemptFromContext(ctx) == nil &&
 		!account.IsOpenAIApiKey() && gjson.GetBytes(body, "previous_response_id").Exists() {
 		markPatchDelete("previous_response_id")
 	}

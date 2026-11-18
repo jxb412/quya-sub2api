@@ -2070,6 +2070,8 @@ func (s *OpenAIGatewayService) handleStreamingResponsePassthrough(
 			trimmedData := strings.TrimSpace(data)
 			rawEventType := effectiveOpenAISSEEventType(dataBytes, pendingSSEEventType)
 			observer.ObserveOpenAI(dataBytes, rawEventType)
+			// 2026-11-19：透传同样需要保留 HTTP 兜底成功后的完整续接历史。
+			observeOpenAIHTTPWSHTTPHistory(resp, dataBytes, rawEventType)
 			if needModelReplace {
 				line = s.replaceModelInSSELine(line, mappedModel, originalModel)
 				if replacedData, replaced := extractOpenAISSEDataLine(line); replaced {
@@ -2365,6 +2367,8 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 		observeOpenAISSEBody(observer, string(body))
 	} else {
 		observer.ObserveOpenAI(body, strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+		// 2026-11-19：登记未改写的上游完整终态，由策略层确认成功后入库。
+		observeOpenAIHTTPWSHTTPHistory(resp, body, "")
 	}
 
 	// Detect SSE responses from upstream and convert to JSON.
@@ -2463,6 +2467,8 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 			}
 		}
 		finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
+		// 2026-11-19：复用原有 SSE 输出重建，不新建响应读取链路。
+		observeOpenAIHTTPWSHTTPHistory(resp, finalResponse, "")
 		body = finalResponse
 		if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
 			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)

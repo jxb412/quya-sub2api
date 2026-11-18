@@ -18,8 +18,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// Only connection establishment failures may authorize the caller's bounded
-// HTTP fallback. Payload validation and any attempted generation write may not.
+// Connection establishment failures authorize bounded retries before HTTP
+// fallback. The separate Codex capacity error permits immediate fallback;
+// payload validation and any attempted generation write never permit it.
 type openAIHTTPWSConnectError struct{ err error }
 
 func (e *openAIHTTPWSConnectError) Error() string {
@@ -61,20 +62,6 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 	if err != nil {
 		return nil, fmt.Errorf("read HTTP Responses WebSocket payload: %w", err)
 	}
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
-		return nil, errors.New("HTTP Responses WebSocket payload must be a JSON object")
-	}
-	if background, present := payload["background"]; present && string(background) != "false" && string(background) != "null" {
-		return nil, errors.New("background Responses are not supported by ctx_pool transport")
-	}
-	if raw, present := payload["type"]; present && string(raw) != `"response.create"` {
-		return nil, errors.New("HTTP Responses WebSocket payload has an unsupported event type")
-	}
-	delete(payload, "stream")
-	delete(payload, "background")
-	payload["type"] = json.RawMessage(`"response.create"`)
-
 	wsURL := *req.URL
 	switch wsURL.Scheme {
 	case "https":
@@ -84,37 +71,84 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 	default:
 		return nil, errors.New("unsupported HTTP Responses WebSocket URL scheme")
 	}
-	headers := openAIHTTPWSHandshakeHeaders(req.Header)
-	// A pooled connection keeps its original handshake headers. Carry the
-	// current turn metadata in every response.create, as native WS ingress does.
-	if err := setOpenAIHTTPWSTurnMetadata(payload, headers.Get(openAIWSTurnMetadataHeader)); err != nil {
+	headers := openAIHTTPWSPreparedHandshakeHeaders(req.Header)
+	historyIdentity, err := openAIHTTPWSHistoryIdentity(req, proxyURL, account, attempt)
+	if err != nil {
 		return nil, err
 	}
-	// Messages HTTP compatibility restores the legacy Responses beta. Carrying
-	// it into a WS handshake conflicts with the WSv2 protocol and can make the
-	// upstream close with 1011 immediately after response.create.
-	stripOpenAILegacyResponsesBeta(headers)
-	if beta := strings.TrimSpace(strings.Join(headers.Values("OpenAI-Beta"), ", ")); !strings.Contains(beta, "responses_websockets=") {
-		if beta != "" {
-			beta += ", "
-		}
-		headers.Set("OpenAI-Beta", beta+openAIWSBetaV2Value)
+	body, err = applyOpenAIHTTPWSRecoveredBody(body, historyIdentity, attempt)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := prepareOpenAIHTTPWSPayload(body, headers)
+	if err != nil {
+		return nil, err
 	}
 	identity := openAIHTTPWSIdentity(wsURL.String(), proxyURL, req.Host, headers, attempt.scope)
 	acquire := openAIWSAcquireRequest{Account: account, WSURL: wsURL.String(), Headers: headers, ProxyURL: proxyURL, StrictIdentity: identity}
+	acquire.ForceNewConn = attempt.recovery.Load() != nil
+	// 2026-11-19：与官方原生链路一致，完整性来自已成功父轮的输入和全部输出，
+	// 不以“input 非空”推断。原连接可用时优先保留 previous_response_id。
+	replayPlan := s.prepareOpenAIHTTPWSReplayPlan(historyIdentity, body, account)
 	stateStore := s.getOpenAIWSStateStore()
-	previousResponseID := gjson.GetBytes(body, "previous_response_id").String()
+	previousResponseID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
 	if stateStore != nil && previousResponseID != "" {
 		if connID, ok := stateStore.GetResponseConn(previousResponseID); ok {
 			acquire.PreferredConnID = connID
 			acquire.ForcePreferredConn = true
+			attempt.continuationBound.Store(true)
+		}
+	}
+	recoverBeforeDispatch := func() error {
+		var recoveryErr error
+		body, payload, recoveryErr = replayPlan.recoverBeforeDispatch(body, headers, attempt)
+		if recoveryErr != nil {
+			return recoveryErr
+		}
+		previousResponseID = ""
+		acquire.PreferredConnID = ""
+		acquire.ForcePreferredConn = false
+		acquire.ForceNewConn = true
+		return checkOpenAIHTTPWSCodexPayloadSize(req, account, payload)
+	}
+	if previousResponseID != "" && !acquire.ForcePreferredConn && replayPlan.parentFound {
+		if err := recoverBeforeDispatch(); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkOpenAIHTTPWSCodexPayloadSize(req, account, payload); err != nil {
+		var capacityErr *openAIHTTPWSCodexCapacityError
+		if previousResponseID != "" && (acquire.ForcePreferredConn || replayPlan.parentFound) && errors.As(err, &capacityErr) {
+			if err := recoverBeforeDispatch(); err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, err
 		}
 	}
 	// Only connection acquisition is bounded by five seconds. The successful
 	// generation uses the original request context and normal stream timeout.
 	acquireCtx, cancelAcquire := context.WithTimeout(req.Context(), 5*time.Second)
+	defer cancelAcquire()
 	lease, err := s.getOpenAIWSConnPool().Acquire(acquireCtx, acquire)
-	cancelAcquire()
+	if err != nil && acquire.ForcePreferredConn && errors.Is(err, errOpenAIWSPreferredConnUnavailable) {
+		if err := recoverBeforeDispatch(); err != nil {
+			return nil, err
+		}
+		lease, err = s.getOpenAIWSConnPool().Acquire(acquireCtx, acquire)
+	}
+	if err == nil && account.IsOpenAIOAuthLike() && lease.initializedWithoutWebSearch() && openAIWSWebSearchDeclared(body) {
+		lease.Release()
+		if previousResponseID != "" {
+			if err := recoverBeforeDispatch(); err != nil {
+				return nil, err
+			}
+		}
+		// No generation has been written. Preserve the complete prepared
+		// request and use a fresh socket whose first create includes search.
+		acquire.ForceNewConn = true
+		lease, err = s.getOpenAIWSConnPool().Acquire(acquireCtx, acquire)
+	}
 	if err != nil {
 		var dialErr *openAIWSDialError
 		if errors.As(err, &dialErr) && dialErr.StatusCode >= 400 && dialErr.StatusCode <= 599 {
@@ -153,6 +187,12 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 		}
 	}
 	stream.onComplete = func(responseID string) {
+		// 2026-11-19：只有已校验成功终态的完整 output 数组才能补全历史；
+		// 缺少 output、未知父链或中途断流仍按原逻辑响应，但不能伪造可恢复缓存。
+		if responseID != "" && replayPlan.complete && stream.completedOutputExists {
+			s.getOpenAIHTTPWSReplayStore().Put(historyIdentity, responseID,
+				combineOpenAIWSReplayItems(replayPlan.input, stream.completedOutput), s.openAIWSResponseStickyTTL())
+		}
 		if stateStore != nil && responseID != "" {
 			stateStore.BindResponseConn(responseID, lease.ConnID(), s.openAIWSResponseStickyTTL())
 			bindCtx, cancel := context.WithTimeout(context.WithoutCancel(req.Context()), 3*time.Second)
@@ -186,6 +226,8 @@ func openAIHTTPWSHandshakeHeaders(source http.Header) http.Header {
 	return headers
 }
 
+// Quya 2026-11-19：池连接的握手头不会逐轮更新，当前 turn metadata 随每次
+// response.create 传递；保留客户其他 metadata 及大整数精度，避免复用旧轮信息。
 func setOpenAIHTTPWSTurnMetadata(payload map[string]json.RawMessage, turnMetadata string) error {
 	metadata := strings.TrimSpace(turnMetadata)
 	if metadata == "" {
@@ -228,6 +270,8 @@ func openAIHTTPWSIdentity(wsURL, proxyURL, host string, headers http.Header, sco
 		case "x-request-id", "x-client-request-id", "request-id", "traceparent", "tracestate", "baggage", "x-b3-traceid", "x-b3-spanid", "x-b3-parentspanid", "x-b3-sampled", "x-b3-flags":
 			continue
 		case openAIWSTurnMetadataHeader, openAICodexRoutingHintHeader:
+			// Quya 2026-11-19：这两项逐轮变化却不定义客户身份，排除后减少
+			// 不必要的新握手；认证、会话、指纹与 turn-state 仍严格隔离。
 			// Turn metadata travels with each response.create; routing hints are
 			// advisory preferences in the native pool, not session identity.
 			continue
@@ -242,19 +286,23 @@ func openAIHTTPWSIdentity(wsURL, proxyURL, host string, headers http.Header, sco
 // Read serializes a single upstream turn to SSE without a goroutine or an
 // unbounded event queue. Close cancels a blocked read before acquiring mu.
 type openAIHTTPWSSSEBody struct {
-	mu          sync.Mutex
-	ctx         context.Context
-	cancel      context.CancelFunc
-	lease       *openAIWSConnLease
-	readTimeout time.Duration
-	pending     []byte
-	documents   [][]byte
-	responseID  string
-	terminal    bool
-	success     bool
-	closed      bool
-	onEvent     func(string, string)
-	onComplete  func(string)
+	mu                    sync.Mutex
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	lease                 *openAIWSConnLease
+	readTimeout           time.Duration
+	pending               []byte
+	documents             [][]byte
+	responseID            string
+	terminal              bool
+	success               bool
+	completedOutput       []json.RawMessage
+	completedOutputExists bool
+	// 2026-11-19：只记是否收到输出事件，避免空终态把已生成正文从恢复历史中抹掉。
+	outputObserved bool
+	closed         bool
+	onEvent        func(string, string)
+	onComplete     func(string)
 }
 
 func (b *openAIHTTPWSSSEBody) Read(dst []byte) (int, error) {
@@ -320,6 +368,9 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 		return errors.New("HTTP Responses WebSocket event must be an object with a nonempty string type")
 	}
 	typeName, _, response := parseOpenAIWSEventEnvelope(message)
+	if openAIHTTPWSHasOutputEvent(typeName) {
+		b.outputObserved = true
+	}
 	if !strings.HasPrefix(typeName, "response.") && typeName != "error" {
 		// Native Responses WS also emits ancillary events. Preserve them as SSE
 		// without treating their IDs as generation identity or terminal state.
@@ -369,6 +420,20 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 			return errors.New("HTTP Responses WebSocket terminal status contradicts its event type")
 		}
 		b.success = status == "completed"
+		if b.success {
+			// 2026-11-19：不累计无界 output_item 事件；终态完整数组已受单消息大小限制。
+			output := response.Get("output")
+			if output.IsArray() && json.Unmarshal([]byte(output.Raw), &b.completedOutput) == nil {
+				b.completedOutputExists = len(b.completedOutput) != 0 || !b.outputObserved
+				for _, item := range b.completedOutput {
+					value := gjson.ParseBytes(item)
+					if !value.IsObject() || value.Get("type").String() == "" || value.Get("type").String() == "item_reference" {
+						b.completedOutputExists = false
+						break
+					}
+				}
+			}
+		}
 	}
 	b.terminal = true
 	if b.onEvent != nil {

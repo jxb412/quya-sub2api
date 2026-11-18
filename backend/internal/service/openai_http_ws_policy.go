@@ -29,6 +29,11 @@ type openAIHTTPWSAttempt struct {
 	reused        atomic.Bool
 	responseID    atomic.Value
 	terminalEvent atomic.Value
+	// 2026-11-19：记录完整历史恢复结果，确保重试/HTTP 兜底不再发送原增量体。
+	recovery          atomic.Pointer[openAIHTTPWSRecoveredRequest]
+	continuationBound atomic.Bool
+	// 2026-11-19：HTTP 兜底成功的完整终态也用于下一轮恢复，失败尝试不得入库。
+	httpReplay atomic.Pointer[openAIHTTPWSHTTPReplay]
 }
 
 func openAIHTTPWSAttemptFromContext(ctx context.Context) *openAIHTTPWSAttempt {
@@ -95,6 +100,21 @@ func (s *OpenAIGatewayService) withOpenAIHTTPWSPolicy(ctx context.Context, c *gi
 	attempt := &openAIHTTPWSAttempt{scope: hex.EncodeToString(digest[:]), groupID: groupID}
 	ctx = context.WithValue(ctx, openAIHTTPWSAttemptContextKey{}, attempt)
 	result, err := forward(ctx)
+	s.completeOpenAIHTTPWSHTTPHistory(ctx, attempt, result, err)
+	var continuationErr *openAIHTTPWSContinuationError
+	if errors.As(err, &continuationErr) {
+		if c != nil && !c.Writer.Written() {
+			if inbound == APIProtocolAnthropic {
+				writeAnthropicError(c, http.StatusBadRequest, "invalid_request_error", continuationErr.Error())
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"type": "invalid_request_error", "code": "ctx_pool_continuation_unavailable",
+					"param": "previous_response_id", "message": continuationErr.Error(),
+				}})
+			}
+		}
+		return nil, continuationErr
+	}
 	if result != nil && attempt.sent.Load() {
 		result.OpenAIWSMode = true
 		if id, _ := attempt.responseID.Load().(string); id != "" {
@@ -151,8 +171,21 @@ func (s *OpenAIGatewayService) connectOpenAIHTTPWSPool(req *http.Request, proxyU
 	for i := 0; i <= 3; i++ {
 		resp, err := s.doOpenAIHTTPWSPool(req, proxyURL, account)
 		if attempt.sent.Load() {
+			// Quya 2026-11-19：区分实际派发时的新建/复用，辅助定位混合 WS/HTTP 日志。
 			logger.LegacyPrintf("service.openai_gateway", "[OpenAI ctx_pool] upstream=websocket account=%d connection_attempt=%d reused=%t", account.ID, i+1, attempt.reused.Load())
 			return resp, true, err
+		}
+		var capacityErr *openAIHTTPWSCodexCapacityError
+		if errors.As(err, &capacityErr) {
+			if err := req.Context().Err(); err != nil {
+				return nil, true, err
+			}
+			if err := s.prepareOpenAIHTTPWSFallback(req, proxyURL, account, attempt); err != nil {
+				return nil, true, err
+			}
+			attempt.fallback.Store(true)
+			logger.LegacyPrintf("service.openai_gateway", "[OpenAI ctx_pool] upstream=http fallback=codex_ws_payload_capacity account=%d wire_bytes=%d limit_bytes=%d", account.ID, capacityErr.wireBytes, openAIHTTPWSCodexRequestLimitBytes)
+			return nil, false, nil
 		}
 		var connectErr *openAIHTTPWSConnectError
 		if err != nil && !errors.As(err, &connectErr) {
@@ -169,6 +202,9 @@ func (s *OpenAIGatewayService) connectOpenAIHTTPWSPool(req *http.Request, proxyU
 			return nil, true, req.Context().Err()
 		}
 		logger.LegacyPrintf("service.openai_gateway", "[OpenAI ctx_pool] ws_connection_failed account=%d connection_attempt=%d status=%d", account.ID, i+1, status)
+	}
+	if err := s.prepareOpenAIHTTPWSFallback(req, proxyURL, account, attempt); err != nil {
+		return nil, true, err
 	}
 	attempt.fallback.Store(true)
 	logger.LegacyPrintf("service.openai_gateway", "[OpenAI ctx_pool] upstream=http fallback=ws_connection_exhausted account=%d retries=3 timeout_seconds=5", account.ID)

@@ -545,6 +545,8 @@ func (s *OpenAIGatewayService) handleStreamingResponseWithReasoning(ctx context.
 				suppressCurrentEvent = true
 			}
 			observer.ObserveOpenAI(dataBytes, eventType)
+			// 2026-11-19：复用现有终态解析点，保留 HTTP 兜底后的完整续接历史。
+			observeOpenAIHTTPWSHTTPHistory(resp, dataBytes, eventType)
 			// 初始上游 data 的 type 只解析一次：原始值保持终止事件的精确匹配，规范化值供后续分支复用。
 			if openAIStreamEventIsTerminalWithType(data, eventType) {
 				sawTerminalEvent = true
@@ -1720,6 +1722,8 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 		observeOpenAISSEBody(observer, string(body))
 	} else {
 		observer.ObserveOpenAI(body, strings.TrimSpace(gjson.GetBytes(body, "type").String()))
+		// 2026-11-19：只登记成功完整响应，统一由本次转发成功后提交恢复缓存。
+		observeOpenAIHTTPWSHTTPHistory(resp, body, "")
 	}
 
 	// Detect SSE responses for ALL account types via Content-Type header.
@@ -1864,6 +1868,8 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 			}
 		}
 		finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
+		// 2026-11-19：使用既有 SSE 重建结果，防止终态缺 output 时遗漏已生成内容。
+		observeOpenAIHTTPWSHTTPHistory(resp, finalResponse, "")
 		body = finalResponse
 		if originalModel != mappedModel {
 			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)

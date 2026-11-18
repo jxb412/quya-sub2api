@@ -115,6 +115,15 @@ func isClientCanceledTransportError(ctx context.Context, err error) bool {
 //
 // passthrough tags the Ops error event for the OpenAI passthrough forward path.
 func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Context, c *gin.Context, account *Account, err error, passthrough bool) error {
+	var continuationErr *openAIHTTPWSContinuationError
+	if errors.As(err, &continuationErr) {
+		// Quya 2026-11-19：仅完整历史确实不可恢复时交由桥接层返回客户端
+		// 错误；这不是账号网络故障，不能因此冷却账号或反复切号。
+		// Local continuation validation never reached an upstream generation.
+		// The HTTP WS policy writes the protocol-correct 400; do not classify
+		// this as a network fault, cool down the account, or authorize failover.
+		return continuationErr
+	}
 	if isClientCanceledTransportError(ctx, err) {
 		return err
 	}
