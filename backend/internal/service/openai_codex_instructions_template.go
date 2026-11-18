@@ -75,7 +75,10 @@ func applyForcedCodexStableInstructionsTemplate(reqBody map[string]any, template
 	if prefixCount == 1 && texts[0] == rendered {
 		return false, nil
 	}
-	first := input[0].(map[string]any)
+	first, ok := input[0].(map[string]any)
+	if !ok {
+		return false, nil
+	}
 	replacement := make(map[string]any, len(first))
 	for key, value := range first {
 		replacement[key] = value

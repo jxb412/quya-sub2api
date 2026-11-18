@@ -36,14 +36,14 @@ func TestCodexStableInstructionsKeepClientGuidanceAndOrdering(t *testing.T) {
 		result := applyCodexOAuthTransformWithOptions(body, codexOAuthTransformOptions{OmitPromotedSystemMessagesFromInput: omitPromoted})
 		require.NoError(t, result.Error)
 		require.Equal(t, "  Only for this turn.\n", body["instructions"])
-		input := body["input"].([]any)
+		input := codexStableTestInput(t, body)
 		require.Len(t, input, 4)
-		require.Equal(t, "developer", input[0].(map[string]any)["role"])
-		require.Equal(t, "Project rules.", input[0].(map[string]any)["content"])
-		require.Equal(t, "user", input[1].(map[string]any)["role"])
-		require.Equal(t, "developer", input[2].(map[string]any)["role"])
-		require.Len(t, input[2].(map[string]any)["content"], 2)
-		require.Equal(t, "Existing developer note", input[3].(map[string]any)["content"])
+		require.Equal(t, "developer", codexStableTestMessage(t, input[0])["role"])
+		require.Equal(t, "Project rules.", codexStableTestMessage(t, input[0])["content"])
+		require.Equal(t, "user", codexStableTestMessage(t, input[1])["role"])
+		require.Equal(t, "developer", codexStableTestMessage(t, input[2])["role"])
+		require.Len(t, codexStableTestMessage(t, input[2])["content"], 2)
+		require.Equal(t, "Existing developer note", codexStableTestMessage(t, input[3])["content"])
 		before, err := json.Marshal(body)
 		require.NoError(t, err)
 		applyCodexOAuthTransformWithOptions(body, codexOAuthTransformOptions{OmitPromotedSystemMessagesFromInput: omitPromoted})
@@ -59,14 +59,14 @@ func TestCodexStableInstructionsDefaultIsCachedPrefixOnce(t *testing.T) {
 		result := applyCodexOAuthTransform(body, false, false)
 		require.NoError(t, result.Error)
 		require.Equal(t, "", body["instructions"])
-		input := body["input"].([]any)
+		input := codexStableTestInput(t, body)
 		require.Len(t, input, 2)
-		first := input[0].(map[string]any)
+		first := codexStableTestMessage(t, input[0])
 		require.Equal(t, "developer", first["role"])
 		text, lossless := extractLosslessTextFromContent(first["content"])
 		require.True(t, lossless)
 		require.Equal(t, defaultCodexSynthInstructions(codexStableInstructionModelID(model)), text)
-		require.Equal(t, "  hello\n", input[1].(map[string]any)["content"])
+		require.Equal(t, "  hello\n", codexStableTestMessage(t, input[1])["content"])
 		applyCodexOAuthTransform(body, false, false)
 		require.Len(t, body["input"], 2)
 	}
@@ -85,7 +85,7 @@ func TestCodexStableInstructionsDoNotInjectOnContinuation(t *testing.T) {
 		applyCodexOAuthTransform(body, false, false)
 		require.Equal(t, "", body["instructions"])
 		require.Len(t, body["input"], 1)
-		require.Equal(t, "user", body["input"].([]any)[0].(map[string]any)["role"])
+		require.Equal(t, "user", codexStableTestMessage(t, codexStableTestInput(t, body)[0])["role"])
 		for key, value := range continuation {
 			require.Equal(t, value, body[key])
 		}
@@ -98,7 +98,7 @@ func TestCodexStableInstructionsExistingGuidanceAndSkipDefault(t *testing.T) {
 		applyCodexOAuthTransform(body, false, false)
 		require.Equal(t, "", body["instructions"])
 		require.Len(t, body["input"], 1)
-		require.Equal(t, "Project prompt", body["input"].([]any)[0].(map[string]any)["content"])
+		require.Equal(t, "Project prompt", codexStableTestMessage(t, codexStableTestInput(t, body)[0])["content"])
 	}
 	body := map[string]any{"model": "gpt-6.2-sol", "input": "hi"}
 	applyCodexOAuthTransformWithOptions(body, codexOAuthTransformOptions{SkipDefaultInstructions: true})
@@ -130,4 +130,18 @@ func TestPrependCodexStableInstructionsIsLosslessAndIdempotent(t *testing.T) {
 	require.False(t, prependCodexStableInstructions(body, "project"))
 	require.Equal(t, "turn", body["instructions"])
 	require.Len(t, body["input"], 2)
+}
+
+func codexStableTestInput(t *testing.T, body map[string]any) []any {
+	t.Helper()
+	input, ok := body["input"].([]any)
+	require.True(t, ok)
+	return input
+}
+
+func codexStableTestMessage(t *testing.T, item any) map[string]any {
+	t.Helper()
+	message, ok := item.(map[string]any)
+	require.True(t, ok)
+	return message
 }
