@@ -82,7 +82,11 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 		return nil, errors.New("unsupported HTTP Responses WebSocket URL scheme")
 	}
 	headers := openAIHTTPWSHandshakeHeaders(req.Header)
-	if beta := strings.TrimSpace(headers.Get("OpenAI-Beta")); !strings.Contains(beta, "responses_websockets=") {
+	// Messages HTTP compatibility restores the legacy Responses beta. Carrying
+	// it into a WS handshake conflicts with the WSv2 protocol and can make the
+	// upstream close with 1011 immediately after response.create.
+	stripOpenAILegacyResponsesBeta(headers)
+	if beta := strings.TrimSpace(strings.Join(headers.Values("OpenAI-Beta"), ", ")); !strings.Contains(beta, "responses_websockets=") {
 		if beta != "" {
 			beta += ", "
 		}
