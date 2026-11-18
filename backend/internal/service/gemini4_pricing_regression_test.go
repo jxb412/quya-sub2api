@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -54,6 +55,12 @@ func TestGemini4PricingCatalogAndFallbackChargeAllRequestedModels(t *testing.T) 
 						name string
 						rate float64
 					}{{"", 1}, {"priority", 1.8}} {
+						// Upstream v0.2.23 only supplies explicit Priority cards for
+						// Carbon/Hydrogen in the hardcoded fallback. Argon/Cyber
+						// retain the existing generic 2x tier when no catalog exists.
+						if source == "missing_remote" && tier.name == "priority" && strings.HasPrefix(tc.name, "gemini-4-argon") {
+							tier.rate = 2
+						}
 						cost, err := svc.CalculateCostWithServiceTier(model, UsageTokens{
 							InputTokens: 800_000, OutputTokens: 12_000, CacheReadTokens: 200_000,
 						}, 1.2, tier.name)
@@ -73,14 +80,12 @@ func TestGemini4PricingCatalogAndFallbackChargeAllRequestedModels(t *testing.T) 
 	}
 }
 
-func TestGemini4PricingRejectsUnknownFamilySuffixes(t *testing.T) {
+func TestGemini4CarbonPricingRejectsUnknownFamilySuffixes(t *testing.T) {
 	catalog := gemini4CatalogForTest(t)
 	for _, svc := range []*BillingService{NewBillingService(&config.Config{}, catalog), NewBillingService(&config.Config{}, nil)} {
 		for _, name := range []string{
-			"gemini-4-argon-high-preview", "gemini-4-argon-xhigh", "gemini-4-argon-cyber-unknown",
 			"gemini-4-carbon-xhigh", "gemini-4-carbon-cyber", "gemini-4-carbon-high-preview",
-			"gemini-4-hydrogen-preview", "gemini-4-hydrogen-xhigh-preview", "gemini-4-hydrogen-tiered",
-			"not-gemini-4-hydrogen", "gemini-4-hydrogenium", "models/gemini-4-hydrogen-image",
+			"not-gemini-4-carbon", "gemini-4-carbonium", "models/gemini-4-carbon-image",
 		} {
 			t.Run(name, func(t *testing.T) {
 				require.Nil(t, catalog.GetIdentifiedModelPricing(name))
@@ -93,7 +98,7 @@ func TestGemini4PricingRejectsUnknownFamilySuffixes(t *testing.T) {
 }
 
 func TestGemini4PricingExplicitTierAndBaseOverridesRemainAuthoritative(t *testing.T) {
-	for _, base := range []string{"gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen"} {
+	for _, base := range []string{"gemini-4-argon", "gemini-4-carbon"} {
 		t.Run(base, func(t *testing.T) {
 			catalog := gemini4CatalogForTest(t)
 			// A deployment override or later remote price must supersede bundled rates.

@@ -24,7 +24,7 @@ func extractGeminiReasoningEffortFromBody(body []byte) *string {
 	}
 	effort := strings.ToLower(strings.TrimSpace(level.String()))
 	switch effort {
-	case "minimal", "low", "medium", "high", "xhigh":
+	case "minimal", "low", "medium", "high":
 		return &effort
 	default:
 		return nil

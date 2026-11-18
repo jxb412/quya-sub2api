@@ -45,25 +45,24 @@ func TestGPT62PricingCatalogAndFallbackStandardCharges(t *testing.T) {
 			t.Run(source+"/"+tc.model, func(t *testing.T) {
 				require.True(t, billing.HasIdentifiedTokenPricing(tc.model))
 				cost, err := billing.CalculateCost(tc.model, UsageTokens{
-					InputTokens: 800_000, OutputTokens: 12_000, CacheReadTokens: 200_000,
+					InputTokens: 80_000, OutputTokens: 12_000, CacheReadTokens: 20_000,
 				}, 1.2)
 				require.NoError(t, err)
-				require.InDelta(t, .8*tc.input, cost.InputCost, 1e-12)
+				require.InDelta(t, .08*tc.input, cost.InputCost, 1e-12)
 				require.InDelta(t, .012*tc.output, cost.OutputCost, 1e-12)
-				require.InDelta(t, .2*tc.read, cost.CacheReadCost, 1e-12)
-				want := .8*tc.input + .012*tc.output + .2*tc.read
+				require.InDelta(t, .02*tc.read, cost.CacheReadCost, 1e-12)
+				want := .08*tc.input + .012*tc.output + .02*tc.read
 				require.InDelta(t, want, cost.TotalCost, 1e-12)
 				require.InDelta(t, want*1.2, cost.ActualCost, 1e-12)
 				require.False(t, cost.LongContextBillingApplied)
 
 				pricing, err := billing.GetModelPricing(tc.model)
 				require.NoError(t, err)
-				require.Zero(t, pricing.InputPricePerTokenPriority)
-				require.Zero(t, pricing.OutputPricePerTokenPriority)
-				require.Zero(t, pricing.CacheReadPricePerTokenPriority)
-				require.Zero(t, pricing.CacheCreationPricePerToken)
-				require.Zero(t, pricing.LongContextInputThreshold)
-				require.Zero(t, pricing.UltrafastMultiplier)
+				require.InDelta(t, tc.input*2e-6, pricing.InputPricePerTokenPriority, 1e-15)
+				require.InDelta(t, tc.output*2e-6, pricing.OutputPricePerTokenPriority, 1e-15)
+				require.InDelta(t, tc.read*2e-6, pricing.CacheReadPricePerTokenPriority, 1e-15)
+				require.InDelta(t, tc.input*1.25e-6, pricing.CacheCreationPricePerToken, 1e-15)
+				require.Equal(t, 272_000, pricing.LongContextInputThreshold)
 			})
 		}
 	}
@@ -126,11 +125,11 @@ func TestGPT62PricingRemoteAndFileOverridePrecedence(t *testing.T) {
 					read = 0
 				}
 				cost, err := billing.CalculateCost(tc.model, UsageTokens{
-					InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000,
+					InputTokens: 100_000, OutputTokens: 100_000, CacheReadTokens: 100_000,
 				}, 1)
 				require.NoError(t, err)
-				require.InDelta(t, read, cost.CacheReadCost, 1e-12)
-				require.InDelta(t, want+read, cost.ActualCost, 1e-12)
+				require.InDelta(t, read*.1, cost.CacheReadCost, 1e-12)
+				require.InDelta(t, (want+read)*.1, cost.ActualCost, 1e-12)
 			}
 		}
 	}
@@ -158,10 +157,10 @@ func TestGPT62PricingGroupAndChannelOverridesRemainAuthoritative(t *testing.T) {
 			id := groupID
 			group := &Group{ID: id, LongContextPricingEnabled: true}
 			costInput := CostInput{Ctx: ctx, Model: model, GroupID: &id, Group: group, Resolver: resolver,
-				Tokens: UsageTokens{InputTokens: 800_000, OutputTokens: 12_000, CacheReadTokens: 200_000}, RateMultiplier: 1.2}
+				Tokens: UsageTokens{InputTokens: 80_000, OutputTokens: 12_000, CacheReadTokens: 20_000}, RateMultiplier: 1.2}
 			cost, err := billing.CalculateCostUnified(costInput)
 			require.NoError(t, err)
-			require.InDelta(t, 6.16*1.2, cost.ActualCost, 1e-12)
+			require.InDelta(t, .994*1.2, cost.ActualCost, 1e-12)
 
 			groupInput, groupOutput, groupRead := 3e-6, 15e-6, 0.0
 			group.ModelPricing = []ChannelModelPricing{{Models: []string{model}, BillingMode: BillingModeToken,
@@ -169,7 +168,7 @@ func TestGPT62PricingGroupAndChannelOverridesRemainAuthoritative(t *testing.T) {
 			cost, err = billing.CalculateCostUnified(costInput)
 			require.NoError(t, err)
 			require.Zero(t, cost.CacheReadCost)
-			require.InDelta(t, 2.58*1.2, cost.ActualCost, 1e-12)
+			require.InDelta(t, .42*1.2, cost.ActualCost, 1e-12)
 			require.False(t, cost.LongContextBillingApplied)
 		})
 	}

@@ -3,7 +3,9 @@ package repository
 import (
 	"context"
 	"database/sql/driver"
+	"regexp"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
@@ -84,4 +86,56 @@ func TestGetStatsWithFiltersReturnsKeyGroupAndEffortBreakdowns(t *testing.T) {
 	require.Equal(t, int64(9), stats.APIKeys[1].GroupID)
 	require.Equal(t, "vip", stats.APIKeys[1].GroupName)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestModelStatsAccountAndMultiKeyFiltersKeepChargedAndAccountCostsSeparate(t *testing.T) {
+	start := time.Date(2026, 11, 18, 8, 30, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	for _, tc := range []struct {
+		name    string
+		filters UsageLogFilters
+		where   string
+		args    []driver.Value
+	}{
+		{
+			name:    "account_only",
+			filters: UsageLogFilters{AccountID: 42},
+			where:   "ul.account_id = $3",
+			args:    []driver.Value{start, end, int64(42)},
+		},
+		{
+			name: "account_and_multiple_keys_with_effort",
+			filters: UsageLogFilters{
+				AccountID: 42, APIKeyIDs: []int64{2, 7, 2}, ReasoningEffort: "HIGH",
+			},
+			where: "ul.api_key_id IN ($3, $4) AND ul.account_id = $5 AND LOWER(COALESCE(NULLIF(TRIM(ul.reasoning_effort), ''), '')) = $6",
+			args:  []driver.Value{start, end, int64(2), int64(7), int64(42), "high"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, mock := newSQLMock(t)
+			repo := &usageLogRepository{sql: db}
+			// Check the actual SQL aggregates, not just the returned field names:
+			// account-only filtering must never replace customer charges with
+			// the independent account cost, and multi-key/effort filters still apply.
+			costs := regexp.QuoteMeta("COALESCE(SUM(ul.actual_cost), 0) as actual_cost,") + `\s+` +
+				regexp.QuoteMeta("COALESCE(SUM(COALESCE(ul.account_stats_cost, ul.total_cost) * COALESCE(ul.account_rate_multiplier, 1)), 0) as account_cost")
+			where := regexp.QuoteMeta("WHERE ul.created_at >= $1 AND ul.created_at < $2 AND " + tc.where)
+			mock.ExpectQuery(`(?s)` + costs + `\s+FROM usage_logs ul\s+` + where + `\s+GROUP BY`).
+				WithArgs(tc.args...).
+				WillReturnRows(sqlmock.NewRows([]string{
+					"model", "requests", "input_tokens", "output_tokens",
+					"cache_creation_tokens", "cache_read_tokens", "total_tokens",
+					"cost", "actual_cost", "account_cost",
+				}).AddRow("gemini-4-carbon", int64(3), int64(100), int64(200), int64(10), int64(40), int64(350), 6.0, 2.4, 0.9))
+
+			rows, err := repo.GetModelStatsWithUsageFiltersBySource(context.Background(), start, end, tc.filters, usagestats.ModelSourceRequested)
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			require.Equal(t, 6.0, rows[0].Cost)
+			require.Equal(t, 2.4, rows[0].ActualCost)
+			require.Equal(t, 0.9, rows[0].AccountCost)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }

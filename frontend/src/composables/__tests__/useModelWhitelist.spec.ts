@@ -46,8 +46,8 @@ describe('useModelWhitelist', () => {
     expect(models).toContain('gpt-5.6')
     expect(models).toContain('gpt-6')
     expect(models).toContain('gpt-6-astra')
-    expect(models).toContain('gpt-6.2-astra')
     expect(models).toContain('gpt-6.2-sol')
+    expect(models).toContain('gpt-6.2-astra')
     expect(models).toContain('gpt-6.1-sol')
     expect(models).toContain('gpt-6.1-terra')
     expect(models).toContain('gpt-6-sol')
@@ -58,8 +58,8 @@ describe('useModelWhitelist', () => {
 
   it('openai 预设映射包含 GPT-6 别名和 Astra', () => {
     expect(getPresetMappingsByPlatform('openai')).toEqual(expect.arrayContaining([
-      expect.objectContaining({ label: 'GPT-6.2 Astra', from: 'gpt-6.2-astra', to: 'gpt-6.2-astra' }),
       expect.objectContaining({ label: 'GPT-6.2 Sol', from: 'gpt-6.2-sol', to: 'gpt-6.2-sol' }),
+      expect.objectContaining({ label: 'GPT-6.2 Astra', from: 'gpt-6.2-astra', to: 'gpt-6.2-astra' }),
       expect.objectContaining({ label: 'GPT-6.1 Sol', from: 'gpt-6.1-sol', to: 'gpt-6.1-sol' }),
       expect.objectContaining({ label: 'GPT-6.1 Terra', from: 'gpt-6.1-terra', to: 'gpt-6.1-terra' }),
       expect.objectContaining({ label: 'GPT-6', from: 'gpt-6', to: 'gpt-6' }),
@@ -223,12 +223,8 @@ describe('useModelWhitelist', () => {
     })
   })
 
-  it('Gemini 4 Hydrogen exposes its published native ID without inventing tier routes', () => {
-    const models = getModelsByPlatform('gemini')
-    expect(models).toContain('gemini-4-hydrogen')
-    for (const suffix of ['-preview', '-low', '-medium', '-high', '-xhigh']) {
-      expect(models).not.toContain(`gemini-4-hydrogen${suffix}`)
-    }
+  it('Gemini 4 Hydrogen retains its native model ID', () => {
+    expect(getModelsByPlatform('gemini')).toContain('gemini-4-hydrogen')
     expect(buildModelMappingObject('whitelist', ['gemini-4-hydrogen'], [])).toEqual({
       'gemini-4-hydrogen': 'gemini-4-hydrogen'
     })

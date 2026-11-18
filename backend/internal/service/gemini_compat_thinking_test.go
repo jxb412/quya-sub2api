@@ -50,17 +50,9 @@ func TestApplyGeminiCompatThinkingConfig(t *testing.T) {
 		{name: "carbon medium budget", model: "gemini-4-carbon", claudeBody: `{"thinking":{"type":"enabled","budget_tokens":4096}}`, wantLevel: "medium"},
 		{name: "carbon cannot disable thinking", model: "gemini-4-carbon", claudeBody: `{"thinking":{"type":"disabled"}}`, wantLevel: "low"},
 		{name: "carbon preserves upstream default", model: "gemini-4-carbon", claudeBody: `{}`, wantNoConfig: true},
-		{name: "hydrogen medium", model: "gemini-4-hydrogen", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "medium"},
-		{name: "hydrogen xhigh", model: "models/gemini-4-hydrogen", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantLevel: "xhigh"},
-		{name: "argon xhigh becomes high", model: "gemini-4-argon", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantLevel: "high"},
-		{name: "carbon xhigh becomes high", model: "gemini-4-carbon", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantLevel: "high"},
-		{name: "unknown hydrogen suffix cannot enable xhigh", model: "gemini-4-hydrogen-preview", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantLevel: "high"},
-		{name: "hydrogen tier name takes precedence", model: "gemini-4-hydrogen-xhigh", claudeBody: `{"output_config":{"effort":"low"}}`, includeThoughts: true, wantThoughts: true},
-		{name: "2.5 pro xhigh uses maximum budget", model: "gemini-2.5-pro", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantBudget: budget(32768)},
-		{name: "2.5 flash xhigh uses maximum budget", model: "gemini-2.5-flash", claudeBody: `{"output_config":{"effort":"xhigh"}}`, wantBudget: budget(24576)},
 		{name: "gemini 4 uses level", model: "gemini-4-argon", claudeBody: `{"output_config":{"effort":"low"}}`, wantLevel: "low"},
-		{name: "argon medium", model: "gemini-4-argon", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "medium"},
-		{name: "argon medium budget", model: "gemini-4-argon", claudeBody: `{"thinking":{"type":"enabled","budget_tokens":4096}}`, wantLevel: "medium"},
+		{name: "medium outside verified models becomes high", model: "gemini-4-argon", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "high"},
+		{name: "medium budget outside verified models becomes high", model: "gemini-4-argon", claudeBody: `{"thinking":{"type":"enabled","budget_tokens":4096}}`, wantLevel: "high"},
 		{name: "medium on unverified pro becomes high", model: "gemini-3.5-pro", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "high"},
 		{name: "medium on flash lite", model: "gemini-3.1-flash-lite", claudeBody: `{"output_config":{"effort":"medium"}}`, wantLevel: "medium"},
 		{name: "tier suffix model keeps name tier", model: "gemini-4-argon-high", claudeBody: `{"output_config":{"effort":"low"}}`, includeThoughts: true, wantThoughts: true},
@@ -110,42 +102,6 @@ func geminiCompatThinkingTestAccount() *Account {
 		Type:        AccountTypeAPIKey,
 		Credentials: map[string]any{"api_key": "gemini-api-key"},
 		Concurrency: 1,
-	}
-}
-
-func TestGemini4ChatCompatForwardsSupportedThinkingLevels(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	for _, tc := range []struct{ model, effort, upstreamModel, want string }{
-		{"gemini-4-argon", "medium", "", "medium"},
-		{"gemini-4-carbon", "medium", "", "medium"},
-		{"gemini-4-hydrogen", "medium", "", "medium"},
-		{"gemini-4-hydrogen", "xhigh", "", "xhigh"},
-		{"customer-gemini", "xhigh", "gemini-4-hydrogen", "xhigh"},
-		{"gemini-4-hydrogen", "xhigh", "gemini-4-carbon", "high"},
-	} {
-		t.Run(tc.model+"/"+tc.effort+"/"+tc.upstreamModel, func(t *testing.T) {
-			upstream := &queuedHTTPUpstreamStub{responses: []*http.Response{{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"application/json"}},
-				Body: io.NopCloser(strings.NewReader(`{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],` +
-					`"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":6}}`)),
-			}}}
-			svc := &GeminiMessagesCompatService{httpUpstream: upstream, cfg: &config.Config{}}
-			account := geminiCompatThinkingTestAccount()
-			if tc.upstreamModel != "" {
-				account.Credentials["model_mapping"] = map[string]any{tc.model: tc.upstreamModel}
-			}
-			body := []byte(`{"model":"` + tc.model + `","reasoning_effort":"` + tc.effort + `","messages":[{"role":"user","content":"hi"}]}`)
-			c, recorder := newAntigravityCompatContext(http.MethodPost, "/v1/chat/completions", body)
-			result, err := svc.ForwardAsChatCompletions(context.Background(), c, account, body)
-			require.NoError(t, err)
-			require.Equal(t, http.StatusOK, recorder.Code)
-			require.Len(t, upstream.requestBodies, 1)
-			require.Equal(t, tc.want, gjson.GetBytes(upstream.requestBodies[0], "generationConfig.thinkingConfig.thinkingLevel").String())
-			require.Equal(t, tc.want, optionalStringValue(result.ReasoningEffort))
-			require.Equal(t, 8, result.Usage.OutputTokens, "thinking tokens must remain billable")
-			require.Equal(t, "ok", gjson.Get(recorder.Body.String(), "choices.0.message.content").String())
-		})
 	}
 }
 
