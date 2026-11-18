@@ -9,7 +9,7 @@
 |---|---|
 | 个人仓库 | `https://github.com/jxb412/quya-sub2api` |
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
-| 后端 | Go 1.26.6、Gin、Ent |
+| 后端 | Go 1.27.4、Gin、Ent |
 | 前端 | Vue 3、TypeScript、pnpm |
 | 数据库 | PostgreSQL、Redis |
 | 本地项目目录 | `D:\btc\st\quya-sub2api` |

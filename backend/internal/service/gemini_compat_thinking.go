@@ -77,12 +77,12 @@ func geminiModelNameCarriesThinkingTier(model string) bool {
 // claudeThinkingIntent 是 Anthropic 请求体里与思考相关的意图。
 type claudeThinkingIntent struct {
 	thinkingType string // enabled / adaptive / disabled / 空
-	tier         string // minimal / low / medium / high / xhigh / 空
+	tier         string // minimal / low / medium / high / 空
 	budgetTokens int    // thinking.type=enabled 时的 budget_tokens
 }
 
 // parseClaudeThinkingIntent 读取 Anthropic 请求的思考参数。thinking.type=disabled 优先于
-// output_config.effort；保留 xhigh 供支持该档位的模型使用，未识别的取值视为未指定。
+// output_config.effort；effort 归一到 minimal/low/medium/high，未识别的取值视为未指定。
 func parseClaudeThinkingIntent(claudeBody []byte) claudeThinkingIntent {
 	intent := claudeThinkingIntent{
 		thinkingType: strings.ToLower(strings.TrimSpace(gjson.GetBytes(claudeBody, "thinking.type").String())),
@@ -98,10 +98,8 @@ func parseClaudeThinkingIntent(claudeBody []byte) claudeThinkingIntent {
 		intent.tier = "low"
 	case "medium":
 		intent.tier = "medium"
-	case "high", "max":
+	case "high", "xhigh", "max":
 		intent.tier = "high"
-	case "xhigh":
-		intent.tier = "xhigh"
 	}
 	if intent.thinkingType == "enabled" {
 		intent.budgetTokens = int(gjson.GetBytes(claudeBody, "thinking.budget_tokens").Int())
@@ -121,8 +119,7 @@ func claudeRequestEnablesThinking(claudeBody []byte) bool {
 
 // geminiThinkingLevelFor 把思考意图映射为 thinkingLevel；返回空串表示交给模型默认档位。
 // minimal 只发给 flash 系列，其余模型用 low；medium 只发给 flash 系列、Gemini 3.1 Pro
-// 与 Gemini 4 Argon/Carbon/Hydrogen，其余模型用 high。xhigh 仅发给 Hydrogen。
-// 未指定档位时保留上游默认值。
+// 与 Gemini 4 Carbon，其余模型用 high。未指定档位时保留上游默认值。
 func geminiThinkingLevelFor(model string, intent claudeThinkingIntent) string {
 	tier := intent.tier
 	if tier == "" && intent.budgetTokens > 0 {
@@ -140,11 +137,7 @@ func geminiThinkingLevelFor(model string, intent claudeThinkingIntent) string {
 	if tier == "minimal" && !isFlash {
 		tier = "low"
 	}
-	supportsMedium := name == "gemini-4-argon" || name == "gemini-4-carbon" || name == "gemini-4-hydrogen"
-	if tier == "medium" && !isFlash && !strings.HasPrefix(name, "gemini-3.1-pro") && !supportsMedium {
-		tier = "high"
-	}
-	if tier == "xhigh" && name != "gemini-4-hydrogen" {
+	if tier == "medium" && !isFlash && !strings.HasPrefix(name, "gemini-3.1-pro") && name != "gemini-4-carbon" {
 		tier = "high"
 	}
 	return tier
@@ -173,7 +166,7 @@ func geminiThinkingBudgetFor(model string, intent claudeThinkingIntent) (budget 
 		budget = 1024
 	case "medium":
 		budget = 8192
-	case "high", "xhigh":
+	case "high":
 		budget = maxBudget
 	default:
 		if intent.budgetTokens <= 0 {
