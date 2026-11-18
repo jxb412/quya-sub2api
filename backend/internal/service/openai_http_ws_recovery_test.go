@@ -375,7 +375,9 @@ func TestHTTPWSRecoveryForwardNeverRestoresAcrossScopeOrCredential(t *testing.T)
 			case "api_key":
 				key, exists := c.Get("api_key")
 				require.True(t, exists)
-				key.(*APIKey).ID++
+				apiKey, ok := key.(*APIKey)
+				require.True(t, ok)
+				apiKey.ID++
 			case "session":
 				c.Request.Header.Set("session-id", "different-customer-session")
 			case "authorization":
