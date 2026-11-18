@@ -149,7 +149,7 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	if errors.As(err, &pluginErr) && pluginErr.RequestSent {
 		return err
 	}
-	if attempt := openAIHTTPWSAttemptFromContext(ctx); attempt != nil && attempt.sent.Load() {
+	if attempt := openAIHTTPWSAttemptFromContext(ctx); attempt != nil && attempt.used.Load() && !attempt.fallback.Load() {
 		return err
 	}
 

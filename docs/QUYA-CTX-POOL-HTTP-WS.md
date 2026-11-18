@@ -61,3 +61,21 @@ The `Ctx pool test image` workflow builds the pushed feature commit for
 `linux/amd64` as `ghcr.io/jxb412/sub2api:ctx-pool-<full-commit>`.
 It does not publish a production release tag or replace `latest`.
 This feature adds no database migration.
+
+## GPT-6.2 instruction caching (#8930)
+
+OpenAI documents top-level `instructions` as turn-scoped, uncached input on
+GPT-6.2: https://developers.openai.com/api/docs/guides/keep-prefix-unchanged.
+For `gpt-6.2-sol` and `gpt-6.2-astra` (including supported reasoning suffixes
+and valid dated snapshots), the Codex transform keeps system guidance in its
+original input position as developer messages. Gateway-synthesized default
+instructions are placed in a leading developer message instead of the top-level
+field. Existing explicit top-level instructions remain unchanged.
+
+The Messages forced-instructions template uses the leading developer prefix;
+it does not mirror later developer turns into top-level instructions or discard
+the client's system prompt when the template omits `ExistingInstructions`.
+Continuation requests do not receive another synthetic prefix. GPT-6.1, GPT-5
+and other model families, as well as the existing compact path, retain their
+prior behavior. This corrects eligibility for prompt caching; cache hits remain
+an upstream decision and billing continues to use reported usage.

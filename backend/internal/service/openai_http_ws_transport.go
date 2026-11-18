@@ -281,7 +281,7 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 		}
 		responseID = explicit
 	}
-	if typeName == "" || !(strings.HasPrefix(typeName, "response.") || typeName == "error" || typeName == "codex.rate_limits" || typeName == "rate_limits.updated") {
+	if typeName == "" || (!strings.HasPrefix(typeName, "response.") && typeName != "error" && typeName != "codex.rate_limits" && typeName != "rate_limits.updated") {
 		return errors.New("unexpected HTTP Responses WebSocket event type")
 	}
 	if responseID != "" {

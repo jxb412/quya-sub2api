@@ -100,7 +100,7 @@ func TestHTTPWSPolicyForwardResponses(t *testing.T) {
 					if err != nil {
 						return
 					}
-					defer conn.Close()
+					defer func() { _ = conn.Close() }()
 					_, body, err := conn.ReadMessage()
 					if err != nil {
 						return
@@ -197,7 +197,7 @@ func TestHTTPWSPolicyCompatibilityEntrypoints(t *testing.T) {
 					if err != nil {
 						return
 					}
-					defer conn.Close()
+					defer func() { _ = conn.Close() }()
 					if _, _, err := conn.ReadMessage(); err != nil {
 						return
 					}
@@ -295,7 +295,7 @@ func TestHTTPWSPolicyDoesNotReplayDispatchedGeneration(t *testing.T) {
 				if err != nil {
 					return
 				}
-				defer conn.Close()
+				defer func() { _ = conn.Close() }()
 				if _, _, err := conn.ReadMessage(); err != nil {
 					return
 				}
@@ -317,5 +317,35 @@ func TestHTTPWSPolicyDoesNotReplayDispatchedGeneration(t *testing.T) {
 			require.EqualValues(t, 1, generations.Load())
 			require.Empty(t, upstream.requests, "an already dispatched generation must never be retried through HTTP")
 		})
+	}
+}
+
+func TestHTTPWSPolicyBackgroundRejectionNeverDispatchesOrAuthorizesFailover(t *testing.T) {
+	for _, passthrough := range []bool{false, true} {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("passthrough_%t_stream_%t", passthrough, stream), func(t *testing.T) {
+				svc, account, upstream := newHTTPWSPolicyTestService(t, "https://unused.example")
+				account.Extra["openai_passthrough"] = passthrough
+				dialer := &httpWSTestDialer{}
+				svc.getOpenAIWSConnPool().setClientDialerForTest(dialer)
+				c, _ := newHTTPWSPolicyTestContext("/v1/responses")
+				body := []byte(fmt.Sprintf(`{"model":"gpt-6.1-sol","stream":%t,"background":true,"input":"perform this once","instructions":"Only this turn"}`, stream))
+				original := string(body)
+				result, err := svc.Forward(context.Background(), c, account, body)
+				require.Error(t, err)
+				require.Nil(t, result)
+				var failover *UpstreamFailoverError
+				if errors.As(err, &failover) {
+					require.False(t, failover.ShouldRetryNextAccount(), "local payload rejection must not switch to another account")
+					require.False(t, failover.RetryableOnSameAccount)
+					require.False(t, failover.SafeToFailoverAfterWrite)
+				} else {
+					require.ErrorContains(t, err, "background Responses are not supported")
+				}
+				require.Zero(t, dialer.count, "unsupported background generation must be rejected before connecting")
+				require.Empty(t, upstream.requests, "background generation must not silently become synchronous HTTP generation")
+				require.Equal(t, original, string(body), "the caller's request semantics must remain intact")
+			})
+		}
 	}
 }

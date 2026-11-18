@@ -104,11 +104,11 @@ func (s *OpenAIGatewayService) withOpenAIHTTPWSPolicy(ctx context.Context, c *gi
 			result.UpstreamTerminalEvent = terminal
 		}
 	}
-	if err != nil && attempt.sent.Load() {
+	if err != nil && attempt.used.Load() && !attempt.fallback.Load() {
 		var failover *UpstreamFailoverError
 		if errors.As(err, &failover) {
 			// Keep the upstream status/error envelope for normal handler mapping,
-			// but prevent both same-account retry and switching after dispatch.
+			// but prevent replay after dispatch or an adapter validation failure.
 			stopped := *failover
 			stopped.NextAccountAction = NextAccountStop
 			stopped.RetryableOnSameAccount = false
