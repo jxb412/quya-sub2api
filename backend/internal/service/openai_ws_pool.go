@@ -71,6 +71,9 @@ type openAIWSAcquireRequest struct {
 	Account *Account
 	WSURL   string
 	Headers http.Header
+	// StrictIdentity isolates HTTP-to-WS adapters by the complete transport and
+	// authenticated conversation identity. Empty retains native ingress policy.
+	StrictIdentity string
 	// HeadersFactory is evaluated inside dialConn. It exists so credentials
 	// whose authorization is per-dial (Agent Identity) are never cached in
 	// lastAcquire or delayed prewarm state.
@@ -84,6 +87,7 @@ type openAIWSAcquireRequest struct {
 }
 
 type openAIWSHandshakeCompatibilityKey struct {
+	strictIdentity      string
 	betaFeatures        string
 	codexInstallationID string
 	sessionIDHyphen     string
@@ -1151,7 +1155,7 @@ func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireReque
 
 retryAcquire:
 	accountID := req.Account.ID
-	compatibility := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	compatibility := openAIWSAcquireCompatibility(req)
 	routingAffinity := normalizeOpenAIWSRoutingAffinity(req.Headers)
 	effectiveMaxConns := p.effectiveMaxConnsByAccount(req.Account)
 	if effectiveMaxConns <= 0 {
@@ -2139,6 +2143,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 		if errors.As(err, &handshakeErr) && handshakeErr != nil {
 			responseBody = append([]byte(nil), handshakeErr.Body...)
 		}
+		logOpenAIWSPoolHandshakeFailure(req, status, handshakeHeaders, responseBody, err)
 		return nil, &openAIWSDialError{
 			StatusCode:      status,
 			ResponseHeaders: cloneHeader(handshakeHeaders),
@@ -2158,7 +2163,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 	accountID := req.Account.ID
 	evict := func() { p.evictConn(accountID, id) }
 	pooledConn.onPeerClosed.Store(&evict)
-	pooledConn.handshakeCompatibility = normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	pooledConn.handshakeCompatibility = openAIWSAcquireCompatibility(req)
 	pooledConn.routingAffinity = normalizeOpenAIWSRoutingAffinity(req.Headers)
 	return pooledConn, nil
 }
@@ -2339,7 +2344,18 @@ func cloneOpenAIWSAcquireRequestPtr(req *openAIWSAcquireRequest) *openAIWSAcquir
 func sameOpenAIWSPrewarmTarget(a, b openAIWSAcquireRequest) bool {
 	return stringsTrim(a.WSURL) == stringsTrim(b.WSURL) &&
 		stringsTrim(a.ProxyURL) == stringsTrim(b.ProxyURL) &&
-		normalizeOpenAIWSHandshakeCompatibility(a.Account, a.Headers) == normalizeOpenAIWSHandshakeCompatibility(b.Account, b.Headers)
+		openAIWSAcquireCompatibility(a) == openAIWSAcquireCompatibility(b)
+}
+
+func openAIWSAcquireCompatibility(req openAIWSAcquireRequest) openAIWSHandshakeCompatibilityKey {
+	if req.StrictIdentity != "" {
+		// The adapter identity already includes all stable handshake headers.
+		// Do not reintroduce per-request tracing IDs through native fingerprint
+		// compatibility; those IDs intentionally change on the next HTTP turn.
+		return openAIWSHandshakeCompatibilityKey{strictIdentity: req.StrictIdentity}
+	}
+	key := normalizeOpenAIWSHandshakeCompatibility(req.Account, req.Headers)
+	return key
 }
 
 func normalizeOpenAIWSBetaFeatures(headers http.Header) string {

@@ -480,8 +480,10 @@ type OpenAIGatewayService struct {
 	liveAttestation       liveattestation.Provider
 	liveAttestationCipher SecretEncryptor
 
-	openaiWSPoolOnce               sync.Once
-	openaiWSStateStoreOnce         sync.Once
+	openaiWSPoolOnce       sync.Once
+	openaiWSStateStoreOnce sync.Once
+	// 2026-11-19：HTTP 转 WS 跨请求恢复需要完整历史；独立懒加载有界缓存，不改原 WS 状态接口。
+	openaiHTTPWSReplayStoreOnce    sync.Once
 	openaiSchedulerOnce            sync.Once
 	openaiProxyStreamCircuitOnce   sync.Once
 	openaiWSPassthroughDialerOnce  sync.Once
@@ -489,6 +491,7 @@ type OpenAIGatewayService struct {
 	agentIdentityTaskMu            sync.Mutex
 	openaiWSPool                   *openAIWSConnPool
 	openaiWSStateStore             OpenAIWSStateStore
+	openaiHTTPWSReplayStore        *openAIHTTPWSReplayStore
 	openaiScheduler                OpenAIAccountScheduler
 	openaiWSPassthroughDialer      openAIWSClientDialer
 	openaiWSSessionPreemptions     openAIWSSessionPreemptRegistry

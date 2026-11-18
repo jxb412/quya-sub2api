@@ -25,7 +25,7 @@ import (
 // to OpenAI Responses API format, forwards to the OpenAI upstream, and converts
 // the response back to Anthropic Messages format. This enables Claude Code
 // clients to access OpenAI models through the standard /v1/messages endpoint.
-func (s *OpenAIGatewayService) ForwardAsAnthropic(
+func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 	ctx context.Context,
 	c *gin.Context,
 	account *Account,
@@ -925,6 +925,8 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 			if !ok {
 				if frame, ok := parser.Finish(); ok {
 					payload := openAICompatPayloadWithEventType(frame.Data, frame.EventType)
+					// 2026-11-19：在客户端工具名还原前保存完整上游终态，供 HTTP 兜底续接。
+					observeOpenAIHTTPWSHTTPHistory(resp, []byte(payload), frame.EventType)
 					payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
 					var event apicompat.ResponsesStreamEvent
 					if err := json.Unmarshal([]byte(payload), &event); err == nil {
@@ -966,6 +968,8 @@ func (s *OpenAIGatewayService) readOpenAICompatBufferedTerminal(
 				continue
 			}
 			payload := openAICompatPayloadWithEventType(frame.Data, frame.EventType)
+			// 2026-11-19：Chat/Messages 共用现有缓冲解析点，不额外读取响应流。
+			observeOpenAIHTTPWSHTTPHistory(resp, []byte(payload), frame.EventType)
 			payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
 
 			var event apicompat.ResponsesStreamEvent
@@ -1112,6 +1116,8 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 
 	// processDataLine handles a single "data: ..." SSE line from upstream.
 	processDataLine := func(payload string) bool {
+		// 2026-11-19：保留转换前 Responses 成功终态，避免 HTTP 兜底后丢下一轮历史。
+		observeOpenAIHTTPWSHTTPHistory(resp, []byte(payload), "")
 		payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
 		if firstChunk {
 			firstChunk = false

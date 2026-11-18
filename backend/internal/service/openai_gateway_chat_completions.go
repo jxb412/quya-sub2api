@@ -64,7 +64,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
 }
 
-func (s *OpenAIGatewayService) forwardAsChatCompletions(
+func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 	ctx context.Context,
 	c *gin.Context,
 	account *Account,
@@ -915,6 +915,8 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 	}
 
 	processDataLine := func(payload string) bool {
+		// 2026-11-19：保留转换前 Responses 成功终态，避免 HTTP 兜底后丢下一轮历史。
+		observeOpenAIHTTPWSHTTPHistory(resp, []byte(payload), "")
 		payload = string(restoreCodexToolNamesFromContext(c, []byte(payload)))
 		if firstChunk {
 			firstChunk = false
