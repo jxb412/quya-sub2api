@@ -302,6 +302,32 @@ func TestOpenAIHTTPWSPoolEarlyCloseAndFailedTerminalAreNotReusable(t *testing.T)
 	}
 }
 
+func TestOpenAIHTTPWSPoolDonePreservesWireEventAndRecordsActualTerminalStatus(t *testing.T) {
+	for _, status := range []string{"completed", "failed", "incomplete", "cancelled", "canceled"} {
+		t.Run(status, func(t *testing.T) {
+			event := fmt.Sprintf(`{"type":"response.done","response":{"id":"resp_done","status":%q}}`, status)
+			dialer := &httpWSTestDialer{events: []string{event}}
+			svc, account := newHTTPWSTestService(t, dialer)
+			req, attempt := newHTTPWSTestRequest(t, "key:1/session:1", `{"input":[]}`)
+			resp, err := svc.doOpenAIHTTPWSPool(req, "", account)
+			require.NoError(t, err)
+			data, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, "data: "+event+"\n\n", string(data))
+			expectedTerminal := "response." + status
+			if status == "completed" {
+				expectedTerminal = "response.done"
+			}
+			require.Equal(t, expectedTerminal, attempt.terminalEvent.Load())
+			require.Equal(t, "resp_done", attempt.responseID.Load())
+			result := &OpenAIForwardResult{OpenAIWSMode: true, UpstreamTerminalEvent: expectedTerminal}
+			require.Equal(t, status == "completed", result.SucceededForScheduling())
+			require.Equal(t, status != "completed", dialer.conns[0].closed)
+		})
+	}
+}
+
 func TestOpenAIHTTPWSPoolNeverResendsAmbiguousWriteOrRead(t *testing.T) {
 	for _, writeFailure := range []bool{false, true} {
 		t.Run(fmt.Sprintf("write_failure_%t", writeFailure), func(t *testing.T) {

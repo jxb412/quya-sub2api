@@ -299,6 +299,7 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 	if len(b.documents) != 0 {
 		return errors.New("HTTP Responses WebSocket terminal event has trailing documents")
 	}
+	terminalEvent := typeName
 	if typeName != "error" {
 		if responseID == "" || !response.IsObject() {
 			return errors.New("HTTP Responses WebSocket terminal is missing its response")
@@ -309,6 +310,11 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 			if status != "completed" && status != "failed" && status != "incomplete" && status != "cancelled" && status != "canceled" {
 				return errors.New("HTTP Responses WebSocket done event has nonterminal status")
 			}
+			if status != "completed" {
+				// The original event remains untouched for downstream clients,
+				// while scheduling must distinguish a failed done from success.
+				terminalEvent = "response." + status
+			}
 		} else if status != expected {
 			return errors.New("HTTP Responses WebSocket terminal status contradicts its event type")
 		}
@@ -316,7 +322,7 @@ func (b *openAIHTTPWSSSEBody) validateEvent(message []byte) error {
 	}
 	b.terminal = true
 	if b.onEvent != nil {
-		b.onEvent(b.responseID, typeName)
+		b.onEvent(b.responseID, terminalEvent)
 	}
 	return nil
 }

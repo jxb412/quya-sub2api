@@ -22,8 +22,8 @@ and the other explicit modes do not opt HTTP clients into this policy.
    WS connection, or another account. A write/read failure can have an unknown
    generation outcome and must not cause duplicate execution or charges.
 
-The five-second deadline covers connection acquisition, not video/text
-generation or response streaming. Those keep the configured read timeouts.
+The five-second deadline covers connection acquisition. Generation and response
+streaming keep the configured read timeouts.
 Explicit `/responses/compact` requests keep their existing HTTP protocol.
 Background generation is unsupported by this WS adapter and is rejected before
 sending. Payload validation errors do not trigger connection retries.
