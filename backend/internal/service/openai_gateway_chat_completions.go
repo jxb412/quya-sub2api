@@ -64,7 +64,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	return s.forwardAsChatCompletions(ctx, c, account, body, promptCacheKey, defaultMappedModel, false)
 }
 
-func (s *OpenAIGatewayService) forwardAsChatCompletions(
+func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 	ctx context.Context,
 	c *gin.Context,
 	account *Account,

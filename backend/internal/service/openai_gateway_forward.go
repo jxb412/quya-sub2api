@@ -19,7 +19,7 @@ import (
 )
 
 // Forward forwards request to OpenAI API
-func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	// 在任何账号级 client_metadata / prompt_cache_key / 指纹改写之前抓取
 	// 客户端原始会话信号。Forward 可能因上游失败被同一请求多次调用；已有快照时
 	// 保留首次值，确保换账号后 previous_response_id pin 与 BPS 会话锚点不漂移。
@@ -129,7 +129,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 	}
 	wsDecision := s.getOpenAIWSProtocolResolver().Resolve(account)
-	// 仅允许 WS 入站请求走 WS 上游，避免出现 HTTP -> WS 协议混用。
+	// HTTP 入站保留原有规范化/响应解析；显式 ctx_pool 在 doOpenAIUpstream 切换上游传输。
 	wsDecision = resolveOpenAIWSDecisionByClientTransport(wsDecision, GetOpenAIClientTransport(c))
 	passthroughEnabled := account.IsOpenAIPassthroughEnabled()
 	compactPath := isOpenAIResponsesCompactPath(c)

@@ -149,6 +149,9 @@ func (s *OpenAIGatewayService) handleOpenAIUpstreamTransportError(ctx context.Co
 	if errors.As(err, &pluginErr) && pluginErr.RequestSent {
 		return err
 	}
+	if attempt := openAIHTTPWSAttemptFromContext(ctx); attempt != nil && attempt.sent.Load() {
+		return err
+	}
 
 	if classifyUpstreamTransportError(err).Persistent {
 		s.tempUnscheduleOpenAITransportError(ctx, account, safeErr)
