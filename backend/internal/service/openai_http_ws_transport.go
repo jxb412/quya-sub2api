@@ -53,10 +53,13 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 	if err != nil {
 		return nil, fmt.Errorf("read HTTP Responses WebSocket payload: %w", err)
 	}
-	body, err := io.ReadAll(io.LimitReader(reader, openAIWSMessageReadLimitBytes+1))
+	// This is the prepared HTTP body, already admitted by the HTTP ingress
+	// size limits. The upstream event read limit is not a request write limit:
+	// applying it here rejects otherwise valid long conversations above 16 MiB.
+	body, err := io.ReadAll(reader)
 	_ = reader.Close()
-	if err != nil || int64(len(body)) > openAIWSMessageReadLimitBytes {
-		return nil, errors.New("HTTP Responses WebSocket payload exceeds the message limit or cannot be read")
+	if err != nil {
+		return nil, fmt.Errorf("read HTTP Responses WebSocket payload: %w", err)
 	}
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil || payload == nil {
