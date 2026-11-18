@@ -598,6 +598,18 @@ func (s *BillingService) initFallbackPricing() {
 		SupportsCacheBreakdown:     false,
 	}
 
+	// GPT-6.2 Standard rates supplied on 2026-11-18; other tiers are unspecified.
+	s.fallbackPrices["gpt-6.2-astra"] = &ModelPricing{
+		InputPricePerToken:     8e-6,
+		OutputPricePerToken:    40e-6,
+		CacheReadPricePerToken: 0.4e-6,
+	}
+	s.fallbackPrices["gpt-6.2-sol"] = &ModelPricing{
+		InputPricePerToken:     2e-6,
+		OutputPricePerToken:    10e-6,
+		CacheReadPricePerToken: 0.1e-6,
+	}
+
 	s.fallbackPrices["gpt-6-astra"] = &ModelPricing{
 		InputPricePerToken:                 10e-6,
 		InputPricePerTokenPriority:         20e-6,
@@ -1087,6 +1099,10 @@ func (s *BillingService) initFallbackPricing() {
 // getFallbackPricing 根据模型系列获取回退价格
 func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	modelLower := normalizeAntigravityClaudeTierAlias(strings.ToLower(model))
+	switch modelLower {
+	case "gpt-6.2-astra", "gpt-6.2-sol":
+		return s.fallbackPrices[modelLower]
+	}
 	if modelLower == "gpt-image-2.6-flare" || modelLower == "gpt-image-2.6-sunburst" {
 		p := openAIGPTImage25FallbackPricing
 		return &ModelPricing{

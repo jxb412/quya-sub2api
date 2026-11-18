@@ -57,6 +57,24 @@ var (
 		Mode:                    "chat",
 		SupportsPromptCaching:   true,
 	}
+	// GPT-6.2 Standard rates supplied on 2026-11-18 (USD/token).
+	// Other tiers, cache-write rates and context limits are not specified.
+	openAIGPT62AstraFallbackPricing = &LiteLLMModelPricing{
+		InputCostPerToken:       8e-6,
+		OutputCostPerToken:      40e-6,
+		CacheReadInputTokenCost: 0.4e-6,
+		LiteLLMProvider:         "openai",
+		Mode:                    "chat",
+		SupportsPromptCaching:   true,
+	}
+	openAIGPT62SolFallbackPricing = &LiteLLMModelPricing{
+		InputCostPerToken:       2e-6,
+		OutputCostPerToken:      10e-6,
+		CacheReadInputTokenCost: 0.1e-6,
+		LiteLLMProvider:         "openai",
+		Mode:                    "chat",
+		SupportsPromptCaching:   true,
+	}
 	openAIGPT6AstraFallbackPricing = &LiteLLMModelPricing{
 		InputCostPerToken:                   1e-05,
 		InputCostPerTokenPriority:           2e-05,
@@ -1617,6 +1635,16 @@ func (s *PricingService) matchByModelFamily(model string) *LiteLLMModelPricing {
 // 5. gpt-5.4* -> 业务静态兜底价
 // 6. 最终回退到 DefaultTestModel (gpt-5.1-codex)
 func (s *PricingService) matchOpenAIModel(model string) *LiteLLMModelPricing {
+	// Exact catalog/override entries have already been checked. When a remote
+	// catalog lags, keep these distinct Standard cards ahead of generic GPT
+	// variants and the old default model; do not guess prices for new suffixes.
+	switch model {
+	case "gpt-6.2-astra":
+		return openAIGPT62AstraFallbackPricing
+	case "gpt-6.2-sol":
+		return openAIGPT62SolFallbackPricing
+	}
+
 	if strings.HasPrefix(model, "gpt-5.3-codex-spark") {
 		if pricing, ok := s.pricingData["gpt-5.1-codex"]; ok {
 			logger.LegacyPrintf("service.pricing", "[Pricing][SparkBilling] %s -> %s billing", model, "gpt-5.1-codex")
