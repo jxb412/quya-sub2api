@@ -404,7 +404,8 @@ export default {
       searchGroups: 'Search group name or platform',
       noGroups: 'No groups available',
       accountPlanScope: 'Account plan scope',
-      accountPlanScopeHint: 'Only audit requests routed to accounts with the selected upstream plan type. Leave empty to audit every plan.',
+      // 2026-11-20: explain PRO family matching so the covered plan variants are clear.
+      accountPlanScopeHint: 'Only audit requests routed to accounts with the selected upstream plan type. Leave empty to audit every plan. PRO includes pro, pro20, pro100, pro200, pro500, prolite, promax, and chatgptpro.',
       accountPlanScopeAll: 'All account plan types',
       accountPlanScopeSelected: 'Auditing {count} plan types',
       accountPlanTypePro: 'PRO',

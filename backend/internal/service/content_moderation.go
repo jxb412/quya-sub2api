@@ -2487,8 +2487,25 @@ func (cfg *ContentModerationConfig) matchesAccountPlanType(planType string) bool
 		if strings.EqualFold(strings.TrimSpace(candidate), planType) {
 			return true
 		}
+		if strings.EqualFold(strings.TrimSpace(candidate), "pro") && contentModerationIsProPlan(planType) {
+			return true
+		}
 	}
 	return false
+}
+
+// 2026-11-20：风控 PRO 范围覆盖已知 Pro 套餐及导入别名，修复 pro20/pro200/pro500
+// 因原始套餐值不等于 pro 而跳过审核的问题。只在风控匹配时归类，不改账号原始套餐，
+// 也不使用 pro* 前缀匹配，避免将未知套餐或企业/教育套餐误纳入个人 Pro 范围。
+func contentModerationIsProPlan(planType string) bool {
+	key := strings.Join(strings.Fields(strings.ToLower(planType)), "")
+	key = strings.NewReplacer("_", "", "-", "").Replace(key)
+	switch key {
+	case "pro", "pro20", "pro100", "pro200", "pro500", "prolite", "promax", "chatgptpro":
+		return true
+	default:
+		return false
+	}
 }
 
 // hasAccountScope 表示是否配置了账号范围（套餐类型 / 账号类型 / 指定账号）。

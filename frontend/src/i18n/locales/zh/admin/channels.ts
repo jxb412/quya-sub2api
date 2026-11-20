@@ -404,7 +404,8 @@ export default {
       searchGroups: '搜索分组名称或平台',
       noGroups: '暂无可用分组',
       accountPlanScope: '账号套餐范围',
-      accountPlanScopeHint: '仅对调度到所选上游套餐类型账号的请求执行风控；留空表示所有套餐类型。',
+      // 2026-11-20：说明 PRO 按套餐家族匹配，避免用户将 pro20 等档位误认为不在审核范围内。
+      accountPlanScopeHint: '仅对调度到所选上游套餐类型账号的请求执行风控；留空表示所有套餐类型。PRO 包含 pro、pro20、pro100、pro200、pro500、prolite、promax 和 chatgptpro。',
       accountPlanScopeAll: '全部账号套餐类型',
       accountPlanScopeSelected: '当前审计 {count} 个套餐类型',
       accountPlanTypePro: 'PRO',
