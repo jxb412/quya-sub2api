@@ -2,7 +2,7 @@ name: Ctx pool test image
 
 on:
   push:
-    branches: ['feat/ctx-pool-http-ws']
+    branches: ['feat/ctx-pool-http-ws', 'merge/upstream-0.2.24-ctxpool']
   workflow_dispatch:
 
 permissions:
@@ -40,7 +40,9 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
         run: |
           echo "tag=ghcr.io/${REPO_OWNER,,}/sub2api:ctx-pool-${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
-          echo "version=0.4.27-quya.1-ctxpool.${SOURCE_SHA:0:12}" >> "$GITHUB_OUTPUT"
+          # 2026-11-20: use the merged Quya release version so test images do not retain an old release label.
+          release_version="$(tr -d '\r\n' < backend/cmd/server/VERSION)"
+          echo "version=${release_version}-ctxpool.${SOURCE_SHA:0:12}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         id: build
         with:
