@@ -194,3 +194,161 @@ func TestGeminiNeonAndHydrogenOverrideFileRemainsAuthoritative(t *testing.T) {
 		})
 	}
 }
+
+// Hydrogen's remote card as observed on 2026-11-21 incorrectly charges writes
+// at the input rate despite Google's published implicit-caching-only policy.
+const geminiHydrogenRemoteCachePriceJSON = `{
+	"input_cost_per_token": 1.5e-6, "input_cost_per_token_priority": 2.7e-6,
+	"output_cost_per_token": 7.5e-6, "output_cost_per_token_priority": 13.5e-6,
+	"cache_read_input_token_cost": 0.075e-6, "cache_read_input_token_cost_priority": 0.135e-6,
+	"cache_creation_input_token_cost": 1.5e-6, "cache_creation_input_token_cost_priority": 2.7e-6,
+	"litellm_provider": "gemini", "supports_prompt_caching": true, "supports_service_tier": true
+}`
+
+func TestGeminiImplicitCachingIgnoresRemoteWriteAndStoragePrices(t *testing.T) {
+	for _, base := range []string{"gemini-4-hydrogen", "gemini-4-neon"} {
+		var fields map[string]any
+		require.NoError(t, json.Unmarshal([]byte(geminiHydrogenRemoteCachePriceJSON), &fields))
+		// Include the other supported explicit-cache fields to guard against a
+		// later remote catalog adding storage or TTL prices for these models.
+		fields["cache_creation_input_token_cost_above_1hr"] = 4e-6
+		fields["cache_storage_cost_per_token_per_hour"] = 5e-6
+		factor := 1.0
+		if base == "gemini-4-neon" {
+			factor = 2
+			for _, key := range []string{"input_cost_per_token", "input_cost_per_token_priority", "output_cost_per_token", "output_cost_per_token_priority", "cache_read_input_token_cost", "cache_read_input_token_cost_priority"} {
+				fields[key] = fields[key].(float64) * factor
+			}
+		}
+		raw := make(map[string]any)
+		for _, suffix := range []string{"", "-low", "-medium", "-high", "-xhigh", "-tiered", "-tiered-high", "-tiered-xhigh", "-sonar"} {
+			for _, prefix := range []string{"", "models/", "google/", "projects/p/locations/global/publishers/google/models/"} {
+				raw[prefix+base+suffix] = fields
+			}
+		}
+		body, err := json.Marshal(raw)
+		require.NoError(t, err)
+		catalog := &PricingService{}
+		catalog.pricingData, err = catalog.parsePricingData(body)
+		require.NoError(t, err)
+		billing := NewBillingService(&config.Config{}, catalog)
+		for model := range raw {
+			t.Run(model, func(t *testing.T) {
+				parsed := catalog.pricingData[model]
+				require.NotNil(t, parsed)
+				require.Zero(t, parsed.CacheCreationInputTokenCost)
+				require.Zero(t, parsed.CacheCreationInputTokenCostPriority)
+				require.Zero(t, parsed.CacheCreationInputTokenCostAbove1hr)
+				require.Zero(t, parsed.CacheStorageCostPerTokenPerHour)
+				require.False(t, parsed.CacheCreationInputTokenCostExplicit)
+				// The admin default-price endpoint calls this same method.
+				price, err := billing.GetModelPricing(model)
+				require.NoError(t, err)
+				require.Zero(t, price.CacheCreationPricePerToken)
+				require.Zero(t, price.CacheCreationPricePerTokenPriority)
+				require.Zero(t, price.CacheCreation5mPrice)
+				require.Zero(t, price.CacheCreation1hPrice)
+				require.False(t, price.SupportsCacheBreakdown)
+				require.Zero(t, billing.CacheStoragePricePerTokenHour(model))
+				for tier, rate := range map[string]float64{"": 1, "priority": 1.8} {
+					cost, err := billing.CalculateCostWithServiceTier(model, UsageTokens{
+						InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000,
+						CacheCreationTokens: 1_000_000, CacheCreation5mTokens: 300_000, CacheCreation1hTokens: 700_000,
+					}, 1, tier)
+					require.NoError(t, err)
+					require.Zero(t, cost.CacheCreationCost)
+					require.InDelta(t, 9.075*factor*rate, cost.TotalCost, 1e-12)
+				}
+			})
+		}
+	}
+}
+
+func TestGeminiImplicitCachingPreservesOtherModelCards(t *testing.T) {
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal([]byte(geminiHydrogenRemoteCachePriceJSON), &fields))
+	fields["cache_creation_input_token_cost_above_1hr"] = 4e-6
+	fields["cache_storage_cost_per_token_per_hour"] = 5e-6
+	raw := make(map[string]any)
+	for _, model := range []string{"gemini-4-carbon", "gemini-2.5-flash", "gemini-4-neon-preview", "gemini-4-hydrogen-cyber", "not-gemini-4-neon"} {
+		raw[model] = fields
+	}
+	body, err := json.Marshal(raw)
+	require.NoError(t, err)
+	data, err := (&PricingService{}).parsePricingData(body)
+	require.NoError(t, err)
+	for model, price := range data {
+		require.InDelta(t, 1.5e-6, price.CacheCreationInputTokenCost, 1e-15, model)
+		require.InDelta(t, 2.7e-6, price.CacheCreationInputTokenCostPriority, 1e-15, model)
+		require.InDelta(t, 4e-6, price.CacheCreationInputTokenCostAbove1hr, 1e-15, model)
+		require.InDelta(t, 5e-6, price.CacheStorageCostPerTokenPerHour, 1e-15, model)
+		require.True(t, price.CacheCreationInputTokenCostExplicit, model)
+	}
+}
+
+func TestGeminiImplicitCachingOverrideFileKeepsExplicitCacheRates(t *testing.T) {
+	for _, base := range []string{"gemini-4-neon", "gemini-4-hydrogen"} {
+		for _, tc := range []struct {
+			name                          string
+			patch                         map[string]float64
+			write, priority, hour, stored float64
+		}{
+			{"write", map[string]float64{"cache_creation_input_token_cost": 7e-6}, 7e-6, 0, 0, 0},
+			{"priority", map[string]float64{"cache_creation_input_token_cost_priority": 11e-6}, 0, 11e-6, 0, 0},
+			{"hour", map[string]float64{"cache_creation_input_token_cost_above_1hr": 13e-6}, 0, 0, 13e-6, 0},
+			{"storage", map[string]float64{"cache_storage_cost_per_token_per_hour": 17e-6}, 0, 0, 0, 17e-6},
+			{"zero", map[string]float64{
+				"cache_creation_input_token_cost": 0, "cache_creation_input_token_cost_priority": 0,
+				"cache_creation_input_token_cost_above_1hr": 0, "cache_storage_cost_per_token_per_hour": 0,
+			}, 0, 0, 0, 0},
+		} {
+			t.Run(base+"/"+tc.name, func(t *testing.T) {
+				body, err := json.Marshal(map[string]json.RawMessage{base: json.RawMessage(geminiHydrogenRemoteCachePriceJSON)})
+				require.NoError(t, err)
+				patch, err := json.Marshal(map[string]any{
+					base: tc.patch,
+					base + "-xhigh": map[string]float64{
+						"input_cost_per_token": 9e-6, "cache_creation_input_token_cost": 19e-6,
+						"cache_creation_input_token_cost_priority": 23e-6, "cache_storage_cost_per_token_per_hour": 29e-6,
+					},
+				})
+				require.NoError(t, err)
+				catalog := newPricingServiceWithOverride(t, string(patch))
+				catalog.pricingData, _, err = catalog.buildPricingData(body)
+				require.NoError(t, err)
+				billing := NewBillingService(&config.Config{}, catalog)
+				model := "models/" + base + "-high"
+				parsed := catalog.GetModelPricing(model)
+				_, explicitWrite := tc.patch["cache_creation_input_token_cost"]
+				require.Equal(t, explicitWrite, parsed.CacheCreationInputTokenCostExplicit)
+				price, err := billing.GetModelPricing(model)
+				require.NoError(t, err)
+				require.InDelta(t, tc.write, price.CacheCreationPricePerToken, 1e-15)
+				require.InDelta(t, tc.priority, price.CacheCreationPricePerTokenPriority, 1e-15)
+				require.InDelta(t, tc.hour, price.CacheCreation1hPrice, 1e-15)
+				require.InDelta(t, tc.stored, billing.CacheStoragePricePerTokenHour(model), 1e-15)
+				for _, tier := range []string{"", "priority"} {
+					wantWrite := tc.write
+					if tier == "priority" && tc.priority > 0 {
+						wantWrite = tc.priority
+					}
+					if tc.hour > tc.write {
+						wantWrite = tc.hour
+					}
+					cost, err := billing.CalculateCostWithServiceTier(model, UsageTokens{CacheCreationTokens: 1_000_000, CacheCreation1hTokens: 1_000_000}, 1, tier)
+					require.NoError(t, err)
+					require.InDelta(t, wantWrite*1_000_000, cost.CacheCreationCost, 1e-12)
+					// An override-only exact tier is added after default catalog normalization.
+					tierCost, err := billing.CalculateCostWithServiceTier("google/"+base+"-xhigh", UsageTokens{CacheCreationTokens: 1_000_000}, 1, tier)
+					require.NoError(t, err)
+					wantTier := 19.0
+					if tier == "priority" {
+						wantTier = 23
+					}
+					require.InDelta(t, wantTier, tierCost.CacheCreationCost, 1e-12)
+				}
+				require.InDelta(t, 29e-6, billing.CacheStoragePricePerTokenHour("google/"+base+"-xhigh"), 1e-15)
+			})
+		}
+	}
+}
