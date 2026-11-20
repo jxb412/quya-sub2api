@@ -13,6 +13,7 @@ func TestDefaultModels_ContainsFallbackCatalogModels(t *testing.T) {
 
 	required := []string{
 		"models/gemini-4-carbon",
+		"models/gemini-4-neon",
 		"models/gemini-4-hydrogen",
 		"models/gemini-3-pro-image",
 		"models/gemini-3.1-pro-preview-customtools",
@@ -55,16 +56,18 @@ func TestHasFallbackModel_Carbon(t *testing.T) {
 	}
 }
 
-func TestHasFallbackModel_HydrogenUsesPublishedModelID(t *testing.T) {
+func TestHasFallbackModel_NeonAndHydrogenUseNativeModelIDs(t *testing.T) {
 	t.Parallel()
-	for _, model := range []string{"gemini-4-hydrogen", "models/gemini-4-hydrogen"} {
-		if !HasFallbackModel(model) {
-			t.Fatalf("expected Hydrogen fallback: %s", model)
+	for _, family := range []string{"gemini-4-neon", "gemini-4-hydrogen"} {
+		for _, model := range []string{family, "models/" + family} {
+			if !HasFallbackModel(model) {
+				t.Fatalf("expected Gemini 4 fallback: %s", model)
+			}
 		}
-	}
-	for _, suffix := range []string{"-preview", "-low", "-medium", "-high", "-xhigh"} {
-		if HasFallbackModel("gemini-4-hydrogen" + suffix) {
-			t.Fatalf("thinking level must not become a native model ID: %s", suffix)
+		for _, suffix := range []string{"-preview", "-low", "-medium", "-high", "-xhigh"} {
+			if HasFallbackModel(family + suffix) {
+				t.Fatalf("tier or preview alias must not become a native model ID: %s", family+suffix)
+			}
 		}
 	}
 }

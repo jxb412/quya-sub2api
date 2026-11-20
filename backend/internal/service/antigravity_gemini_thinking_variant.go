@@ -13,15 +13,16 @@ import (
 // gemini-3.8-flash-low / -medium / -high / -tiered 这类带后缀的变体，裸名直接转发会被上游
 // 以 404 "Requested entity was not found." 拒绝。
 //
-// 这里在账号 model_mapping 没有为裸名配置显式条目、但配置了它的后缀变体时，
+// 这里在账号 model_mapping 没有为裸名配置别名（或裸名映射到自己）、但配置了它的后缀变体时，
 // 按 thinkingConfig 自动挑一个变体：
-//   - thinkingLevel: "low" / "medium" / "high" → 同名后缀
+//   - thinkingLevel: "low" / "medium" / "high" / "xhigh" → 同名后缀
 //   - thinkingBudget: -1（动态）→ high；0 → low；1..1024 → low；1025..8192 → medium；>8192 → high
 //   - 未携带 thinkingConfig → high（与 Gemini 3 系列默认开启动态思考一致）
 // 选中的后缀在映射表里不存在时按 high → medium → low → tiered 的顺序降级到存在的变体。
-// 显式映射（裸名本身在 model_mapping 里）始终优先，行为与现在完全一致。
+// 映射到其他模型的显式别名始终优先；裸名自映射可按请求档位选择后缀变体。
 
-var geminiThinkingVariantSuffixes = []string{"-low", "-medium", "-high", "-tiered"}
+// 2026-11-21: New Neon/Hydrogen selectors are complete model IDs and must not acquire another tier suffix.
+var geminiThinkingVariantSuffixes = []string{"-low", "-medium", "-high", "-xhigh", "-tiered", "-sonar"}
 
 const (
 	geminiThinkingBudgetLowMax    = 1024
@@ -47,7 +48,7 @@ func hasGeminiThinkingVariantSuffix(model string) bool {
 	return false
 }
 
-// geminiThinkingLevelFromBody 从 Gemini 原生请求体推导期望的思考档位（low/medium/high）。
+// geminiThinkingLevelFromBody 从 Gemini 原生请求体推导期望的思考档位（low/medium/high/xhigh）。
 // 解析失败或未携带 thinkingConfig 时返回 "high"。
 func geminiThinkingLevelFromBody(body []byte) string {
 	if len(body) == 0 {
@@ -65,6 +66,8 @@ func geminiThinkingLevelFromBody(body []byte) string {
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh", "max":
+		return "xhigh"
 	}
 	if tc.ThinkingBudget == nil {
 		return "high"
@@ -96,6 +99,8 @@ func geminiThinkingLevelFromClaudeBody(claudeBody []byte, thinking *antigravity.
 		return "medium"
 	case "high":
 		return "high"
+	case "xhigh":
+		return "xhigh"
 	default:
 		return geminiThinkingLevelFromClaudeThinking(thinking)
 	}
@@ -161,9 +166,16 @@ func resolveGeminiThinkingVariantForLevel(account *Account, requestedModel strin
 		preferred = "high"
 	}
 	order := []string{preferred}
+	// 2026-11-21: Accept published tiered aliases while keeping fixed mappings authoritative.
+	if preferred == "xhigh" {
+		order = append(order, "tiered-xhigh")
+	}
 	for _, level := range []string{"high", "medium", "low", "tiered"} {
 		if level != preferred {
 			order = append(order, level)
+		}
+		if level == "high" {
+			order = append(order, "tiered-high")
 		}
 	}
 	for _, level := range order {

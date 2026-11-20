@@ -573,6 +573,16 @@ func (s *BillingService) initFallbackPricing() {
 		SupportsCacheBreakdown: false,
 	}, 1.8)
 
+	// 2026-11-21: keep Neon billable when the remote catalog has not caught up.
+	// Google AI rates are $3/$15/$0.15 per MTok; Priority is 1.8x.
+	// Only implicit caching is supported, without cache creation or storage fees.
+	s.fallbackPrices["gemini-4-neon"] = pricingWithPriorityMultiplier(&ModelPricing{
+		InputPricePerToken:     3e-6,
+		OutputPricePerToken:    15e-6,
+		CacheReadPricePerToken: 0.15e-6,
+		SupportsCacheBreakdown: false,
+	}, 1.8)
+
 	// OpenAI GPT-5.4（业务指定价格）
 	s.fallbackPrices["gpt-5.4"] = &ModelPricing{
 		InputPricePerToken:             2.5e-6,  // $2.5 per MTok
@@ -1237,8 +1247,12 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	if strings.Contains(modelLower, "gemini-3.8-flash") || strings.Contains(modelLower, "gemini-3-8-flash") {
 		return s.fallbackPrices["gemini-3.8-flash"]
 	}
-	if normalizeGeminiThinkingTierAlias(lastSegment(strings.TrimSpace(modelLower))) == "gemini-4-carbon" {
-		return s.fallbackPrices["gemini-4-carbon"]
+	// 2026-11-21: only known tier IDs inherit the base price; future image,
+	// cyber or other variants must supply their own rate instead of silently
+	// matching a substring of the model name.
+	switch base := normalizeGeminiThinkingTierAlias(lastSegment(strings.TrimSpace(modelLower))); base {
+	case "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon":
+		return s.fallbackPrices[base]
 	}
 	// Cyber 变体不享受 Gemini 4 Argon 的优惠价，必须先于 "gemini-4-argon" 判。
 	if strings.Contains(modelLower, "gemini-4-argon-cyber") {
@@ -1246,9 +1260,6 @@ func (s *BillingService) getFallbackPricing(model string) *ModelPricing {
 	}
 	if strings.Contains(modelLower, "gemini-4-argon") {
 		return s.fallbackPrices["gemini-4-argon"]
-	}
-	if strings.Contains(modelLower, "gemini-4-hydrogen") {
-		return s.fallbackPrices["gemini-4-hydrogen"]
 	}
 
 	// DeepSeek 系列：官方模型 V4 Pro/Flash（含 vision-exp）按各自价卡；

@@ -1388,6 +1388,10 @@ func (s *PricingService) buildModelLookupCandidates(modelLower string) []string 
 	candidates := rawCandidates
 	if isAntigravityThinkingTierAlias(lastSegment(modelLower)) {
 		candidates = append(candidates, normalized)
+		// 2026-11-21: provider-prefixed tier IDs (google/gemini-4-neon-high)
+		// need the same base fallback as models/ and Vertex resource names.
+		// Keep both exact forms first so deployment-specific prices still win.
+		candidates = append(candidates, normalizeModelNameForPricing(lastSegment(modelLower)))
 	} else {
 		// Prefer canonical model names for all other aliases (including models/xxx).
 		candidates = append([]string{normalized}, candidates...)
@@ -1469,9 +1473,18 @@ func isAntigravityThinkingTierAlias(model string) bool {
 
 // normalizeGeminiThinkingTierAlias maps Antigravity's Gemini thinking-tier
 // model IDs to the public base model. The tier controls reasoning behavior, not
-// the published token rate, so this keeps -high/-low/-medium and -tiered
-// requests on the corresponding base model's price card.
+// the published token rate. Only known suffixes use the base price card;
+// exact tier-specific prices still take precedence in buildModelLookupCandidates.
 func normalizeGeminiThinkingTierAlias(model string) string {
+	// 2026-11-21: Neon and Hydrogen add xhigh and the Antigravity routing
+	// aliases from upstream PR #8960 without extending older model families.
+	for _, baseModel := range []string{"gemini-4-neon", "gemini-4-hydrogen"} {
+		for _, tier := range []string{"-high", "-low", "-medium", "-xhigh", "-tiered", "-tiered-high", "-tiered-xhigh", "-sonar"} {
+			if model == baseModel+tier {
+				return baseModel
+			}
+		}
+	}
 	for _, baseModel := range []string{"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon"} {
 		for _, tier := range []string{"-high", "-low", "-medium", "-tiered"} {
 			if model == baseModel+tier {

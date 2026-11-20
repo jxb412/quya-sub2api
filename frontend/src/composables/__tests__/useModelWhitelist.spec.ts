@@ -210,23 +210,60 @@ describe('useModelWhitelist', () => {
     expect(models).toContain('gemini-3.1-pro')
   })
 
-  it('Gemini 4 Carbon exposes the official API model without invented aliases', () => {
+  it('Gemini 4 Carbon uses native bare IDs and Antigravity tiers', () => {
     const models = getModelsByPlatform('gemini')
     expect(models).toContain('gemini-4-carbon')
     expect(models).not.toContain('gemini-4-carbon-preview')
-    expect(getModelsByPlatform('antigravity')).toContain('gemini-4-carbon')
+    expect(getModelsByPlatform('antigravity')).not.toContain('gemini-4-carbon')
+    expect(getModelsByPlatform('antigravity')).not.toContain('gemini-4-carbon-xhigh')
     expect(getPresetMappingsByPlatform('antigravity')).toEqual(expect.arrayContaining([
-      expect.objectContaining({ from: 'gemini-4-carbon', to: 'gemini-4-carbon' })
+      expect.objectContaining({ from: 'gemini-4-carbon', to: 'gemini-4-carbon-high' })
     ]))
+    for (const level of ['low', 'medium', 'high']) {
+      const model = `gemini-4-carbon-${level}`
+      expect(models).not.toContain(model)
+      expect(getModelsByPlatform('antigravity')).toContain(model)
+      expect(getPresetMappingsByPlatform('antigravity')).toContainEqual(expect.objectContaining({ from: model, to: model }))
+    }
     expect(buildModelMappingObject('whitelist', ['gemini-4-carbon'], [])).toEqual({
       'gemini-4-carbon': 'gemini-4-carbon'
     })
   })
 
-  it('Gemini 4 Hydrogen retains its native model ID', () => {
-    expect(getModelsByPlatform('gemini')).toContain('gemini-4-hydrogen')
-    expect(buildModelMappingObject('whitelist', ['gemini-4-hydrogen'], [])).toEqual({
-      'gemini-4-hydrogen': 'gemini-4-hydrogen'
+  it.each(['gemini-4-neon', 'gemini-4-hydrogen'])('%s exposes native IDs and all Antigravity tiers', (family) => {
+    const nativeModels = getModelsByPlatform('gemini')
+    const agModels = getModelsByPlatform('antigravity')
+    const presets = getPresetMappingsByPlatform('antigravity')
+    expect(nativeModels).toContain(family)
+    expect(nativeModels).not.toContain(`${family}-preview`)
+    expect(agModels).not.toContain(family)
+    expect(presets).toContainEqual(expect.objectContaining({ from: family, to: `${family}-high` }))
+    expect(buildModelMappingObject('whitelist', [family], [])).toEqual({ [family]: family })
+
+    for (const level of ['low', 'medium', 'high', 'xhigh']) {
+      const model = `${family}-${level}`
+      expect(nativeModels).not.toContain(model)
+      expect(agModels).toContain(model)
+      expect(presets).toContainEqual(expect.objectContaining({ from: model, to: model }))
+      expect(buildModelMappingObject('whitelist', [model], [])).toEqual({ [model]: model })
+    }
+  })
+
+  it('keeps explicit Gemini 4 tier mappings when saving and reopening', () => {
+    const mapping = buildModelMappingObject('combined', ['gemini-4-neon'], [
+      { from: 'gemini-4-neon', to: 'gemini-4-neon-low' },
+      { from: 'custom-hydrogen', to: 'gemini-4-hydrogen-xhigh' }
+    ])
+    expect(mapping).toEqual({
+      'gemini-4-neon': 'gemini-4-neon-low',
+      'custom-hydrogen': 'gemini-4-hydrogen-xhigh'
+    })
+    expect(splitModelMappingObject(mapping!)).toEqual({
+      allowedModels: [],
+      modelMappings: [
+        { from: 'gemini-4-neon', to: 'gemini-4-neon-low' },
+        { from: 'custom-hydrogen', to: 'gemini-4-hydrogen-xhigh' }
+      ]
     })
   })
 
