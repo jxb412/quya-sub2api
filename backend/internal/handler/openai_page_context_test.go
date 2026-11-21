@@ -54,7 +54,7 @@ func TestNormalizeCodexPageContextFirstMessage(t *testing.T) {
 	require.Equal(t, got, again)
 }
 
-var codexTextContextNamesForTest = []string{"browser_info", "goal_objective", "untrusted_context", "untrusted_content", "ide_context", "proposed_plan"}
+var codexTextContextNamesForTest = []string{"browser_info", "browser_tabs", "terminal_info", "goal_objective", "untrusted_context", "untrusted_content", "ide_context", "proposed_plan"}
 
 func TestNormalizeCodexAdditionalUntrustedContext(t *testing.T) {
 	for _, name := range codexTextContextNamesForTest {
