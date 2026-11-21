@@ -37,12 +37,84 @@ func TestGeminiThinkingLevelFromBody(t *testing.T) {
 		{"budget 24576", `{"generationConfig":{"thinkingConfig":{"thinkingBudget":24576}}}`, "high"},
 		{"thinkingLevel wins over budget", `{"generationConfig":{"thinkingConfig":{"thinkingBudget":24576,"thinkingLevel":"low"}}}`, "low"},
 		{"thinkingLevel medium", `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MEDIUM"}}}`, "medium"},
+		{"thinkingLevel xhigh wins over budget", `{"generationConfig":{"thinkingConfig":{"thinkingLevel":" XHIGH ","thinkingBudget":1024}}}`, "xhigh"},
+		{"thinkingLevel max", `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"max"}}}`, "xhigh"},
 		{"invalid json", `{"generationConfig":`, "high"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, geminiThinkingLevelFromBody([]byte(tt.body)))
 		})
+	}
+}
+
+// 2026-11-21: New Gemini 4 tiers may follow effort only for a self-mapped base;
+// fixed aliases and explicitly selected tier IDs must keep their configured target.
+func TestGemini4ThinkingVariantsRespectMappingIntent(t *testing.T) {
+	svc := &AntigravityGatewayService{}
+	for _, base := range []string{"gemini-4-neon", "gemini-4-hydrogen"} {
+		t.Run(base, func(t *testing.T) {
+			mapping := map[string]string{base: base}
+			for _, tier := range []string{"low", "medium", "high", "xhigh", "tiered", "tiered-high", "tiered-xhigh", "sonar"} {
+				mapping[base+"-"+tier] = base + "-" + tier
+			}
+			selfMapped := newAntigravityAccountWithMapping(mapping)
+			for _, tier := range []string{"low", "medium", "high", "xhigh"} {
+				require.Equal(t, base+"-"+tier, svc.getMappedModelForThinkingLevel(selfMapped, base, tier))
+				native := []byte(`{"generationConfig":{"thinkingConfig":{"thinkingLevel":"` + tier + `"}}}`)
+				target, ok := resolveGeminiThinkingVariant(selfMapped, base, native)
+				require.True(t, ok)
+				require.Equal(t, base+"-"+tier, target)
+			}
+			require.Equal(t, base+"-high", svc.getMappedModel(selfMapped, base))
+			for _, tier := range []string{"low", "medium", "high", "xhigh", "tiered", "tiered-high", "tiered-xhigh", "sonar"} {
+				require.Equal(t, base+"-"+tier, svc.getMappedModelForThinkingLevel(selfMapped, base+"-"+tier, "xhigh"))
+			}
+			for _, target := range []string{base + "-high", base + "-sonar", "gemini-pro-agent"} {
+				mapping[base] = target
+				fixed := newAntigravityAccountWithMapping(mapping)
+				require.Equal(t, target, svc.getMappedModelForThinkingLevel(fixed, base, "xhigh"))
+				require.Equal(t, target, svc.getMappedModelForThinkingLevel(fixed, base, "low"))
+			}
+			defaults := newAntigravityAccountWithMapping(nil)
+			require.Equal(t, base+"-high", svc.getMappedModelForThinkingLevel(defaults, base, "xhigh"))
+		})
+	}
+}
+
+func TestGeminiThinkingVariantTieredFallbacks(t *testing.T) {
+	// Use a custom base so injected default catalog tiers cannot mask fallback ordering.
+	const base = "gemini-custom"
+	for _, tc := range []struct {
+		name, preferred, want string
+		tiers                 map[string]string
+	}{
+		{"prefer xhigh", "xhigh", "xhigh", map[string]string{"xhigh": "xhigh", "tiered-xhigh": "tiered-xhigh", "high": "high"}},
+		{"tiered xhigh before high", "xhigh", "tiered-xhigh", map[string]string{"tiered-xhigh": "tiered-xhigh", "high": "high"}},
+		{"xhigh falls back to high", "xhigh", "high", map[string]string{"high": "high", "tiered-high": "tiered-high"}},
+		{"tiered high before medium", "xhigh", "tiered-high", map[string]string{"tiered-high": "tiered-high", "medium": "medium"}},
+		{"default accepts tiered high", "", "tiered-high", map[string]string{"tiered-high": "tiered-high"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mapping := map[string]string{base: base}
+			for key, target := range tc.tiers {
+				mapping[base+"-"+key] = base + "-" + target
+			}
+			target, ok := resolveGeminiThinkingVariantForLevel(newAntigravityAccountWithMapping(mapping), base, tc.preferred)
+			require.True(t, ok)
+			require.Equal(t, base+"-"+tc.want, target)
+		})
+	}
+}
+
+func TestGeminiThinkingLevelFromClaudeBodyPreservesXHigh(t *testing.T) {
+	for _, tc := range []struct{ body, want string }{
+		{`{"output_config":{"effort":"xhigh"}}`, "xhigh"},
+		{`{"output_config":{"effort":" MAX "}}`, "xhigh"},
+		{`{"thinking":{"type":"disabled"},"output_config":{"effort":"xhigh"}}`, "low"},
+		{`{"output_config":{"effort":"medium"}}`, "medium"},
+	} {
+		require.Equal(t, tc.want, geminiThinkingLevelFromClaudeBody([]byte(tc.body), &antigravity.ThinkingConfig{Type: "enabled", BudgetTokens: 32768}))
 	}
 }
 

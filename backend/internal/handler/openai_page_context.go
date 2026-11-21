@@ -14,7 +14,10 @@ var codexSelectedPageName = regexp.MustCompile(`^codex_apps_selected_page_part_(
 // Codex injects external context as standalone outputs, without a model tool call.
 // Use the legacy user-message representation for HTTP Responses interoperability.
 func normalizeCodexUntrustedContext(body []byte) ([]byte, bool) {
-	if !mayContainCodexCallOutputCandidate(body, "codex_apps_open_page", "codex_apps_selected_page_part_", "browser_info", "goal_objective", "untrusted_context") || !hasUniqueJSONMembers(body) {
+	if !mayContainCodexCallOutputCandidate(body,
+		"codex_apps_open_page", "codex_apps_selected_page_part_",
+		"browser_info", "browser_tabs", "terminal_info", "goal_objective", "untrusted_context", "untrusted_content", "ide_context", "proposed_plan",
+	) || !hasUniqueJSONMembers(body) {
 		return body, false
 	}
 	var request map[string]json.RawMessage
@@ -24,6 +27,13 @@ func normalizeCodexUntrustedContext(body []byte) ([]byte, bool) {
 	var input []json.RawMessage
 	if json.Unmarshal(request["input"], &input) != nil {
 		return body, false
+	}
+	// 2026-11-21: #8999/#8991 inject browser/terminal text without call_id.
+	// Follow the official user-text fallback; do not reinterpret an ambiguous
+	// same-name tool result or change the handling of existing context types.
+	var ambiguous map[string]bool
+	if mayContainCodexCallOutputCandidate(body, "browser_tabs", "terminal_info") {
+		ambiguous = codexStandaloneContextAmbiguousCalls(input)
 	}
 	changed := false
 	for i, raw := range input {
@@ -45,13 +55,17 @@ func normalizeCodexUntrustedContext(body []byte) ([]byte, bool) {
 				continue
 			}
 		}
-		name, output := readString("name"), readString("output")
-		if !validCodexUntrustedContext(name, output) {
+		name := readString("name")
+		if ambiguous[name] {
 			continue
 		}
-		text := "<external_" + name + ">" + output + "</external_" + name + ">"
-		if validCodexPageContext(name, output) {
-			text = "<external_" + name + ">\n" + output + "\n</external_" + name + ">"
+		var output *string
+		if json.Unmarshal(item["output"], &output) != nil || output == nil || !validCodexUntrustedContext(name, *output) {
+			continue
+		}
+		text := "<external_" + name + ">" + *output + "</external_" + name + ">"
+		if validCodexPageContext(name, *output) {
+			text = "<external_" + name + ">\n" + *output + "\n</external_" + name + ">"
 		}
 		message := map[string]any{
 			"type": "message",
@@ -85,11 +99,62 @@ func normalizeCodexUntrustedContext(body []byte) ([]byte, bool) {
 
 func validCodexUntrustedContext(name, output string) bool {
 	switch name {
-	case "browser_info", "goal_objective", "untrusted_context":
+	case "browser_info", "browser_tabs", "terminal_info", "goal_objective", "untrusted_context", "ide_context":
 		return strings.TrimSpace(output) != ""
+	case "untrusted_content":
+		// Codex's fallback for an unnamed context source can carry any text, including an empty value.
+		return true
+	case "proposed_plan":
+		// Codex splits an approved plan by byte length, so a chunk can be all whitespace.
+		return output != ""
 	default:
 		return validCodexPageContext(name, output)
 	}
+}
+
+// A completed tool call can coexist with newly injected external context. An
+// unpaired call with the same name leaves the missing-ID output ambiguous.
+func codexStandaloneContextAmbiguousCalls(input []json.RawMessage) map[string]bool {
+	type toolItem struct {
+		Type      string          `json:"type"`
+		Namespace string          `json:"namespace"`
+		Name      string          `json:"name"`
+		CallID    json.RawMessage `json:"call_id"`
+	}
+	var calls []toolItem
+	outputs := make(map[string]int)
+	callCounts := make(map[string]int)
+	for _, raw := range input {
+		var item toolItem
+		if json.Unmarshal(raw, &item) != nil {
+			continue
+		}
+		if item.Type == "function_call_output" {
+			var callID string
+			if json.Unmarshal(item.CallID, &callID) == nil && strings.TrimSpace(callID) != "" {
+				outputs[callID]++
+			}
+		}
+		if item.Type == "function_call" && (item.Namespace == "" || item.Namespace == "agent") &&
+			(item.Name == "browser_tabs" || item.Name == "terminal_info") {
+			calls = append(calls, item)
+			var callID string
+			if json.Unmarshal(item.CallID, &callID) == nil {
+				callCounts[callID]++
+			}
+		}
+	}
+	var ambiguous map[string]bool
+	for _, call := range calls {
+		var callID string
+		if json.Unmarshal(call.CallID, &callID) != nil || strings.TrimSpace(callID) == "" || outputs[callID] != 1 || callCounts[callID] != 1 {
+			if ambiguous == nil {
+				ambiguous = make(map[string]bool)
+			}
+			ambiguous[call.Name] = true
+		}
+	}
+	return ambiguous
 }
 
 func validCodexPageContext(name, output string) bool {

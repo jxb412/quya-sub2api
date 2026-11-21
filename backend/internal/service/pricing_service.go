@@ -719,6 +719,7 @@ func (s *PricingService) parsePricingData(body []byte) (map[string]*LiteLLMModel
 	if err := json.Unmarshal(body, &rawData); err != nil {
 		return nil, fmt.Errorf("parse raw JSON: %w", err)
 	}
+	normalizeGeminiImplicitCachePricing(rawData)
 	rawData, priceOverrides := s.applyPricingOverrides(rawData)
 
 	result := make(map[string]*LiteLLMModelPricing)
@@ -833,6 +834,41 @@ func (s *PricingService) parsePricingData(body []byte) (map[string]*LiteLLMModel
 	}
 
 	return result, nil
+}
+
+// normalizeGeminiImplicitCachePricing corrects default cards before administrator
+// overrides are applied. 2026-11-21: Google's Neon/Hydrogen pricing explicitly
+// supports implicit caching only, but the remote catalog lists Hydrogen write
+// fees. Removing those fields here keeps billing and price displays consistent;
+// override_file can still explicitly configure any of these rates afterward.
+func normalizeGeminiImplicitCachePricing(data map[string]json.RawMessage) {
+	for model, raw := range data {
+		base := normalizeGeminiThinkingTierAlias(lastSegment(strings.ToLower(strings.TrimSpace(model))))
+		if base != "gemini-4-neon" && base != "gemini-4-hydrogen" {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(raw, &fields) != nil || fields == nil {
+			continue
+		}
+		changed := false
+		for _, key := range []string{
+			"cache_creation_input_token_cost",
+			"cache_creation_input_token_cost_priority",
+			"cache_creation_input_token_cost_above_1hr",
+			"cache_storage_cost_per_token_per_hour",
+		} {
+			if _, ok := fields[key]; ok {
+				delete(fields, key)
+				changed = true
+			}
+		}
+		if changed {
+			if normalized, err := json.Marshal(fields); err == nil {
+				data[model] = normalized
+			}
+		}
+	}
 }
 
 // deriveLongContextFromAboveTierFields 把 LiteLLM 目录的 *_above_XXXk_tokens 绝对价字段
@@ -1388,6 +1424,10 @@ func (s *PricingService) buildModelLookupCandidates(modelLower string) []string 
 	candidates := rawCandidates
 	if isAntigravityThinkingTierAlias(lastSegment(modelLower)) {
 		candidates = append(candidates, normalized)
+		// 2026-11-21: provider-prefixed tier IDs (google/gemini-4-neon-high)
+		// need the same base fallback as models/ and Vertex resource names.
+		// Keep both exact forms first so deployment-specific prices still win.
+		candidates = append(candidates, normalizeModelNameForPricing(lastSegment(modelLower)))
 	} else {
 		// Prefer canonical model names for all other aliases (including models/xxx).
 		candidates = append([]string{normalized}, candidates...)
@@ -1469,9 +1509,18 @@ func isAntigravityThinkingTierAlias(model string) bool {
 
 // normalizeGeminiThinkingTierAlias maps Antigravity's Gemini thinking-tier
 // model IDs to the public base model. The tier controls reasoning behavior, not
-// the published token rate, so this keeps -high/-low/-medium and -tiered
-// requests on the corresponding base model's price card.
+// the published token rate. Only known suffixes use the base price card;
+// exact tier-specific prices still take precedence in buildModelLookupCandidates.
 func normalizeGeminiThinkingTierAlias(model string) string {
+	// 2026-11-21: Neon and Hydrogen add xhigh and the Antigravity routing
+	// aliases from upstream PR #8960 without extending older model families.
+	for _, baseModel := range []string{"gemini-4-neon", "gemini-4-hydrogen"} {
+		for _, tier := range []string{"-high", "-low", "-medium", "-xhigh", "-tiered", "-tiered-high", "-tiered-xhigh", "-sonar"} {
+			if model == baseModel+tier {
+				return baseModel
+			}
+		}
+	}
 	for _, baseModel := range []string{"gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash", "gemini-4-argon", "gemini-4-carbon"} {
 		for _, tier := range []string{"-high", "-low", "-medium", "-tiered"} {
 			if model == baseModel+tier {

@@ -504,6 +504,8 @@ export default {
       testConnection: 'Test Connection',
       reAuthorize: 'Re-Authorize',
       refreshToken: 'Refresh Token',
+      refreshTokenHint: 'Tokens are refreshed automatically in the background. Frequent manual refreshes can race the automatic refresh and invalidate the token, pausing the account.',
+      refreshTokenFrequentWarning: 'Less than a minute since the last manual refresh: frequent refreshes can race the background auto-refresh and invalidate the token. Only retry when necessary.',
       noAccountsYet: 'No accounts yet',
       createFirstAccount: 'Create your first account to start using AI services.',
       tokenRefreshed: 'Token refreshed successfully',
@@ -658,7 +660,7 @@ export default {
           'Disabled by default. Enable to allow responses_websockets_v2 capability (still gated by global and account-type switches).',
         wsMode: 'WS mode',
         wsModeDesc:
-          'Applies only to the current OpenAI account type. Select Off to disable WS. Other modes use the selected connection method only when gateway.openai_ws.mode_router_v2_enabled=true; otherwise, they use the context pool.',
+          'Applies only to the current OpenAI account type and requires the global WS and account-type switches. Select Off to disable WS. Passthrough and HTTP Bridge require the gateway mode router; otherwise, they retain context-pool behavior.',
         wsModeOff: 'Off (off)',
         wsModeCtxPool: 'Context Pool (ctx_pool)',
         wsModePassthrough: 'Passthrough (passthrough)',
@@ -666,7 +668,7 @@ export default {
         wsModeShared: 'Shared (shared)',
         wsModeDedicated: 'Dedicated (dedicated)',
         wsModeCtxPoolHint:
-          'The gateway gets and reuses upstream WS connections from a pool, with the pool limit determined by gateway configuration.',
+          'Explicitly selecting Context Pool sends ordinary generation requests through the upstream WS pool first. For HTTP/SSE requests, failed connections are retried up to 3 times, with a 5-second timeout per attempt, before falling back to upstream HTTP. No automatic fallback occurs after sending the generation request, to avoid duplicate generation and charges. Pool limits are set by gateway configuration.',
         wsModePassthroughHint:
           'The gateway opens a separate upstream WS connection for each client session, without using a connection pool.',
         wsModeHttpBridgeHint:

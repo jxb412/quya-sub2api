@@ -178,13 +178,27 @@ var DefaultAntigravityModelMapping = map[string]string{
 	"gemini-3.8-flash-low":    "gemini-3.8-flash-low",
 	"gemini-3.8-flash-medium": "gemini-3.8-flash-medium",
 	"gemini-3.8-flash-tiered": "gemini-3.8-flash-tiered",
-	// Gemini 4 models
-	// Carbon uses the published model ID; do not infer Argon-style tier aliases.
-	"gemini-4-carbon":       "gemini-4-carbon",
-	"gemini-4-argon":        "gemini-4-argon-high",
-	"gemini-4-argon-high":   "gemini-4-argon-high",
-	"gemini-4-argon-low":    "gemini-4-argon-low",
-	"gemini-4-argon-medium": "gemini-4-argon-medium",
+	// 2026-11-21: Antigravity Gemini 4 upstream IDs require a tier suffix.
+	// Bare aliases default to high; the gateway selects request effort only
+	// when no explicit account mapping overrides the alias.
+	"gemini-4-argon":           "gemini-4-argon-high",
+	"gemini-4-argon-high":      "gemini-4-argon-high",
+	"gemini-4-argon-low":       "gemini-4-argon-low",
+	"gemini-4-argon-medium":    "gemini-4-argon-medium",
+	"gemini-4-carbon":          "gemini-4-carbon-high",
+	"gemini-4-carbon-high":     "gemini-4-carbon-high",
+	"gemini-4-carbon-low":      "gemini-4-carbon-low",
+	"gemini-4-carbon-medium":   "gemini-4-carbon-medium",
+	"gemini-4-neon":            "gemini-4-neon-high",
+	"gemini-4-neon-xhigh":      "gemini-4-neon-xhigh",
+	"gemini-4-neon-high":       "gemini-4-neon-high",
+	"gemini-4-neon-low":        "gemini-4-neon-low",
+	"gemini-4-neon-medium":     "gemini-4-neon-medium",
+	"gemini-4-hydrogen":        "gemini-4-hydrogen-high",
+	"gemini-4-hydrogen-xhigh":  "gemini-4-hydrogen-xhigh",
+	"gemini-4-hydrogen-high":   "gemini-4-hydrogen-high",
+	"gemini-4-hydrogen-low":    "gemini-4-hydrogen-low",
+	"gemini-4-hydrogen-medium": "gemini-4-hydrogen-medium",
 	// Gemini 3 image 兼容映射（向 3.1 image 迁移）
 	"gemini-3-pro-image":         "gemini-3.1-flash-image",
 	"gemini-3-pro-image-preview": "gemini-3.1-flash-image",

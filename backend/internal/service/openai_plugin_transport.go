@@ -6,9 +6,16 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 	s.pluginManager = manager
 }
 
-// doOpenAIUpstream 只在 OpenAI OAuth 能力绑定已启用时把真实请求交给插件。
-// 插件返回标准 http.Response，响应解析、错误映射、SSE 和计费仍由现有核心链处理。
+// doOpenAIUpstream applies the explicit HTTP ctx_pool policy before dispatch.
+// Otherwise, enabled OAuth plugins and the normal HTTP transport retain their
+// existing routing. Every transport returns the same response parsing contract.
 func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if attempt := openAIHTTPWSAttemptFromContext(request.Context()); attempt != nil {
+		response, handled, err := s.connectOpenAIHTTPWSPool(request, proxyURL, account, attempt)
+		if handled {
+			return response, err
+		}
+	}
 	if s.pluginManager != nil {
 		// 插件需要客户端自报身份（例如 BPS 降温通道只放行官方 Codex 客户端）：出站身份
 		// 收口已把 UA/originator 改写为网关规范身份，这里补私有头透传，未接管即撤回。
