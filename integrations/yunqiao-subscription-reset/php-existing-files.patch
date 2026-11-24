@@ -1,0 +1,346 @@
+--- a/bootstrap.php
++++ b/bootstrap.php
+@@ -26,6 +26,7 @@
+ require_once __DIR__ . '/src/SubscriptionMutationLock.php';
+ require_once __DIR__ . '/src/SubscriptionRefundRepository.php';
+ require_once __DIR__ . '/src/SubscriptionRefundService.php';
++require_once __DIR__ . '/src/SubscriptionResetService.php';
+ require_once __DIR__ . '/src/InvoiceService.php';
+ require_once __DIR__ . '/src/StoreCatalog.php';
+ require_once __DIR__ . '/src/ExchangeRateService.php';
+--- a/src/App.php
++++ b/src/App.php
+@@ -17,6 +17,7 @@
+     private $oauthProxyPool;
+     private $socks5ProxyAssignment;
+     private $subscriptionRefund;
++    private $subscriptionReset;
+     private $subscriptionReplacementStateFile = __DIR__ . '/../database/subscription_replacement_state.json';
+     private const AFFILIATE_PROMO_COOKIE = 'sub2apipay_affiliate_promo';
+     private const AFFILIATE_PROMO_TS_COOKIE = 'sub2apipay_affiliate_promo_ts';
+@@ -56,6 +57,10 @@
+         $this->subscriptionRefund = new SubscriptionRefundService(
+             $this->repo, new SubscriptionRefundRepository($database->pdo(), $database->driver()), $this->sub2api, Config::sessionSecret()
+         );
++        $this->subscriptionReset = new SubscriptionResetService(
++            $this->repo, new SubscriptionRefundRepository($database->pdo(), $database->driver()), $this->sub2api,
++            Config::sessionSecret(), $this->subscriptionReplacementStateFile
++        );
+ 
+         if ($this->repo->getSettings() === null) {
+             $this->repo->saveSettings(Config::defaults());
+@@ -71,7 +76,7 @@
+         $routePath = strpos($path, '/pay') === 0 ? substr($path, 4) ?: '/' : $path;
+         $this->captureAffiliatePromoVisit($method);
+ 
+-        if ($this->subscriptionRefundHttp($method, $routePath)) {
++        if ($this->subscriptionResetHttp($method, $routePath) || $this->subscriptionRefundHttp($method, $routePath)) {
+             return;
+         }
+ 
+@@ -795,6 +800,54 @@
+             }
+         }
+         return $summary;
++    }
++
++    // 2026-11-24: self-service activation uses the logged-in owner and verified purchase lineage.
++    private function subscriptionResetHttp(string $method, string $path): bool
++    {
++        $pagePath = rtrim(rawurldecode($path), '/');
++        $isPage = $pagePath === '/subscription-reset';
++        $base = '/api/user/subscription-reset';
++        $isApi = $path === $base . '/preview' || $path === $base . '/execute';
++        if (!$isPage && !$isApi) { return false; }
++        $this->sendNoCacheHeaders();
++        $this->sendNoIndexHeaders();
++        header('Referrer-Policy: no-referrer');
++        if ($isPage && ($method === 'GET' || $method === 'HEAD')) {
++            $error = $this->bootstrapEmbeddedSession();
++            $session = $this->session();
++            $mountPrefix = $this->mountPrefix();
++            include __DIR__ . '/../templates/subscription_reset.php';
++            return true;
++        }
++        if (!$isApi) { $this->json(405, '请求方式不支持'); return true; }
++        $session = $this->requireSession();
++        $userId = (int) $session['user_id'];
++        try {
++            if ($method === 'GET' && $path === $base . '/preview') {
++                $id = (string) ($_GET['subscription_id'] ?? '');
++                if (!ctype_digit($id) || (int) $id <= 0) { throw new RuntimeException('请选择有效的订阅'); }
++                $this->json(200, 'success', $this->subscriptionReset->preview($this->settings(), $userId, (int) $id));
++                return true;
++            }
++            if ($method === 'POST' && $path === $base . '/execute') {
++                $this->subscriptionReset->verifyCsrf((string) ($_SERVER['HTTP_X_SUBSCRIPTION_RESET_CSRF'] ?? ''), $userId);
++                $input = $this->jsonBody();
++                if (($input['accepted_rules'] ?? null) !== true || !is_string($input['quote_token'] ?? null) || strlen($input['quote_token']) > 12000) {
++                    throw new RuntimeException('请先核对续购订单并同意重置规则');
++                }
++                $this->json(200, 'success', $this->subscriptionReset->execute($this->settings(), $userId, $input['quote_token']));
++                return true;
++            }
++            $this->json(405, '请求方式不支持');
++        } catch (SubscriptionResetPendingException $e) {
++            $this->json(503, $e->getMessage(), ['retryable' => true]);
++        } catch (SubscriptionMutationBusyException $e) {
++            $this->json(409, $e->getMessage(), ['retryable' => true]);
++        } catch (Throwable $e) {
++            $this->json(400, $e->getMessage());
++        }
++        return true;
+     }
+ 
+     private function subscriptionRefundHttp(string $method, string $path): bool
+@@ -9750,6 +9803,18 @@
+                 $params['lang'] = $_GET['lang'];
+             }
+ 
++            // 2026-11-24: preserve only the reset target and parent origin across token-to-cookie login.
++            // Access tokens and arbitrary return URLs are deliberately not copied to the redirect.
++            if (in_array(rtrim($this->requestPath(), '/'), ['/subscription-reset', '/pay/subscription-reset'], true)) {
++                $subscriptionId = (string) ($_GET['subscription_id'] ?? '');
++                if (ctype_digit($subscriptionId) && (int) $subscriptionId > 0) { $params['subscription_id'] = $subscriptionId; }
++                $source = (string) ($_GET['src_host'] ?? '');
++                $parts = strlen($source) <= 2048 && filter_var($source, FILTER_VALIDATE_URL) ? parse_url($source) : false;
++                if (is_array($parts) && in_array($parts['scheme'] ?? '', ['http', 'https'], true) && !isset($parts['user']) && !isset($parts['pass']) && isset($parts['host'])) {
++                    $params['src_host'] = $parts['scheme'] . '://' . $parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : '');
++                }
++            }
++
+             $target = $this->requestPath();
+             if (!empty($params)) {
+                 $target .= (strpos($target, '?') === false ? '?' : '&') . http_build_query($params);
+--- a/src/Sub2APIClient.php
++++ b/src/Sub2APIClient.php
+@@ -413,6 +413,30 @@
+     {
+         $payload = $this->adminRequest($settings, 'GET', '/api/v1/admin/subscriptions/' . $id, ['timeout' => 8]);
+         if (!is_array($payload['data'] ?? null)) { throw new RuntimeException('订阅信息无效'); }
++        return $payload['data'];
++    }
++
++    // 2026-11-24: durable renewal receipts distinguish a reset from a refund revocation.
++    public function findSubscriptionRenewalActivation(array $settings, int $id): ?array
++    {
++        if ($id <= 0) { throw new RuntimeException('订阅编号无效'); }
++        $payload = $this->adminRequest($settings, 'GET', '/api/v1/admin/subscriptions/' . $id . '/renewal-activation', ['timeout' => 8]);
++        $data = $payload['data'] ?? null;
++        if (!is_array($data) || !is_bool($data['activated'] ?? null)) { throw new RuntimeException('套餐重置状态暂时无法确认'); }
++        if (!$data['activated']) { return null; }
++        $receipt = $data['receipt'] ?? null;
++        if (!is_array($receipt) || (int) ($receipt['old_subscription_id'] ?? 0) !== $id || (int) ($receipt['new_subscription_id'] ?? 0) <= 0) {
++            throw new RuntimeException('套餐重置回执无效');
++        }
++        return $receipt;
++    }
++
++    public function activateSubscriptionRenewal(array $settings, int $id, array $request): array
++    {
++        $payload = $this->adminRequest($settings, 'POST', '/api/v1/admin/subscriptions/' . $id . '/activate-renewal', [
++            'timeout' => 20, 'body' => json_encode($request, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR),
++        ]);
++        if (!is_array($payload['data'] ?? null)) { throw new RuntimeException('套餐重置结果暂时无法确认'); }
+         return $payload['data'];
+     }
+ 
+--- a/src/SubscriptionRefundService.php
++++ b/src/SubscriptionRefundService.php
+@@ -470,6 +470,11 @@
+     private function resumeLocked(array $settings, array $saved): array
+     {
+         if ($saved['status'] === 'completed') { return $saved['result']; }
++        // 2026-11-24: a reset's revocation is not this refund's successful revocation.
++        // Check even in revoked/crediting recovery phases, before issuing any balance credit.
++        if ($this->client->findSubscriptionRenewalActivation($settings, (int) $saved['subscription_id']) !== null) {
++            throw new RuntimeException('原套餐已启用续购套餐，不能把该次撤销作为余额转换，请刷新套餐列表');
++        }
+         if (!in_array($saved['status'], ['prepared', 'revoking', 'revoked', 'crediting'], true) || empty($saved['result']['quote_hash'])) {
+             throw new RuntimeException('余额转换记录版本或阶段异常，请管理员核对，系统不会自动加余额');
+         }
+@@ -496,6 +501,9 @@
+                 }
+                 $this->refunds->stage($id, 'revoking');
+                 $this->client->revokeSubscription($settings, $id);
++                if ($this->client->findSubscriptionRenewalActivation($settings, $id) !== null) {
++                    throw new RuntimeException('原套餐已被续购重置处理，停止余额发放，请核对新套餐');
++                }
+             }
+             $this->refunds->stage($id, 'revoked');
+         } elseif (!$revoked) {
+--- a/src/SubscriptionReplacementService.php
++++ b/src/SubscriptionReplacementService.php
+@@ -147,6 +147,11 @@
+                     if ($this->replacementRefundBlocked($subscriptionId, $sourceCode, $summary)) { $blocked = true; break; }
+                 }
+                 if ($blocked) { continue; }
++                // 2026-11-24: another host may have atomically consumed this old subscription.
++                if ($this->client->findSubscriptionRenewalActivation($this->settings, $subscriptionId) !== null) {
++                    $summary['skipped']++;
++                    continue;
++                }
+                 $notes = SubscriptionPurchaseService::replacementNotes($latestCode, array_column(array_slice($pendingPurchases, 1), 'code'), $subscriptionId);
+                 $pendingKey = (string) $subscriptionId;
+                 $state['pending'][$pendingKey] = [
+@@ -165,6 +170,9 @@
+                 $this->saveState($state);
+ 
+                 $this->client->revokeSubscription($this->settings, $subscriptionId);
++                if ($this->client->findSubscriptionRenewalActivation($this->settings, $subscriptionId) !== null) {
++                    throw new RuntimeException('原套餐已完成自助重置，停止重复自动开通');
++                }
+                 unset($activeById[$subscriptionId]);
+                 $this->client->assignSubscription(
+                     $this->settings,
+@@ -215,6 +223,30 @@
+ 
+             try {
+                 $redeemCode = (string) ($pending['redeem_code'] ?? '');
++                $activation = $this->client->findSubscriptionRenewalActivation($this->settings, $subscriptionId);
++                if ($activation !== null) {
++                    // The durable server receipt wins over a stale local interrupted-cron file.
++                    if (($activation['current_code'] ?? '') !== $redeemCode) {
++                        throw new RuntimeException('原套餐已被其他续购重置操作处理，请核对待恢复记录');
++                    }
++                    unset($state['pending'][$key]);
++                    $this->saveState($state);
++                    $summary['recovered']++;
++                    continue;
++                }
++                // 2026-11-24: a completed legacy cron assignment can itself have been reset,
++                // revoked or expired before this host recovers its stale pending file. Search
++                // all history by owner + group + exact parent + current purchase, not active rows.
++                $successor = $this->findHistoricalReplacement($pending);
++                if ($successor !== null) {
++                    if (isset($activeById[$subscriptionId])) {
++                        throw new RuntimeException('old and replacement subscriptions both exist; review the pending replacement');
++                    }
++                    unset($state['pending'][$key]);
++                    $this->saveState($state);
++                    $summary['recovered']++;
++                    continue;
++                }
+                 if ($redeemCode === '' || !$this->pendingOrderValid($redeemCode, $userId, $groupId, $validityDays)) {
+                     throw new RuntimeException('pending replacement purchase order no longer qualifies');
+                 }
+@@ -246,7 +278,6 @@
+                     continue;
+                 }
+                 $current = $this->client->listUserSubscriptions($this->settings, $userId);
+-                $alreadyAssigned = false;
+                 $anotherActive = false;
+                 foreach ($current as $item) {
+                     if ((int) ($item['id'] ?? 0) === $subscriptionId) {
+@@ -258,21 +289,11 @@
+                     }
+                     if ((int) ($item['group_id'] ?? 0) !== $groupId) { continue; }
+                     if (in_array($redeemCode, $this->extractStoreCodes((string) ($item['notes'] ?? '')), true)) {
+-                        $alreadyAssigned = true;
+-                        break;
++                        throw new RuntimeException('purchase code appears in another subscription without verified replacement lineage; review before reopening');
+                     }
+                     if (($item['status'] ?? '') === 'active') {
+                         $anotherActive = true;
+                     }
+-                }
+-                if ($alreadyAssigned) {
+-                    if (isset($activeById[$subscriptionId])) {
+-                        throw new RuntimeException('old and replacement subscriptions both exist; review the pending replacement');
+-                    }
+-                    unset($state['pending'][$key]);
+-                    $this->saveState($state);
+-                    $summary['recovered']++;
+-                    continue;
+                 }
+                 if ($anotherActive) {
+                     throw new RuntimeException('another subscription exists; refusing to append a pending replacement to it');
+@@ -305,6 +326,9 @@
+                 if (isset($activeById[$subscriptionId])) {
+                     $this->client->revokeSubscription($this->settings, $subscriptionId);
+                     unset($activeById[$subscriptionId]);
++                }
++                if ($this->client->findSubscriptionRenewalActivation($this->settings, $subscriptionId) !== null) {
++                    throw new RuntimeException('原套餐已完成自助重置，停止恢复重复开通');
+                 }
+                 $this->client->assignSubscription(
+                     $this->settings,
+@@ -350,6 +374,78 @@
+         } while (!empty($pageItems) && $page <= $pages && $page <= 1000);
+ 
+         return $items;
++    }
++
++    private function findHistoricalReplacement(array $pending): ?array
++    {
++        $oldId = (int) $pending['old_subscription_id'];
++        $userId = (int) $pending['user_id'];
++        $groupId = (int) $pending['group_id'];
++        $code = (string) $pending['redeem_code'];
++        $found = null;
++        $oldActive = false;
++        $expectedTotal = null;
++        $expectedPageSize = null;
++        $seenIds = [];
++        $page = 1;
++        do {
++            $result = $this->client->listAdminSubscriptions($this->settings, $page, 100, [
++                'user_id' => $userId, 'group_id' => $groupId, 'status' => '', 'sort_by' => 'id', 'sort_order' => 'asc',
++            ]);
++            if (!isset($result['items'], $result['total'], $result['page_size']) || !is_array($result['items']) ||
++                (int) $result['page_size'] <= 0 || (int) $result['total'] < 0) {
++                throw new RuntimeException('replacement history response is incomplete; refusing to issue another subscription');
++            }
++            $pageSize = (int) $result['page_size'];
++            $total = (int) $result['total'];
++            if (($expectedTotal !== null && ($total !== $expectedTotal || $pageSize !== $expectedPageSize)) ||
++                count($result['items']) !== min($pageSize, max(0, $total - ($page - 1) * $pageSize))) {
++                throw new RuntimeException('replacement history changed or pagination is incomplete; retry after verification');
++            }
++            $expectedTotal = $total;
++            $expectedPageSize = $pageSize;
++            foreach ($result['items'] as $item) {
++                if (!is_array($item) || (int) ($item['user_id'] ?? 0) !== $userId || (int) ($item['group_id'] ?? 0) !== $groupId) {
++                    throw new RuntimeException('replacement history owner or group mismatch');
++                }
++                $itemId = (int) ($item['id'] ?? 0);
++                if ($itemId <= 0 || isset($seenIds[$itemId])) { throw new RuntimeException('replacement history contains missing or repeated subscription IDs'); }
++                $seenIds[$itemId] = true;
++                if ((int) ($item['id'] ?? 0) === $oldId) {
++                    $oldActive = ($item['status'] ?? '') === 'active' && empty($item['revoked_at']);
++                    continue;
++                }
++                $notes = (string) ($item['notes'] ?? '');
++                preg_match_all('/^套餐循环检查自动重开，原订阅ID\s*(\d+)\s*$/mu', $notes, $parents);
++                $parentIds = array_values(array_unique(array_map('intval', $parents[1] ?? [])));
++                if (!in_array($oldId, $parentIds, true)) { continue; }
++                if (count($parentIds) !== 1 || (int) ($item['id'] ?? 0) <= 0) {
++                    throw new RuntimeException('replacement successor has ambiguous parent history');
++                }
++                preg_match_all('/^套餐当前购买码\s*[:：]\s*(store_[A-Za-z0-9_-]+)\s*$/mu', $notes, $current);
++                $currentCodes = array_values(array_unique($current[1] ?? []));
++                if (!$currentCodes && strpos($notes, '套餐当前购买码') === false) {
++                    // Older cron versions wrote only this single current-code line.
++                    preg_match_all('/^通过兑换码\s+(store_[A-Za-z0-9_-]+)\s+兑换\s*$/mu', $notes, $legacy);
++                    $currentCodes = array_values(array_unique($legacy[1] ?? []));
++                }
++                if (count($currentCodes) !== 1 || $currentCodes[0] !== $code) {
++                    throw new RuntimeException('replacement successor current purchase differs from pending operation; refusing to reissue');
++                }
++                if ($found !== null && (int) $found['id'] !== (int) $item['id']) {
++                    throw new RuntimeException('multiple replacement successors exist; refusing to reissue');
++                }
++                $found = $item;
++            }
++            if (!$result['items'] && ($page - 1) * $pageSize < $total) {
++                throw new RuntimeException('replacement history page is missing; refusing to reissue');
++            }
++            $page++;
++        } while (($page - 1) * $pageSize < $total && $page <= 100);
++        if (($page - 1) * $pageSize < $total) { throw new RuntimeException('replacement history exceeds scan limit; review before reopening'); }
++        if (count($seenIds) !== $total) { throw new RuntimeException('replacement history count mismatch; refusing to reissue'); }
++        if ($found !== null && $oldActive) { throw new RuntimeException('old and replacement subscriptions both exist; review the pending replacement'); }
++        return $found;
+     }
+ 
+     private function extractStoreCodes(string $notes): array

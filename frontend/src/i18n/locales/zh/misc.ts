@@ -111,6 +111,8 @@ export default {
 
   // User Subscriptions Page
   userSubscriptions: {
+    resetSubscription: '重置订阅',
+    resetLoginRequired: '登录状态已失效，请重新登录后操作。',
     title: '我的订阅',
     description: '查看您的订阅计划和用量',
     noActiveSubscriptions: '暂无有效订阅',

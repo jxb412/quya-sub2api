@@ -487,6 +487,7 @@ export interface SystemSettings {
   api_base_url: string;
   contact_info: string;
   doc_url: string;
+  subscription_reset_url?: string;
   home_content: string;
   compact_home_enabled: boolean;
   hide_ccs_import_button: boolean;
@@ -839,6 +840,7 @@ export interface UpdateSettingsRequest {
   api_base_url?: string;
   contact_info?: string;
   doc_url?: string;
+  subscription_reset_url?: string;
   home_content?: string;
   compact_home_enabled?: boolean;
   hide_ccs_import_button?: boolean;

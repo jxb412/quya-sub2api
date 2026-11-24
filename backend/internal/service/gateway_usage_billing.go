@@ -416,8 +416,10 @@ func finalizePostUsageBilling(ctx context.Context, p *postUsageBillingParams, de
 	}
 
 	if p.IsSubscriptionBill {
-		if p.Cost.ActualCost > 0 && p.User != nil && p.APIKey != nil && p.APIKey.GroupID != nil {
-			deps.billingCacheService.QueueUpdateSubscriptionUsage(p.User.ID, *p.APIKey.GroupID, p.Cost.ActualCost)
+		if p.Cost.ActualCost > 0 && p.User != nil && p.APIKey != nil && p.APIKey.GroupID != nil && p.Subscription != nil && deps.billingCacheService != nil {
+			// 2026-11-24: late charges from a replaced period must never consume
+			// the new subscription's Redis quota, including batch settlement.
+			deps.billingCacheService.QueueUpdateSubscriptionUsage(p.User.ID, *p.APIKey.GroupID, p.Subscription.ID, p.Cost.ActualCost)
 		}
 	} else if p.Cost.ActualCost > 0 && p.User != nil {
 		syncBalanceCacheAfterDeduction(ctx, p, deps, result)

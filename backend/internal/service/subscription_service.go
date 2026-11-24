@@ -602,6 +602,11 @@ func normalizeAssignValidityDays(days int) int {
 
 // RevokeSubscription 撤销订阅
 func (s *SubscriptionService) RevokeSubscription(ctx context.Context, subscriptionID int64) error {
+	// 2026-11-24: serialize legacy store refund/cron revocation with paid renewal
+	// activation. A stale revoke must not report success after another host reset.
+	if s.entClient != nil {
+		return s.revokeSubscriptionBeforeRenewal(ctx, subscriptionID)
+	}
 	// 先获取订阅信息用于失效缓存
 	sub, err := s.userSubRepo.GetByID(ctx, subscriptionID)
 	if err != nil {
@@ -621,6 +626,49 @@ func (s *SubscriptionService) RevokeSubscription(ctx context.Context, subscripti
 
 // RestoreSubscription 恢复已撤销订阅
 func (s *SubscriptionService) RestoreSubscription(ctx context.Context, subscriptionID int64) (*UserSubscription, error) {
+	var restored *UserSubscription
+	err := s.withSubscriptionUpdateTx(ctx, func(txCtx context.Context) error {
+		// 2026-11-24: lock even a soft-deleted row before checking the renewal
+		// receipt. The check and restore must not straddle another host's reset.
+		if s.entClient != nil {
+			client := dbent.TxFromContext(txCtx).Client()
+			rows, err := client.QueryContext(txCtx, `SELECT id FROM user_subscriptions WHERE id=$1 FOR UPDATE`, subscriptionID)
+			if err != nil {
+				return err
+			}
+			exists := rows.Next()
+			readErr := rows.Err()
+			rows.Close()
+			if readErr != nil {
+				return readErr
+			}
+			if !exists {
+				return ErrSubscriptionNotFound
+			}
+			receipt, _, err := readRenewalActivation(txCtx, client, subscriptionID)
+			if err != nil {
+				return err
+			}
+			if receipt != nil {
+				return renewalConflict("consumed subscription period cannot be restored")
+			}
+		}
+		var err error
+		restored, err = s.restoreSubscriptionRow(txCtx, subscriptionID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	if dbent.TxFromContext(ctx) == nil {
+		if err := s.invalidateSubscriptionCaches(restored.UserID, restored.GroupID); err != nil {
+			return nil, err
+		}
+	}
+	return restored, nil
+}
+
+func (s *SubscriptionService) restoreSubscriptionRow(ctx context.Context, subscriptionID int64) (*UserSubscription, error) {
 	sub, err := s.userSubRepo.GetByIDIncludeDeleted(ctx, subscriptionID)
 	if err != nil {
 		return nil, err
@@ -648,9 +696,6 @@ func (s *SubscriptionService) RestoreSubscription(ctx context.Context, subscript
 		return nil, err
 	}
 
-	if err := s.invalidateSubscriptionCaches(restored.UserID, restored.GroupID); err != nil {
-		return nil, err
-	}
 	return restored, nil
 }
 

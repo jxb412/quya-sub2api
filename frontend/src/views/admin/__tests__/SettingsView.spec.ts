@@ -725,6 +725,38 @@ describe("admin SettingsView payment visible method controls", () => {
     adminSettingsFetch.mockResolvedValue(undefined);
   });
 
+  it("loads and saves the trusted subscription reset URL", async () => {
+    getSettings.mockResolvedValue({
+      ...baseSettingsResponse,
+      subscription_reset_url: "https://www.yunqiao.me/subscription-reset",
+    });
+    const wrapper = mountView();
+    await flushPromises();
+
+    const input = wrapper.get<HTMLInputElement>('[data-testid="subscription-reset-url"]');
+    expect(input.element.value).toBe("https://www.yunqiao.me/subscription-reset");
+    await input.setValue("https://store.example.com/subscription-reset");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      subscription_reset_url: "https://store.example.com/subscription-reset",
+    }));
+    wrapper.unmount();
+  });
+
+  it("rejects a subscription reset URL containing userinfo before saving", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    await wrapper.get('[data-testid="subscription-reset-url"]').setValue("https://user:pass@store.example.com/reset");
+    await wrapper.find("form").trigger("submit.prevent");
+    await flushPromises();
+
+    expect(updateSettings).not.toHaveBeenCalled();
+    expect(showError).toHaveBeenCalledWith("admin.settings.site.subscriptionResetUrlInvalid");
+    wrapper.unmount();
+  });
+
   it("loads and saves the open button visibility for each custom menu", async () => {
     const menuItems = [
       { id: "docs", label: "Docs", url: "https://example.com/docs", icon_svg: "", visibility: "user", sort_order: 0 },

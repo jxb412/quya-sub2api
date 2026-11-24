@@ -459,7 +459,7 @@ func TestReserveFixedCharge(t *testing.T) {
 	t.Run("subscription windows must cover the amount", func(t *testing.T) {
 		daily := 5.0
 		group := &Group{ID: 2, SubscriptionType: SubscriptionTypeSubscription, DailyLimitUSD: &daily}
-		svc := newSvc(&fixedChargeCacheStub{sub: &SubscriptionCacheData{
+		svc := newSvc(&fixedChargeCacheStub{sub: &SubscriptionCacheData{SubscriptionID: 1,
 			Status: SubscriptionStatusActive, ExpiresAt: time.Now().Add(time.Hour), DailyUsage: 3,
 		}})
 		sub := &UserSubscription{ID: 1}
@@ -489,8 +489,8 @@ func TestReserveFixedCharge(t *testing.T) {
 
 		daily := 5.0
 		group := &Group{ID: 2, SubscriptionType: SubscriptionTypeSubscription, DailyLimitUSD: &daily}
-		subRepo := &fixedChargeSubscriptionRepoStub{sub: &UserSubscription{Status: SubscriptionStatusActive, DailyUsageUSD: 4}}
-		svc = reservingSvc(&fixedChargeCacheStub{sub: &SubscriptionCacheData{Status: SubscriptionStatusActive}}, subRepo, nil)
+		subRepo := &fixedChargeSubscriptionRepoStub{sub: &UserSubscription{ID: 1, Status: SubscriptionStatusActive, DailyUsageUSD: 4}}
+		svc = reservingSvc(&fixedChargeCacheStub{sub: &SubscriptionCacheData{SubscriptionID: 1, Status: SubscriptionStatusActive}}, subRepo, nil)
 		require.ErrorIs(t, reserve(svc, nil, group, &UserSubscription{ID: 1}, 2), ErrDailyLimitExceeded, "订阅缓存用量可能滞后")
 	})
 
@@ -498,7 +498,7 @@ func TestReserveFixedCharge(t *testing.T) {
 		daily := 110.0
 		group := &Group{ID: 2, SubscriptionType: SubscriptionTypeSubscription, DailyLimitUSD: &daily}
 		sub := &UserSubscription{ID: 1}
-		cache := &fixedChargeCacheStub{balance: 1000, sub: &SubscriptionCacheData{Status: SubscriptionStatusActive}}
+		cache := &fixedChargeCacheStub{balance: 1000, sub: &SubscriptionCacheData{SubscriptionID: 1, Status: SubscriptionStatusActive}}
 		svc := reservingSvc(cache, nil, nil)
 		first, err := svc.ReserveFixedCharge(ctx, user, nil, group, sub, 103.5)
 		require.NoError(t, err)

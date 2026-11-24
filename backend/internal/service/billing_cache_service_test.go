@@ -14,6 +14,7 @@ import (
 type billingCacheWorkerStub struct {
 	balanceUpdates      int64
 	subscriptionUpdates int64
+	subscriptionID      int64
 }
 
 func (b *billingCacheWorkerStub) GetUserBalance(ctx context.Context, userID int64) (float64, error) {
@@ -43,7 +44,8 @@ func (b *billingCacheWorkerStub) SetSubscriptionCache(ctx context.Context, userI
 	return nil
 }
 
-func (b *billingCacheWorkerStub) UpdateSubscriptionUsage(ctx context.Context, userID, groupID int64, cost float64) error {
+func (b *billingCacheWorkerStub) UpdateSubscriptionUsage(ctx context.Context, userID, groupID, subscriptionID int64, cost float64) error {
+	atomic.StoreInt64(&b.subscriptionID, subscriptionID)
 	atomic.AddInt64(&b.subscriptionUpdates, 1)
 	return nil
 }
@@ -107,7 +109,7 @@ func TestBillingCacheServiceQueueHighLoad(t *testing.T) {
 	}
 	require.Less(t, time.Since(start), 2*time.Second)
 
-	svc.QueueUpdateSubscriptionUsage(1, 2, 1.5)
+	svc.QueueUpdateSubscriptionUsage(1, 2, 3, 1.5)
 
 	require.Eventually(t, func() bool {
 		return atomic.LoadInt64(&cache.balanceUpdates) > 0

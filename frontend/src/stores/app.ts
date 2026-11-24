@@ -345,6 +345,7 @@ export const useAppStore = defineStore('app', () => {
         api_base_url: apiBaseUrl.value,
         contact_info: contactInfo.value,
         doc_url: docUrl.value,
+        subscription_reset_url: '',
         home_content: '',
         compact_home_enabled: false,
         hide_ccs_import_button: false,

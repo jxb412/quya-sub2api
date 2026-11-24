@@ -525,7 +525,7 @@ func (s *billingCacheStub) SetSubscriptionCache(ctx context.Context, userID, gro
 	panic("unexpected SetSubscriptionCache call")
 }
 
-func (s *billingCacheStub) UpdateSubscriptionUsage(ctx context.Context, userID, groupID int64, cost float64) error {
+func (s *billingCacheStub) UpdateSubscriptionUsage(ctx context.Context, userID, groupID, subscriptionID int64, cost float64) error {
 	panic("unexpected UpdateSubscriptionUsage call")
 }
 

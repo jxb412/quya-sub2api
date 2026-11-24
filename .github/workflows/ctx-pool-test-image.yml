@@ -15,6 +15,20 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    services:
+      renewal-postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: quya_renewal_test
+          POSTGRES_USER: renewal_test
+          POSTGRES_PASSWORD: renewal_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U renewal_test -d quya_renewal_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     permissions:
       contents: read
       packages: write
@@ -39,6 +53,15 @@ jobs:
       - name: Verify Codex standalone context compatibility
         working-directory: backend
         run: go test -tags=unit ./internal/handler -run 'TestNormalizeCodex|TestCodexCallOutputGate' -count=1
+      # 2026-11-24: paid renewals need real row-lock/rollback coverage before an image is published.
+      - name: Verify subscription renewal activation
+        working-directory: backend
+        run: go test -tags=unit ./internal/service ./internal/repository ./internal/handler/admin -run 'Test.*(Renewal|SubscriptionReset|Subscription.*Cache|BillingCacheFixedCharge|FinalizeSubscriptionBilling|BulkSubscriptionAction)' -count=1
+      - name: Verify renewal transactions against isolated PostgreSQL
+        working-directory: backend
+        env:
+          QUYA_RENEWAL_TEST_DSN: postgres://renewal_test:renewal_test_ci@localhost:5432/quya_renewal_test?sslmode=disable
+        run: go test ./internal/repository -run '^TestRenewalPostgres' -count=1
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:

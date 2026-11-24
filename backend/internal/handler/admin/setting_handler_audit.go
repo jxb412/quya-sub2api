@@ -335,6 +335,9 @@ func diffSettings(before *service.SystemSettings, after *service.SystemSettings,
 	if before.DocURL != after.DocURL {
 		changed = append(changed, "doc_url")
 	}
+	if before.SubscriptionResetURL != after.SubscriptionResetURL {
+		changed = append(changed, "subscription_reset_url")
+	}
 	if before.HomeContent != after.HomeContent {
 		changed = append(changed, "home_content")
 	}

@@ -57,7 +57,7 @@
                 </div>
               </div>
             </div>
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center gap-2">
               <span
                 :class="[
                   'rounded-full px-2 py-0.5 text-xs font-medium',
@@ -70,6 +70,15 @@
               >
                 {{ t(`userSubscriptions.status.${subscription.status}`) }}
               </span>
+              <button
+                v-if="resetEndpoint && canOpenSubscriptionReset(subscription, currentTime)"
+                type="button"
+                class="btn btn-secondary px-3 py-1.5 text-xs"
+                :data-reset-subscription-id="subscription.id"
+                @click="openSubscriptionReset(subscription)"
+              >
+                {{ t('userSubscriptions.resetSubscription') }}
+              </button>
               <button
                 v-if="subscription.status === 'active'"
                 :class="['rounded-lg px-3 py-1.5 text-xs font-semibold text-white transition-colors', platformButtonClass(subscription.group?.platform || '')]"
@@ -244,18 +253,38 @@
         </div>
       </div>
     </div>
+    <BaseDialog
+      :show="!!resetTarget"
+      :title="t('userSubscriptions.resetSubscription')"
+      width="wide"
+      @close="closeSubscriptionReset"
+    >
+      <iframe
+        v-if="resetTarget"
+        ref="resetFrame"
+        :src="resetTarget.url"
+        :title="t('userSubscriptions.resetSubscription')"
+        class="h-[70vh] min-h-96 w-full rounded-lg border-0"
+        referrerpolicy="no-referrer"
+        sandbox="allow-scripts allow-forms allow-same-origin"
+      ></iframe>
+    </BaseDialog>
   </AppLayout>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
+import { useAuthStore } from '@/stores/auth'
 import subscriptionsAPI from '@/api/subscriptions'
 import type { UserSubscription } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
+import BaseDialog from '@/components/common/BaseDialog.vue'
+import { buildEmbeddedUrl, detectTheme } from '@/utils/embedded-url'
+import { canOpenSubscriptionReset, isSubscriptionResetCompletion, trustedSubscriptionResetUrl } from '@/utils/subscriptionReset'
 import { formatDateTimeToMinute } from '@/utils/format'
 import { hasPeakRate, formatPeakRateWindow, serverTimezoneLabel } from '@/utils/peak-rate'
 import { platformBorderClass, platformBadgeClass, platformButtonClass, platformLabel } from '@/utils/platformColors'
@@ -276,12 +305,46 @@ function platformAccentDotClass(p: string): string {
   }
 }
 
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const router = useRouter()
 const appStore = useAppStore()
+const authStore = useAuthStore()
 
 const subscriptions = ref<UserSubscription[]>([])
 const loading = ref(true)
+const currentTime = ref(Date.now())
+const resetEndpoint = computed(() => trustedSubscriptionResetUrl(appStore.cachedPublicSettings?.subscription_reset_url))
+const resetTarget = ref<{ id: number; url: string; origin: string } | null>(null)
+const resetFrame = ref<HTMLIFrameElement | null>(null)
+let resetClock: ReturnType<typeof setInterval> | undefined
+
+// 2026-11-24: this opens the trusted storefront's confirmation flow. The UI
+// never grants quota itself; purchase eligibility is verified by that service.
+function openSubscriptionReset(subscription: UserSubscription) {
+  const endpoint = resetEndpoint.value
+  if (!endpoint || !canOpenSubscriptionReset(subscription)) return
+  if (!authStore.token || !authStore.user?.id) {
+    appStore.showError(t('userSubscriptions.resetLoginRequired'))
+    return
+  }
+  const url = new URL(buildEmbeddedUrl(endpoint.href, authStore.user.id, authStore.token, detectTheme(), locale.value))
+  url.searchParams.set('subscription_id', String(subscription.id))
+  resetTarget.value = { id: subscription.id, origin: endpoint.origin, url: url.href }
+}
+
+function closeSubscriptionReset() {
+  if (!resetTarget.value) return
+  resetTarget.value = null
+  // Refresh on close as well: the storefront may finish while its completion
+  // message is lost, or the member may close the dialog immediately afterward.
+  void loadSubscriptions()
+}
+
+function handleSubscriptionResetMessage(event: MessageEvent) {
+  const target = resetTarget.value
+  if (!target || !isSubscriptionResetCompletion(event, target.origin, resetFrame.value?.contentWindow, target.id)) return
+  closeSubscriptionReset()
+}
 
 function subscriptionHasPeakRate(subscription: UserSubscription): boolean {
   return hasPeakRate(subscription.group)
@@ -389,6 +452,14 @@ function formatResetTime(windowStart: string | null, windowHours: number): strin
 }
 
 onMounted(() => {
-  loadSubscriptions()
+  void loadSubscriptions()
+  void appStore.fetchPublicSettings()
+  window.addEventListener('message', handleSubscriptionResetMessage)
+  resetClock = setInterval(() => { currentTime.value = Date.now() }, 1000)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('message', handleSubscriptionResetMessage)
+  if (resetClock) clearInterval(resetClock)
 })
 </script>

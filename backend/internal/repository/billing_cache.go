@@ -50,12 +50,13 @@ func billingSubKey(userID, groupID int64) string {
 }
 
 const (
-	subFieldStatus       = "status"
-	subFieldExpiresAt    = "expires_at"
-	subFieldDailyUsage   = "daily_usage"
-	subFieldWeeklyUsage  = "weekly_usage"
-	subFieldMonthlyUsage = "monthly_usage"
-	subFieldVersion      = "version"
+	subFieldStatus         = "status"
+	subFieldExpiresAt      = "expires_at"
+	subFieldDailyUsage     = "daily_usage"
+	subFieldWeeklyUsage    = "weekly_usage"
+	subFieldMonthlyUsage   = "monthly_usage"
+	subFieldVersion        = "version"
+	subFieldSubscriptionID = "subscription_id"
 )
 
 // billingRateLimitKey generates the Redis key for API key rate limit cache.
@@ -87,13 +88,38 @@ var (
 	updateSubUsageScript = redis.NewScript(`
 		local exists = redis.call('EXISTS', KEYS[1])
 		if exists == 0 then
+			redis.call('INCR', KEYS[2])
 			return 0
 		end
+		if ARGV[3] == '0' or redis.call('HGET', KEYS[1], 'subscription_id') ~= ARGV[3] then
+			return 0
+		end
+		redis.call('INCR', KEYS[2])
 		local cost = tonumber(ARGV[1])
 		redis.call('HINCRBYFLOAT', KEYS[1], 'daily_usage', cost)
 		redis.call('HINCRBYFLOAT', KEYS[1], 'weekly_usage', cost)
 		redis.call('HINCRBYFLOAT', KEYS[1], 'monthly_usage', cost)
 		redis.call('EXPIRE', KEYS[1], ARGV[2])
+		return 1
+	`)
+
+	// 2026-11-24: fence delayed DB cache fills across renewal/reset and charges.
+	// The per-user/group epoch deliberately has no TTL: expiring it back to zero
+	// could make a delayed snapshot valid again after the subscription hash expires.
+	setSubscriptionCacheScript = redis.NewScript(`
+		local epoch = redis.call('GET', KEYS[2]) or '0'
+		if epoch ~= ARGV[1] then
+			return 0
+		end
+		redis.call('HSET', KEYS[1],
+			'subscription_id', ARGV[2], 'status', ARGV[3], 'expires_at', ARGV[4],
+			'daily_usage', ARGV[5], 'weekly_usage', ARGV[6], 'monthly_usage', ARGV[7], 'version', ARGV[8])
+		redis.call('EXPIRE', KEYS[1], ARGV[9])
+		return 1
+	`)
+	invalidateSubscriptionCacheScript = redis.NewScript(`
+		redis.call('INCR', KEYS[2])
+		redis.call('DEL', KEYS[1])
 		return 1
 	`)
 
@@ -187,6 +213,10 @@ func (c *billingCache) GetSubscriptionCache(ctx context.Context, userID, groupID
 
 func (c *billingCache) parseSubscriptionCache(data map[string]string) (*service.SubscriptionCacheData, error) {
 	result := &service.SubscriptionCacheData{}
+	result.SubscriptionID, _ = strconv.ParseInt(data[subFieldSubscriptionID], 10, 64)
+	if result.SubscriptionID <= 0 {
+		return nil, errors.New("invalid cache: missing subscription ID")
+	}
 
 	result.Status = data[subFieldStatus]
 	if result.Status == "" {
@@ -223,28 +253,27 @@ func (c *billingCache) SetSubscriptionCache(ctx context.Context, userID, groupID
 	if data == nil {
 		return nil
 	}
+	if data.SubscriptionID <= 0 {
+		return errors.New("invalid cache: missing subscription ID")
+	}
 
 	key := billingSubKey(userID, groupID)
 
-	fields := map[string]any{
-		subFieldStatus:       data.Status,
-		subFieldExpiresAt:    data.ExpiresAt.Unix(),
-		subFieldDailyUsage:   data.DailyUsage,
-		subFieldWeeklyUsage:  data.WeeklyUsage,
-		subFieldMonthlyUsage: data.MonthlyUsage,
-		subFieldVersion:      data.Version,
-	}
-
-	pipe := c.rdb.Pipeline()
-	pipe.HSet(ctx, key, fields)
-	pipe.Expire(ctx, key, jitteredTTL())
-	_, err := pipe.Exec(ctx)
+	_, err := setSubscriptionCacheScript.Run(ctx, c.rdb, []string{key, key + ":epoch"}, data.CacheEpoch, data.SubscriptionID, data.Status, data.ExpiresAt.Unix(), data.DailyUsage, data.WeeklyUsage, data.MonthlyUsage, data.Version, int(jitteredTTL().Seconds())).Result()
 	return err
 }
 
-func (c *billingCache) UpdateSubscriptionUsage(ctx context.Context, userID, groupID int64, cost float64) error {
+func (c *billingCache) GetSubscriptionCacheEpoch(ctx context.Context, userID, groupID int64) (int64, error) {
+	epoch, err := c.rdb.Get(ctx, billingSubKey(userID, groupID)+":epoch").Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0, nil
+	}
+	return epoch, err
+}
+
+func (c *billingCache) UpdateSubscriptionUsage(ctx context.Context, userID, groupID, subscriptionID int64, cost float64) error {
 	key := billingSubKey(userID, groupID)
-	_, err := updateSubUsageScript.Run(ctx, c.rdb, []string{key}, cost, int(jitteredTTL().Seconds())).Result()
+	_, err := updateSubUsageScript.Run(ctx, c.rdb, []string{key, key + ":epoch"}, cost, int(jitteredTTL().Seconds()), subscriptionID).Result()
 	if err != nil && !errors.Is(err, redis.Nil) {
 		log.Printf("Warning: update subscription usage cache failed for user %d group %d: %v", userID, groupID, err)
 		return err
@@ -254,7 +283,7 @@ func (c *billingCache) UpdateSubscriptionUsage(ctx context.Context, userID, grou
 
 func (c *billingCache) InvalidateSubscriptionCache(ctx context.Context, userID, groupID int64) error {
 	key := billingSubKey(userID, groupID)
-	return c.rdb.Del(ctx, key).Err()
+	return invalidateSubscriptionCacheScript.Run(ctx, c.rdb, []string{key, key + ":epoch"}).Err()
 }
 
 func (c *billingCache) PublishSubscriptionCacheInvalidation(ctx context.Context, cacheKey string) error {

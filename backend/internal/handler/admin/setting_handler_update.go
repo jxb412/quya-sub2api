@@ -159,6 +159,7 @@ type UpdateSettingsRequest struct {
 	APIBaseURL                  string                `json:"api_base_url"`
 	ContactInfo                 string                `json:"contact_info"`
 	DocURL                      string                `json:"doc_url"`
+	SubscriptionResetURL        string                `json:"subscription_reset_url"`
 	HomeContent                 string                `json:"home_content"`
 	CompactHomeEnabled          bool                  `json:"compact_home_enabled"`
 	HideCcsImportButton         bool                  `json:"hide_ccs_import_button"`
@@ -1646,6 +1647,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		APIBaseURL:                             req.APIBaseURL,
 		ContactInfo:                            req.ContactInfo,
 		DocURL:                                 req.DocURL,
+		SubscriptionResetURL:                   req.SubscriptionResetURL,
 		HomeContent:                            req.HomeContent,
 		CompactHomeEnabled:                     req.CompactHomeEnabled,
 		HideCcsImportButton:                    req.HideCcsImportButton,
@@ -2310,6 +2312,7 @@ func (h *SettingHandler) UpdateSettings(c *gin.Context) {
 		APIBaseURL:                                             updatedSettings.APIBaseURL,
 		ContactInfo:                                            updatedSettings.ContactInfo,
 		DocURL:                                                 updatedSettings.DocURL,
+		SubscriptionResetURL:                                   updatedSettings.SubscriptionResetURL,
 		HomeContent:                                            updatedSettings.HomeContent,
 		CompactHomeEnabled:                                     updatedSettings.CompactHomeEnabled,
 		HideCcsImportButton:                                    updatedSettings.HideCcsImportButton,

@@ -113,6 +113,8 @@ export default {
 
   // User Subscriptions Page
   userSubscriptions: {
+    resetSubscription: 'Reset subscription',
+    resetLoginRequired: 'Please sign in again before resetting your subscription.',
     title: 'My Subscriptions',
     description: 'View your subscription plans and usage',
     noActiveSubscriptions: 'No Active Subscriptions',

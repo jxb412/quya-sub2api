@@ -215,6 +215,9 @@ func (r *usageBillingRepository) applyUsageBillingEffects(ctx context.Context, t
 }
 
 func incrementUsageBillingSubscription(ctx context.Context, tx *sql.Tx, subscriptionID int64, costUSD float64) error {
+	// 2026-11-24: requests already in flight when a renewal is activated retain
+	// their original subscription ID. Settle only receipt-backed replaced rows;
+	// ordinary revoked/refunded subscriptions retain the existing rejection.
 	const updateSQL = `
 		UPDATE user_subscriptions us
 		SET
@@ -224,7 +227,10 @@ func incrementUsageBillingSubscription(ctx context.Context, tx *sql.Tx, subscrip
 			updated_at = NOW()
 		FROM groups g
 		WHERE us.id = $2
-			AND us.deleted_at IS NULL
+			AND (us.deleted_at IS NULL OR EXISTS (
+				SELECT 1 FROM subscription_renewal_activations ra
+				WHERE ra.old_subscription_id = us.id AND ra.user_id = us.user_id AND ra.group_id = us.group_id
+			))
 			AND us.group_id = g.id
 			AND g.deleted_at IS NULL
 	`

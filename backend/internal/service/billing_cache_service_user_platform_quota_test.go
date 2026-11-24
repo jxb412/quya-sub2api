@@ -527,7 +527,7 @@ func (f *fakeZeroQuotaCache) SetUserPlatformQuotaCache(_ context.Context, _ int6
 // GetSubscriptionCache 返回有效订阅（active、未过期、usage 远低于 limit），
 // 用于支持 checkSubscriptionEligibility 通过，以便验证 quota 检查不被触发。
 func (f *fakeZeroQuotaCache) GetSubscriptionCache(_ context.Context, _ int64, _ int64) (*SubscriptionCacheData, error) {
-	return &SubscriptionCacheData{
+	return &SubscriptionCacheData{SubscriptionID: 1,
 		Status:       SubscriptionStatusActive,
 		ExpiresAt:    time.Now().Add(30 * 24 * time.Hour),
 		DailyUsage:   0,
@@ -578,7 +578,7 @@ func TestCheckBillingEligibility_SubscriptionMode_BypassesPlatformQuota(t *testi
 		Status:           "active",
 		// 无 DailyLimitUSD → checkSubscriptionEligibility 不会因超限失败
 	}
-	sub := &UserSubscription{Status: "active"}
+	sub := &UserSubscription{ID: 1, Status: "active"}
 	user := &User{ID: 42}
 
 	err := s.CheckBillingEligibility(context.Background(), user, nil, subGroup, sub, "anthropic")

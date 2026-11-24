@@ -152,7 +152,7 @@ func (s *BillingCacheSuite) TestSubscriptionCache() {
 				groupID := int64(21)
 				subKey := fmt.Sprintf("%s%d:%d", billingSubKeyPrefix, userID, groupID)
 
-				require.NoError(s.T(), cache.UpdateSubscriptionUsage(ctx, userID, groupID, 1.0), "UpdateSubscriptionUsage should not error")
+				require.NoError(s.T(), cache.UpdateSubscriptionUsage(ctx, userID, groupID, 501, 1.0), "UpdateSubscriptionUsage should not error")
 
 				exists, err := rdb.Exists(ctx, subKey).Result()
 				require.NoError(s.T(), err, "Exists")
@@ -166,7 +166,7 @@ func (s *BillingCacheSuite) TestSubscriptionCache() {
 				groupID := int64(22)
 				subKey := fmt.Sprintf("%s%d:%d", billingSubKeyPrefix, userID, groupID)
 
-				data := &service.SubscriptionCacheData{
+				data := &service.SubscriptionCacheData{SubscriptionID: 501,
 					Status:       "active",
 					ExpiresAt:    time.Now().Add(1 * time.Hour),
 					DailyUsage:   1.0,
@@ -193,7 +193,7 @@ func (s *BillingCacheSuite) TestSubscriptionCache() {
 				userID := int64(13)
 				groupID := int64(23)
 
-				data := &service.SubscriptionCacheData{
+				data := &service.SubscriptionCacheData{SubscriptionID: 501,
 					Status:       "active",
 					ExpiresAt:    time.Now().Add(1 * time.Hour),
 					DailyUsage:   1.0,
@@ -203,7 +203,7 @@ func (s *BillingCacheSuite) TestSubscriptionCache() {
 				}
 				require.NoError(s.T(), cache.SetSubscriptionCache(ctx, userID, groupID, data), "SetSubscriptionCache")
 
-				require.NoError(s.T(), cache.UpdateSubscriptionUsage(ctx, userID, groupID, 0.5), "UpdateSubscriptionUsage")
+				require.NoError(s.T(), cache.UpdateSubscriptionUsage(ctx, userID, groupID, 501, 0.5), "UpdateSubscriptionUsage")
 
 				gotSub, err := cache.GetSubscriptionCache(ctx, userID, groupID)
 				require.NoError(s.T(), err, "GetSubscriptionCache after update")
@@ -219,7 +219,7 @@ func (s *BillingCacheSuite) TestSubscriptionCache() {
 				groupID := int64(10)
 				subKey := fmt.Sprintf("%s%d:%d", billingSubKeyPrefix, userID, groupID)
 
-				data := &service.SubscriptionCacheData{
+				data := &service.SubscriptionCacheData{SubscriptionID: 501,
 					Status:       "active",
 					ExpiresAt:    time.Now().Add(1 * time.Hour),
 					DailyUsage:   1.0,
@@ -338,7 +338,7 @@ func (s *BillingCacheSuite) TestUpdateSubscriptionUsage_ErrorPropagation() {
 		cache := NewBillingCache(rdb)
 		ctx := context.Background()
 
-		err := cache.UpdateSubscriptionUsage(ctx, 88888, 77777, 1.0)
+		err := cache.UpdateSubscriptionUsage(ctx, 88888, 77777, 501, 1.0)
 		require.NoError(s.T(), err, "UpdateSubscriptionUsage on non-existent key should return nil")
 	})
 
@@ -347,7 +347,7 @@ func (s *BillingCacheSuite) TestUpdateSubscriptionUsage_ErrorPropagation() {
 		cache := NewBillingCache(rdb)
 		ctx := context.Background()
 
-		data := &service.SubscriptionCacheData{
+		data := &service.SubscriptionCacheData{SubscriptionID: 501,
 			Status:    "active",
 			ExpiresAt: time.Now().Add(1 * time.Hour),
 			Version:   1,
@@ -357,7 +357,7 @@ func (s *BillingCacheSuite) TestUpdateSubscriptionUsage_ErrorPropagation() {
 		cancelCtx, cancel := context.WithCancel(ctx)
 		cancel()
 
-		err := cache.UpdateSubscriptionUsage(cancelCtx, 301, 401, 1.0)
+		err := cache.UpdateSubscriptionUsage(cancelCtx, 301, 401, 501, 1.0)
 		require.Error(s.T(), err, "cancelled context should propagate error")
 	})
 }

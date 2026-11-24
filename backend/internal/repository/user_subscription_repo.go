@@ -300,6 +300,10 @@ func (r *userSubscriptionRepository) List(ctx context.Context, params pagination
 	// Determine sort field
 	var field string
 	switch sortBy {
+	case "id":
+		// 2026-11-24: store renewal recovery scans revoked history in stable ID
+		// order; a timestamp tie must not hide an already fulfilled purchase.
+		field = usersubscription.FieldID
 	case "expires_at":
 		field = usersubscription.FieldExpiresAt
 	case "status":
@@ -469,6 +473,8 @@ func (r *userSubscriptionRepository) translateConditionalWindowReset(ctx context
 // 限额检查已在请求前由 BillingCacheService.CheckBillingEligibility 完成，
 // 此处仅负责记录实际消费，确保消费数据的完整性。
 func (r *userSubscriptionRepository) IncrementUsage(ctx context.Context, id int64, costUSD float64) error {
+	// 2026-11-24: preserve late charges on the replaced old period, never the
+	// new period. Only an atomic renewal receipt grants this exception.
 	const updateSQL = `
 		UPDATE user_subscriptions us
 		SET
@@ -478,7 +484,10 @@ func (r *userSubscriptionRepository) IncrementUsage(ctx context.Context, id int6
 			updated_at = NOW()
 		FROM groups g
 		WHERE us.id = $2
-			AND us.deleted_at IS NULL
+			AND (us.deleted_at IS NULL OR EXISTS (
+				SELECT 1 FROM subscription_renewal_activations ra
+				WHERE ra.old_subscription_id = us.id AND ra.user_id = us.user_id AND ra.group_id = us.group_id
+			))
 			AND us.group_id = g.id
 			AND g.deleted_at IS NULL
 	`

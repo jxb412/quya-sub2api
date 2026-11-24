@@ -342,6 +342,10 @@ func (s *SettingService) buildSystemSettingsUpdates(ctx context.Context, setting
 	updates[SettingKeyAPIBaseURL] = settings.APIBaseURL
 	updates[SettingKeyContactInfo] = settings.ContactInfo
 	updates[SettingKeyDocURL] = settings.DocURL
+	if err := ValidateSubscriptionResetURL(settings.SubscriptionResetURL); err != nil {
+		return nil, err
+	}
+	updates[SettingKeySubscriptionResetURL] = strings.TrimSpace(settings.SubscriptionResetURL)
 	updates[SettingKeyHomeContent] = settings.HomeContent
 	updates[SettingKeyCompactHomeEnabled] = strconv.FormatBool(settings.CompactHomeEnabled)
 	updates[SettingKeyHideCcsImportButton] = strconv.FormatBool(settings.HideCcsImportButton)
