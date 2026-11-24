@@ -81,7 +81,7 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 	default:
 		return nil, errors.New("unsupported HTTP Responses WebSocket URL scheme")
 	}
-	headers := openAIHTTPWSHandshakeHeaders(req.Header)
+	headers, reportedHeaders := openAIHTTPWSConnectionHeaders(req, account)
 	// Messages HTTP compatibility restores the legacy Responses beta. Carrying
 	// it into a WS handshake conflicts with the WSv2 protocol and can make the
 	// upstream close with 1011 immediately after response.create.
@@ -114,6 +114,7 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 		}
 		return nil, &openAIHTTPWSConnectError{err: err}
 	}
+	recordOpenAIHTTPWSReportedHeaders(req.Context(), account, reportedHeaders)
 	// This flag is set before Write, not after it: a failed write can still have
 	// delivered the request, so its outcome must never authorize a second send.
 	if !attempt.sent.CompareAndSwap(false, true) {
@@ -153,6 +154,63 @@ func (s *OpenAIGatewayService) doOpenAIHTTPWSPool(req *http.Request, proxyURL st
 		}
 	}
 	return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: responseHeaders, Body: stream, ContentLength: -1, Request: req}, nil
+}
+
+// 2026-11-24: upstream v0.2.25 adds request-scoped header variables, but this
+// adapter receives an already-built HTTP request. Re-evaluate only variable
+// overrides with native WS connection semantics: request_id must not become a
+// stale handshake value or prevent continuation reuse. Keep the HTTP request
+// intact so a pre-dispatch fallback still sends its current request identity.
+func openAIHTTPWSConnectionHeaders(req *http.Request, account *Account) (http.Header, map[string]string) {
+	headers := cloneHeader(req.Header)
+	if headers == nil {
+		headers = make(http.Header)
+	}
+	connectionCtx := withHeaderOverrideConnectionScope(req.Context())
+	reported := make(map[string]string)
+	for name, value := range account.GetHeaderOverrides() {
+		if !headerOverrideHasVariable(value) {
+			continue
+		}
+		for existing := range headers {
+			if strings.EqualFold(existing, name) {
+				delete(headers, existing)
+			}
+		}
+		if !account.supportsHeaderOverrideVariables() {
+			continue
+		}
+		if expanded, loggable, ok := expandHeaderOverrideTemplate(connectionCtx, value); ok {
+			headers[resolveWireCasing(name)] = []string{expanded}
+			reported[name] = loggable
+		}
+	}
+	headers = openAIHTTPWSHandshakeHeaders(headers)
+	for name := range reported {
+		if len(headerValuesFold(headers, name)) == 0 {
+			delete(reported, name)
+		}
+	}
+	return headers, reported
+}
+
+// Commit the effective WS identity only after acquiring a connection. Failed
+// acquisition retains the HTTP builder's reported headers for HTTP fallback;
+// successful WS must not claim that an omitted request_id header was sent.
+func recordOpenAIHTTPWSReportedHeaders(ctx context.Context, account *Account, reported map[string]string) {
+	scope := headerOverrideScopeFromContext(ctx)
+	if scope == nil {
+		return
+	}
+	scope.mu.Lock()
+	delete(scope.reported, account.ID)
+	if len(reported) > 0 {
+		if scope.reported == nil {
+			scope.reported = make(map[int64]map[string]string)
+		}
+		scope.reported[account.ID] = reported
+	}
+	scope.mu.Unlock()
 }
 
 func openAIHTTPWSHandshakeHeaders(source http.Header) http.Header {
