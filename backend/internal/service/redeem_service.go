@@ -468,14 +468,28 @@ func (s *RedeemService) redeem(ctx context.Context, userID int64, code string, r
 	}
 
 	// 使用数据库事务保证兑换码标记与权益发放的原子性
-	tx, err := s.entClient.Tx(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("begin transaction: %w", err)
+	tx := dbent.TxFromContext(ctx)
+	ownsTransaction := tx == nil
+	if ownsTransaction {
+		tx, err = s.entClient.Tx(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("begin transaction: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
 	}
-	defer func() { _ = tx.Rollback() }()
 
 	// 将事务放入 context，使 repository 方法能够使用同一事务
 	txCtx := dbent.NewTxContext(ctx, tx)
+	if IsStoreManagedRedemption(redeemCode) {
+		// User lock precedes the redeem row's Use lock. Native reset takes the
+		// same order, including when inspecting an interrupted unused sbr_ code.
+		if err := lockStoreSubscriptionUser(txCtx, tx.Client(), userID); err != nil {
+			return nil, err
+		}
+		if err := validateLegacyStoreRefund(txCtx, tx.Client(), userID, redeemCode); err != nil {
+			return nil, err
+		}
+	}
 
 	// 【关键】先标记兑换码为已使用，确保并发安全
 	// 利用数据库乐观锁（WHERE status = 'unused'）保证原子性
@@ -525,13 +539,14 @@ func (s *RedeemService) redeem(ctx context.Context, userID int64, code string, r
 			if validityDays == 0 {
 				validityDays = 30
 			}
-			_, _, err := s.subscriptionService.AssignOrExtendSubscription(txCtx, &AssignSubscriptionInput{
+			// The redemption transaction owns cache invalidation after commit.
+			_, _, err := s.subscriptionService.assignOrExtendSubscription(txCtx, &AssignSubscriptionInput{
 				UserID:       userID,
 				GroupID:      *redeemCode.GroupID,
 				ValidityDays: validityDays,
 				AssignedBy:   0, // 系统分配
 				Notes:        fmt.Sprintf("通过兑换码 %s 兑换", redeemCode.Code),
-			})
+			}, true)
 			if err != nil {
 				return nil, fmt.Errorf("assign or extend subscription: %w", err)
 			}
@@ -542,6 +557,9 @@ func (s *RedeemService) redeem(ctx context.Context, userID int64, code string, r
 	}
 
 	// 提交事务
+	if !ownsTransaction {
+		return s.redeemRepo.GetByID(txCtx, redeemCode.ID)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -589,16 +607,27 @@ func (s *RedeemService) invalidateRedeemCaches(ctx context.Context, userID int64
 		if s.authCacheInvalidator != nil {
 			s.authCacheInvalidator.InvalidateAuthCacheByUserID(ctx, userID)
 		}
-		if s.billingCacheService == nil {
+		if redeemCode.GroupID == nil {
 			return
 		}
-		if redeemCode.GroupID != nil {
-			groupID := *redeemCode.GroupID
-			go func() {
-				cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
-				_ = s.billingCacheService.InvalidateSubscription(cacheCtx, userID, groupID)
-			}()
+		groupID := *redeemCode.GroupID
+		billing := s.billingCacheService
+		if s.subscriptionService != nil {
+			s.subscriptionService.InvalidateSubCacheSync(userID, groupID)
+			if billing == nil {
+				billing = s.subscriptionService.billingCacheService
+			}
+		}
+		if billing == nil {
+			return
+		}
+		cacheCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := billing.InvalidateSubscription(cacheCtx, userID, groupID); err != nil {
+			logger.LegacyPrintf("service.redeem", "[Redeem] subscription cache invalidation failed for user %d group %d: %v", userID, groupID, err)
+		}
+		if err := billing.PublishSubscriptionCacheInvalidation(cacheCtx, subCacheKey(userID, groupID)); err != nil {
+			logger.LegacyPrintf("service.redeem", "[Redeem] subscription cache broadcast failed for user %d group %d: %v", userID, groupID, err)
 		}
 	}
 }

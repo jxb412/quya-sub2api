@@ -91,7 +91,7 @@ func RegisterAdminRoutes(
 		registerSystemRoutes(admin, h)
 
 		// 订阅管理
-		registerSubscriptionRoutes(admin, h)
+		registerSubscriptionRoutes(admin, h, settingService)
 
 		// 使用记录管理
 		registerUsageRoutes(admin, h)
@@ -687,7 +687,7 @@ func registerSystemRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 	}
 }
 
-func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers, settingService *service.SettingService) {
 	subscriptions := admin.Group("/subscriptions")
 	{
 		subscriptions.GET("", h.Admin.Subscription.List)
@@ -698,7 +698,7 @@ func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		subscriptions.POST("/bulk-action", h.Admin.Subscription.BulkAction)
 		subscriptions.POST("/:id/extend", h.Admin.Subscription.Extend)
 		subscriptions.POST("/:id/reset-quota", h.Admin.Subscription.ResetQuota)
-		subscriptions.POST("/:id/activate-renewal", h.Admin.Subscription.ActivateRenewal)
+		subscriptions.POST("/:id/activate-renewal", subscriptionResetEnabledGuard(settingService), h.Admin.Subscription.ActivateRenewal)
 		subscriptions.GET("/:id/renewal-activation", h.Admin.Subscription.GetRenewalActivation)
 		subscriptions.POST("/:id/revoke", h.Admin.Subscription.Revoke)
 		subscriptions.POST("/:id/restore", h.Admin.Subscription.Restore)

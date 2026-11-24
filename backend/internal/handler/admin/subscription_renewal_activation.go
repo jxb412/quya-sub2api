@@ -9,8 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 2026-11-24: only the trusted store/full administrator may attest payment.
-// Ordinary users use the store's authenticated preview/confirmation flow.
+// 2026-11-24: legacy full-admin endpoint remains compatible, with the same
+// native local purchase validation. Users use authenticated native reset APIs.
 func (h *SubscriptionHandler) ActivateRenewal(c *gin.Context) {
 	if adminaccess.RestrictedFromContext(c.Request.Context()) != nil {
 		response.Forbidden(c, "Full administrator access required")

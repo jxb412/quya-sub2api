@@ -28,6 +28,7 @@ func renewalFixture(t *testing.T) (*SubscriptionService, sqlmock.Sqlmock, *Activ
 
 func expectRenewalRow(mock sqlmock.Sqlmock, in *ActivateSubscriptionRenewalInput, expires time.Time, deleted any) {
 	mock.ExpectBegin()
+	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).WithArgs(in.UserID).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT user_id, group_id, status, starts_at, expires_at`).WithArgs(int64(123)).WillReturnRows(sqlmock.NewRows([]string{"user_id", "group_id", "status", "starts_at", "expires_at", "notes", "deleted_at"}).AddRow(in.UserID, in.GroupID, "active", in.ExpectedStartsAt, expires, in.ExpectedNotes, deleted))
 }
 
@@ -35,7 +36,14 @@ func expectNoPriorRenewal(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(`SELECT receipt, request_hash FROM subscription_renewal_activations`).WithArgs(int64(123)).WillReturnRows(sqlmock.NewRows([]string{"receipt", "request_hash"}))
 }
 
+func expectNativeRenewalSources(mock sqlmock.Sqlmock, in *ActivateSubscriptionRenewalInput, now time.Time) {
+	mock.ExpectQuery(`SELECT id,user_id,group_id,starts_at`).WithArgs(in.UserID, in.GroupID).WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "group_id", "starts_at", "expires_at", "status", "notes", "deleted_at"}).AddRow(123, in.UserID, in.GroupID, in.ExpectedStartsAt, in.ExpectedExpiresAt, "active", in.ExpectedNotes, nil))
+	mock.ExpectQuery(`SELECT id,code,type,status,used_by`).WillReturnRows(sqlmock.NewRows([]string{"id", "code", "type", "status", "used_by", "group_id", "validity_days", "used_at", "notes"}).AddRow(1, in.CurrentCode, "subscription", "used", in.UserID, in.GroupID, 30, in.ExpectedStartsAt, "store order o_current").AddRow(2, in.NextCode, "subscription", "used", in.UserID, in.GroupID, 30, now.AddDate(0, 0, -3), "store order o_next").AddRow(3, in.PendingCodes[0], "subscription", "used", in.UserID, in.GroupID, 31, now.AddDate(0, 0, -1), "store order o_queued"))
+	mock.ExpectQuery(`SELECT receipt FROM subscription_renewal_activations`).WithArgs(in.UserID, in.GroupID).WillReturnRows(sqlmock.NewRows([]string{"receipt"}))
+}
+
 func expectRedeemedRenewalCodes(mock sqlmock.Sqlmock, in *ActivateSubscriptionRenewalInput, now time.Time, nextDays int, nextStatus string) {
+	expectNativeRenewalSources(mock, in, now)
 	mock.ExpectQuery(`SELECT id FROM groups`).WithArgs(in.GroupID).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(in.GroupID))
 	mock.ExpectQuery(`SELECT code, type, status, used_by`).WillReturnRows(sqlmock.NewRows([]string{"code", "type", "status", "used_by", "group_id", "validity_days", "used_at"}).
 		AddRow(in.CurrentCode, "subscription", "used", in.UserID, in.GroupID, 30, now.AddDate(0, 0, -10)).

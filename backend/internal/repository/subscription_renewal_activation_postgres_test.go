@@ -61,7 +61,7 @@ func renewalPostgres(t *testing.T) (*sql.DB, *service.SubscriptionService, *serv
 	})
 	_, err = db.Exec(`
 CREATE TABLE users(id BIGINT PRIMARY KEY);
-CREATE TABLE groups(id BIGINT PRIMARY KEY,status TEXT NOT NULL DEFAULT 'active',subscription_type TEXT NOT NULL DEFAULT 'subscription',deleted_at TIMESTAMPTZ);
+CREATE TABLE groups(id BIGINT PRIMARY KEY,name TEXT NOT NULL DEFAULT 'test',status TEXT NOT NULL DEFAULT 'active',subscription_type TEXT NOT NULL DEFAULT 'subscription',deleted_at TIMESTAMPTZ);
 CREATE TABLE user_subscriptions (
 id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL REFERENCES users(id),group_id BIGINT NOT NULL REFERENCES groups(id),
 starts_at TIMESTAMPTZ NOT NULL,expires_at TIMESTAMPTZ NOT NULL,status TEXT NOT NULL DEFAULT 'active',
@@ -69,7 +69,7 @@ daily_window_start TIMESTAMPTZ,weekly_window_start TIMESTAMPTZ,monthly_window_st
 daily_usage_usd NUMERIC NOT NULL DEFAULT 0,weekly_usage_usd NUMERIC NOT NULL DEFAULT 0,monthly_usage_usd NUMERIC NOT NULL DEFAULT 0,
 assigned_by BIGINT,assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),notes TEXT,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),deleted_at TIMESTAMPTZ);
 CREATE UNIQUE INDEX renewal_active_sub ON user_subscriptions(user_id,group_id) WHERE deleted_at IS NULL;
-CREATE TABLE redeem_codes(id BIGSERIAL PRIMARY KEY,code VARCHAR(32) UNIQUE NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL,used_by BIGINT,group_id BIGINT,validity_days INT,used_at TIMESTAMPTZ);
+CREATE TABLE redeem_codes(id BIGSERIAL PRIMARY KEY,code VARCHAR(32) UNIQUE NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL,used_by BIGINT,group_id BIGINT,validity_days INT,used_at TIMESTAMPTZ,notes TEXT);
 INSERT INTO users(id) VALUES(10),(11); INSERT INTO groups(id) VALUES(20),(21);
 `)
 	require.NoError(t, err)
@@ -86,7 +86,7 @@ INSERT INTO users(id) VALUES(10),(11); INSERT INTO groups(id) VALUES(20),(21);
 	require.NoError(t, err)
 	_, err = db.Exec(`SELECT setval(pg_get_serial_sequence('user_subscriptions','id'),1)`)
 	require.NoError(t, err)
-	_, err = db.Exec(`INSERT INTO redeem_codes(code,type,status,used_by,group_id,validity_days,used_at) VALUES('store_current','subscription','used',10,20,30,$1),('store_next','subscription','used',10,20,30,$1),('store_queued','subscription','used',10,20,31,$1)`, now.Add(-time.Hour))
+	_, err = db.Exec(`INSERT INTO redeem_codes(code,type,status,used_by,group_id,validity_days,used_at,notes) VALUES('store_current','subscription','used',10,20,30,$1,'store order o_current'),('store_next','subscription','used',10,20,30,$2,'store order o_next'),('store_queued','subscription','used',10,20,31,$3,'store order o_queued')`, in.ExpectedStartsAt, now.AddDate(0, 0, -3), now.AddDate(0, 0, -1))
 	require.NoError(t, err)
 	return db, svc, in
 }

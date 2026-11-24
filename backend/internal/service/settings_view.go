@@ -155,7 +155,7 @@ type SystemSettings struct {
 	APIBaseURL                  string
 	ContactInfo                 string
 	DocURL                      string
-	SubscriptionResetURL        string
+	SubscriptionResetEnabled    bool
 	HomeContent                 string
 	CompactHomeEnabled          bool
 	HideCcsImportButton         bool
@@ -358,7 +358,7 @@ type PublicSettings struct {
 	APIBaseURL                          string
 	ContactInfo                         string
 	DocURL                              string
-	SubscriptionResetURL                string
+	SubscriptionResetEnabled            bool
 	HomeContent                         string
 	CompactHomeEnabled                  bool
 	HideCcsImportButton                 bool

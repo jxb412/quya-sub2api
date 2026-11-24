@@ -140,6 +140,8 @@ func RegisterUserRoutes(
 			subscriptions.GET("/active", h.Subscription.GetActive)
 			subscriptions.GET("/progress", h.Subscription.GetProgress)
 			subscriptions.GET("/summary", h.Subscription.GetSummary)
+			subscriptions.GET("/:id/reset-preview", panelRateLimiter.Heavy(), subscriptionResetEnabledGuard(settingService), h.Subscription.ResetPreview)
+			subscriptions.POST("/:id/reset", panelRateLimiter.Heavy(), subscriptionResetEnabledGuard(settingService), h.Subscription.Reset)
 		}
 
 		// 渠道监控（用户只读）

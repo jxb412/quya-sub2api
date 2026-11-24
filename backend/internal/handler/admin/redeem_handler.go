@@ -201,6 +201,18 @@ func (h *RedeemHandler) CreateAndRedeem(c *gin.Context) {
 	}
 
 	executeAdminIdempotentJSON(c, "admin.redeem_codes.create_and_redeem", req, service.DefaultWriteIdempotencyTTL(), func(ctx context.Context) (any, error) {
+		storeCode := &service.RedeemCode{Code: req.Code, Type: req.Type, Value: req.Value,
+			Status: service.StatusUnused, Notes: req.Notes, GroupID: req.GroupID,
+			ValidityDays: req.ValidityDays, ExpiresAt: expiresAt}
+		if service.IsStoreManagedRedemption(storeCode) {
+			// Keep legacy store refund/fulfillment creation inside the same user
+			// claim and transaction as redemption and native subscription reset.
+			redeemed, err := h.redeemService.CreateAndRedeemStoreCode(ctx, req.UserID, storeCode)
+			if err != nil {
+				return nil, err
+			}
+			return gin.H{"redeem_code": dto.RedeemCodeFromServiceAdmin(redeemed)}, nil
+		}
 		existing, err := h.redeemService.GetByCode(ctx, req.Code)
 		if err == nil {
 			return h.resolveCreateAndRedeemExisting(ctx, existing, req.UserID)

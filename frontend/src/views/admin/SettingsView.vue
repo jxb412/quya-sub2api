@@ -6648,20 +6648,18 @@
                 </p>
               </div>
 
-              <!-- 2026-11-24: trusted storefront for paid subscription resets. -->
+              <!-- 2026-11-24: native renewal activation has a server-enforced switch. -->
               <div>
-                <label class="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  {{ t("admin.settings.site.subscriptionResetUrl") }}
+                <label class="flex items-center gap-2 text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <input
+                    v-model="form.subscription_reset_enabled"
+                    type="checkbox"
+                    data-testid="subscription-reset-enabled"
+                  />
+                  {{ t("admin.settings.site.subscriptionResetEnabled") }}
                 </label>
-                <input
-                  v-model="form.subscription_reset_url"
-                  type="url"
-                  class="input font-mono text-sm"
-                  placeholder="https://www.yunqiao.me/subscription-reset"
-                  data-testid="subscription-reset-url"
-                />
                 <p class="mt-1.5 text-xs text-gray-500 dark:text-gray-400">
-                  {{ t("admin.settings.site.subscriptionResetUrlHint") }}
+                  {{ t("admin.settings.site.subscriptionResetEnabledHint") }}
                 </p>
               </div>
 
@@ -9035,7 +9033,6 @@ import TotpStepUpDialog from "@/components/auth/TotpStepUpDialog.vue";
 import { affiliatesAPI, type AffiliateAdminEntry, type SimpleUser as AffiliateSimpleUser } from "@/api/admin/affiliates";
 import { extractApiErrorMessage, extractI18nErrorMessage } from "@/utils/apiError";
 import { formatBalanceRechargeMultiplier } from "@/utils/rechargeBonus";
-import { trustedSubscriptionResetUrl } from "@/utils/subscriptionReset";
 import { useAppStore } from "@/stores";
 import { useAdminSettingsStore } from "@/stores/adminSettings";
 import { normalizeVisibleMethod } from "@/components/payment/paymentFlow";
@@ -9797,7 +9794,7 @@ const form = reactive<SettingsForm>({
   api_base_url: "",
   contact_info: "",
   doc_url: "",
-  subscription_reset_url: "",
+  subscription_reset_enabled: false,
   home_content: "",
   compact_home_enabled: false,
   backend_mode_enabled: false,
@@ -11437,11 +11434,6 @@ async function saveSettings() {
     // Optional URL fields: auto-clear invalid values so they don't cause backend 400 errors
     if (!isValidHttpUrl(form.frontend_url)) form.frontend_url = "";
     if (!isValidHttpUrl(form.doc_url)) form.doc_url = "";
-    form.subscription_reset_url = form.subscription_reset_url?.trim() || "";
-    if (form.subscription_reset_url && !trustedSubscriptionResetUrl(form.subscription_reset_url)) {
-      appStore.showError(t("admin.settings.site.subscriptionResetUrlInvalid"));
-      return;
-    }
     syncWeChatConnectMode();
     const wechatStoredMode = deriveWeChatConnectStoredMode(
       form.wechat_connect_open_enabled,
@@ -11510,7 +11502,7 @@ async function saveSettings() {
       api_base_url: form.api_base_url,
       contact_info: form.contact_info,
       doc_url: form.doc_url,
-      subscription_reset_url: form.subscription_reset_url,
+      subscription_reset_enabled: form.subscription_reset_enabled === true,
       home_content: form.home_content,
       compact_home_enabled: form.compact_home_enabled,
       backend_mode_enabled: form.backend_mode_enabled,

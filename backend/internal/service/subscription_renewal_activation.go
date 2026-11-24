@@ -17,8 +17,8 @@ import (
 	"github.com/lib/pq"
 )
 
-// 2026-11-24 Quya: the store validates paid orders, while this admin-only
-// operation validates redeemed rights and replaces the old period atomically.
+// 2026-11-24 Quya: native user and legacy admin flows validate local redeemed
+// store rights and replace the old period atomically. No PHP payment API is used.
 // pending_codes excludes next_code: it contains only the later queued orders.
 type ActivateSubscriptionRenewalInput struct {
 	UserID            int64     `json:"user_id"`
@@ -38,6 +38,7 @@ type SubscriptionRenewalActivationReceipt struct {
 	UserID              int64     `json:"user_id"`
 	GroupID             int64     `json:"group_id"`
 	CurrentCode         string    `json:"current_code"`
+	PreviousCode        string    `json:"previous_code,omitempty"`
 	PendingCodes        []string  `json:"pending_codes"`
 	CurrentValidityDays int       `json:"current_validity_days"`
 	TotalValidityDays   int       `json:"total_validity_days"`
@@ -132,6 +133,9 @@ func (s *SubscriptionService) revokeSubscriptionBeforeRenewal(ctx context.Contex
 	var sub *UserSubscription
 	err := s.withSubscriptionUpdateTx(ctx, func(txCtx context.Context) error {
 		var err error
+		if err = lockStoreSubscriptionUserForID(txCtx, dbent.TxFromContext(txCtx).Client(), id); err != nil {
+			return err
+		}
 		sub, err = s.userSubRepo.GetByIDForUpdate(txCtx, id)
 		if err != nil {
 			return err
@@ -162,12 +166,34 @@ func (s *SubscriptionService) ActivateSubscriptionRenewal(ctx context.Context, i
 	if s.entClient == nil {
 		return nil, fmt.Errorf("renewal activation requires database access")
 	}
+	if tx := dbent.TxFromContext(ctx); tx != nil {
+		if err := lockStoreSubscriptionUser(ctx, tx.Client(), in.UserID); err != nil {
+			return nil, err
+		}
+		return s.activateSubscriptionRenewalLocked(ctx, tx.Client(), id, in)
+	}
 	tx, err := s.entClient.Tx(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	client := tx.Client()
+	if err := lockStoreSubscriptionUser(ctx, tx.Client(), in.UserID); err != nil {
+		return nil, err
+	}
+	receipt, err := s.activateSubscriptionRenewalLocked(ctx, tx.Client(), id, in)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err := s.invalidateSubscriptionCaches(in.UserID, in.GroupID); err != nil {
+		return nil, err
+	}
+	return receipt, nil
+}
+
+func (s *SubscriptionService) activateSubscriptionRenewalLocked(ctx context.Context, client renewalSQLClient, id int64, in *ActivateSubscriptionRenewalInput) (*SubscriptionRenewalActivationReceipt, error) {
 	// Include soft-deleted rows in this lock, so concurrent retries wait for the
 	// first commit and then read its durable receipt instead of activating twice.
 	rows, err := client.QueryContext(ctx, `SELECT user_id, group_id, status, starts_at, expires_at, COALESCE(notes,''), deleted_at FROM user_subscriptions WHERE id=$1 FOR UPDATE`, id)
@@ -197,13 +223,7 @@ func (s *SubscriptionService) ActivateSubscriptionRenewal(ctx context.Context, i
 		if priorHash != hash || prior.IdempotencyKey != in.IdempotencyKey {
 			return nil, renewalConflict("subscription already activated by another operation")
 		}
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
 		prior.Replayed = true
-		if err := s.invalidateSubscriptionCaches(in.UserID, in.GroupID); err != nil {
-			return nil, err
-		}
 		return prior, nil
 	}
 	// 2026-11-24: prepaid renewal activation assumes Quya lifetime quota windows.
@@ -221,6 +241,14 @@ func (s *SubscriptionService) ActivateSubscriptionRenewal(ctx context.Context, i
 	}
 	if !sub.StartsAt.Equal(in.ExpectedStartsAt) || !sub.ExpiresAt.Equal(in.ExpectedExpiresAt) || sub.Notes != in.ExpectedNotes {
 		return nil, renewalConflict("subscription changed; refresh the renewal preview")
+	}
+	sources, err := resolveNativeSubscriptionSources(ctx, client, id, in.UserID, in.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	expected := sources.activationInput()
+	if expected == nil || expected.CurrentCode != in.CurrentCode || expected.NextCode != in.NextCode || strings.Join(expected.PendingCodes, "\x00") != strings.Join(in.PendingCodes, "\x00") {
+		return nil, renewalConflict("purchase queue changed; refresh the renewal preview")
 	}
 	rows, err = client.QueryContext(ctx, `SELECT id FROM groups WHERE id=$1 AND deleted_at IS NULL AND status='active' AND subscription_type='subscription' FOR SHARE`, in.GroupID)
 	if err != nil {
@@ -303,16 +331,10 @@ func (s *SubscriptionService) ActivateSubscriptionRenewal(ctx context.Context, i
 		return nil, err
 	}
 	pending := append([]string{}, in.PendingCodes...)
-	receipt := &SubscriptionRenewalActivationReceipt{OldSubscriptionID: id, NewSubscriptionID: newID, UserID: in.UserID, GroupID: in.GroupID, CurrentCode: in.NextCode, PendingCodes: pending, CurrentValidityDays: daysByCode[in.NextCode], TotalValidityDays: totalDays, StartsAt: now, ExpiresAt: expires, IdempotencyKey: in.IdempotencyKey}
+	receipt := &SubscriptionRenewalActivationReceipt{OldSubscriptionID: id, NewSubscriptionID: newID, UserID: in.UserID, GroupID: in.GroupID, PreviousCode: in.CurrentCode, CurrentCode: in.NextCode, PendingCodes: pending, CurrentValidityDays: daysByCode[in.NextCode], TotalValidityDays: totalDays, StartsAt: now, ExpiresAt: expires, IdempotencyKey: in.IdempotencyKey}
 	raw, _ := json.Marshal(receipt)
 	_, err = client.ExecContext(ctx, `INSERT INTO subscription_renewal_activations (old_subscription_id,new_subscription_id,user_id,group_id,next_code,idempotency_key,request_hash,receipt,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, id, newID, in.UserID, in.GroupID, in.NextCode, in.IdempotencyKey, hash, string(raw), now)
 	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	if err := s.invalidateSubscriptionCaches(in.UserID, in.GroupID); err != nil {
 		return nil, err
 	}
 	return receipt, nil

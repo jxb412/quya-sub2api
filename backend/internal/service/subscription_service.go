@@ -508,6 +508,13 @@ func (s *SubscriptionService) BulkAssignSubscription(ctx context.Context, input 
 }
 
 func (s *SubscriptionService) assignSubscriptionWithReuse(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, bool, error) {
+	marker, err := parseLegacyStoreReplacement(input.Notes)
+	if err != nil {
+		return nil, false, err
+	}
+	if marker != nil {
+		return s.assignLegacyStoreReplacement(ctx, input, marker)
+	}
 	// 检查分组是否存在且为订阅类型
 	group, err := s.groupRepo.GetByID(ctx, input.GroupID)
 	if err != nil {
@@ -632,6 +639,9 @@ func (s *SubscriptionService) RestoreSubscription(ctx context.Context, subscript
 		// receipt. The check and restore must not straddle another host's reset.
 		if s.entClient != nil {
 			client := dbent.TxFromContext(txCtx).Client()
+			if err := lockStoreSubscriptionUserForID(txCtx, client, subscriptionID); err != nil {
+				return err
+			}
 			rows, err := client.QueryContext(txCtx, `SELECT id FROM user_subscriptions WHERE id=$1 FOR UPDATE`, subscriptionID)
 			if err != nil {
 				return err

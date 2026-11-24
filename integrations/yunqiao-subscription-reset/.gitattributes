@@ -1,4 +1,0 @@
-# 2026-11-24: Preserve deployed PHP bytes for patch context and SHA-256 verification.
-# Patch context includes literal blank-line prefixes and the source CRLF bytes.
-php-existing-files.patch -text whitespace=-blank-at-eol,-blank-at-eof,cr-at-eol
-new-files/** -text

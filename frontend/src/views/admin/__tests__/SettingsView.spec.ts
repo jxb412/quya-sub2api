@@ -725,35 +725,36 @@ describe("admin SettingsView payment visible method controls", () => {
     adminSettingsFetch.mockResolvedValue(undefined);
   });
 
-  it("loads and saves the trusted subscription reset URL", async () => {
+  it("loads and disables the native subscription reset switch", async () => {
     getSettings.mockResolvedValue({
       ...baseSettingsResponse,
-      subscription_reset_url: "https://www.yunqiao.me/subscription-reset",
+      subscription_reset_enabled: true,
     });
     const wrapper = mountView();
     await flushPromises();
-
-    const input = wrapper.get<HTMLInputElement>('[data-testid="subscription-reset-url"]');
-    expect(input.element.value).toBe("https://www.yunqiao.me/subscription-reset");
-    await input.setValue("https://store.example.com/subscription-reset");
+    const input = wrapper.get<HTMLInputElement>('[data-testid="subscription-reset-enabled"]');
+    expect(input.element.checked).toBe(true);
+    await input.setValue(false);
     await wrapper.find("form").trigger("submit.prevent");
     await flushPromises();
-
     expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
-      subscription_reset_url: "https://store.example.com/subscription-reset",
+      subscription_reset_enabled: false,
     }));
+    expect(updateSettings.mock.calls[0][0]).not.toHaveProperty("subscription_reset_url");
     wrapper.unmount();
   });
 
-  it("rejects a subscription reset URL containing userinfo before saving", async () => {
+  it("keeps resets disabled when missing from settings and saves an explicit enable", async () => {
     const wrapper = mountView();
     await flushPromises();
-    await wrapper.get('[data-testid="subscription-reset-url"]').setValue("https://user:pass@store.example.com/reset");
+    const input = wrapper.get<HTMLInputElement>('[data-testid="subscription-reset-enabled"]');
+    expect(input.element.checked).toBe(false);
+    await input.setValue(true);
     await wrapper.find("form").trigger("submit.prevent");
     await flushPromises();
-
-    expect(updateSettings).not.toHaveBeenCalled();
-    expect(showError).toHaveBeenCalledWith("admin.settings.site.subscriptionResetUrlInvalid");
+    expect(updateSettings).toHaveBeenCalledWith(expect.objectContaining({
+      subscription_reset_enabled: true,
+    }));
     wrapper.unmount();
   });
 

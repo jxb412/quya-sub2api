@@ -186,7 +186,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		SettingKeyAPIBaseURL,
 		SettingKeyContactInfo,
 		SettingKeyDocURL,
-		SettingKeySubscriptionResetURL,
+		SettingKeySubscriptionResetEnabled,
 		SettingKeyHomeContent,
 		SettingKeyCompactHomeEnabled,
 		SettingKeyHideCcsImportButton,
@@ -331,7 +331,7 @@ func (s *SettingService) GetPublicSettings(ctx context.Context) (*PublicSettings
 		APIBaseURL:                          settings[SettingKeyAPIBaseURL],
 		ContactInfo:                         settings[SettingKeyContactInfo],
 		DocURL:                              settings[SettingKeyDocURL],
-		SubscriptionResetURL:                publicSubscriptionResetURL(settings[SettingKeySubscriptionResetURL]),
+		SubscriptionResetEnabled:            settings[SettingKeySubscriptionResetEnabled] == "true",
 		HomeContent:                         settings[SettingKeyHomeContent],
 		CompactHomeEnabled:                  settings[SettingKeyCompactHomeEnabled] == "true",
 		HideCcsImportButton:                 settings[SettingKeyHideCcsImportButton] == "true",
@@ -592,7 +592,7 @@ type PublicSettingsInjectionPayload struct {
 	APIBaseURL                          string                   `json:"api_base_url"`
 	ContactInfo                         string                   `json:"contact_info"`
 	DocURL                              string                   `json:"doc_url"`
-	SubscriptionResetURL                string                   `json:"subscription_reset_url"`
+	SubscriptionResetEnabled            bool                     `json:"subscription_reset_enabled"`
 	HomeContent                         string                   `json:"home_content"`
 	CompactHomeEnabled                  bool                     `json:"compact_home_enabled"`
 	HideCcsImportButton                 bool                     `json:"hide_ccs_import_button"`
@@ -688,7 +688,7 @@ func (s *SettingService) GetPublicSettingsForInjection(ctx context.Context) (any
 		APIBaseURL:                          settings.APIBaseURL,
 		ContactInfo:                         settings.ContactInfo,
 		DocURL:                              settings.DocURL,
-		SubscriptionResetURL:                settings.SubscriptionResetURL,
+		SubscriptionResetEnabled:            settings.SubscriptionResetEnabled,
 		HomeContent:                         settings.HomeContent,
 		CompactHomeEnabled:                  settings.CompactHomeEnabled,
 		HideCcsImportButton:                 settings.HideCcsImportButton,
@@ -812,8 +812,6 @@ func (s *SettingService) GetFrameSrcOrigins(ctx context.Context) ([]string, erro
 	if settings.PurchaseSubscriptionEnabled {
 		addOrigin(settings.PurchaseSubscriptionURL)
 	}
-	// 2026-11-24: allow only the validated administrator-configured reset page.
-	addOrigin(settings.SubscriptionResetURL)
 
 	// all custom menu items (including admin-only, since CSP must allow all iframes)
 	for _, item := range parseCustomMenuItemURLs(settings.CustomMenuItems) {

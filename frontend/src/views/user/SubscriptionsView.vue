@@ -71,10 +71,11 @@
                 {{ t(`userSubscriptions.status.${subscription.status}`) }}
               </span>
               <button
-                v-if="resetEndpoint && canOpenSubscriptionReset(subscription, currentTime)"
+                v-if="resetEnabled && canOpenSubscriptionReset(subscription, currentTime)"
                 type="button"
                 class="btn btn-secondary px-3 py-1.5 text-xs"
                 :data-reset-subscription-id="subscription.id"
+                :disabled="resetSubmitting"
                 @click="openSubscriptionReset(subscription)"
               >
                 {{ t('userSubscriptions.resetSubscription') }}
@@ -256,18 +257,93 @@
     <BaseDialog
       :show="!!resetTarget"
       :title="t('userSubscriptions.resetSubscription')"
-      width="wide"
+      width="normal"
+      :close-on-escape="!resetSubmitting"
+      :show-close-button="!resetSubmitting"
       @close="closeSubscriptionReset"
     >
-      <iframe
-        v-if="resetTarget"
-        ref="resetFrame"
-        :src="resetTarget.url"
-        :title="t('userSubscriptions.resetSubscription')"
-        class="h-[70vh] min-h-96 w-full rounded-lg border-0"
-        referrerpolicy="no-referrer"
-        sandbox="allow-scripts allow-forms allow-same-origin"
-      ></iframe>
+      <div class="space-y-4" aria-live="polite" :aria-busy="resetLoading || resetSubmitting">
+        <p v-if="resetLoading" class="py-6 text-center text-sm text-gray-500 dark:text-gray-400">
+          {{ t('userSubscriptions.resetLoading') }}
+        </p>
+        <template v-else-if="resetPreview?.eligible">
+          <p class="text-sm text-gray-600 dark:text-gray-300">
+            {{ t('userSubscriptions.resetDescription') }}
+          </p>
+          <dl class="space-y-3 rounded-xl bg-gray-50 p-4 text-sm dark:bg-dark-900">
+            <div class="flex justify-between gap-4">
+              <dt class="text-gray-500 dark:text-gray-400">{{ t('userSubscriptions.resetPlan') }}</dt>
+              <dd class="text-right font-medium">{{ resetPreview.group_name }}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="shrink-0 text-gray-500 dark:text-gray-400">{{ t('userSubscriptions.resetCurrentOrder') }}</dt>
+              <dd class="break-all text-right" data-reset-current-order>{{ resetPreview.current_order_no }}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="shrink-0 text-gray-500 dark:text-gray-400">{{ t('userSubscriptions.resetNextOrder') }}</dt>
+              <dd class="break-all text-right font-medium" data-reset-next-order>{{ resetPreview.next_order_no }}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="text-gray-500 dark:text-gray-400">{{ t('userSubscriptions.resetNewPeriod') }}</dt>
+              <dd class="text-right font-medium">{{ t('userSubscriptions.resetFullDays', { days: resetPreview.next_validity_days }) }}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="text-gray-500 dark:text-gray-400">{{ t('userSubscriptions.resetQueuedOrders') }}</dt>
+              <dd class="text-right">{{ t('userSubscriptions.resetQueuedCount', { count: resetPreview.remaining_pending_count }) }}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="text-gray-500 dark:text-gray-400">{{ t('userSubscriptions.resetOldExpiry') }}</dt>
+              <dd class="text-right">{{ formatResetDate(resetPreview.old_expires_at) }}</dd>
+            </div>
+            <div class="flex justify-between gap-4">
+              <dt class="text-gray-500 dark:text-gray-400">{{ t('userSubscriptions.resetNewExpiry') }}</dt>
+              <dd class="text-right font-medium">{{ formatResetDate(resetPreview.new_expires_at) }}</dd>
+            </div>
+          </dl>
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('userSubscriptions.resetExpiryHint', { days: resetPreview.total_validity_days }) }}
+          </p>
+          <div class="space-y-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
+            <p>{{ t('userSubscriptions.resetWarning') }}</p>
+            <p>{{ t('userSubscriptions.resetRefundNotice') }}</p>
+          </div>
+          <label class="flex cursor-pointer items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+            <input v-model="resetAccepted" type="checkbox" class="mt-1" :disabled="resetSubmitting" data-reset-accept />
+            <span>{{ t('userSubscriptions.resetAccept') }}</span>
+          </label>
+        </template>
+        <p v-else-if="resetPreview" class="rounded-xl bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-900/20 dark:text-amber-200" data-reset-unavailable>
+          {{ resetPreview.reason || t('userSubscriptions.resetUnavailable') }}
+        </p>
+        <p v-if="resetError" role="alert" class="text-sm text-red-600 dark:text-red-400" data-reset-error>{{ resetError }}</p>
+        <p v-if="resetAttempted && resetError" class="text-xs text-gray-500 dark:text-gray-400">
+          {{ t('userSubscriptions.resetRetryHint') }}
+        </p>
+      </div>
+      <template #footer>
+        <button type="button" class="btn btn-secondary" :disabled="resetSubmitting" @click="closeSubscriptionReset" data-reset-cancel>
+          {{ t('common.cancel') }}
+        </button>
+        <button
+          v-if="!resetLoading && !resetPreview?.eligible"
+          type="button"
+          class="btn btn-secondary"
+          @click="loadResetPreview"
+          data-reset-reload
+        >
+          {{ t('userSubscriptions.resetCheckAgain') }}
+        </button>
+        <button
+          v-if="resetPreview?.eligible"
+          type="button"
+          class="btn btn-primary"
+          :disabled="!resetAccepted || resetSubmitting || !resetPreview.preview_token"
+          @click="confirmSubscriptionReset"
+          data-reset-confirm
+        >
+          {{ t(resetSubmitting ? 'userSubscriptions.resetSubmitting' : resetAttempted ? 'userSubscriptions.resetRetry' : 'userSubscriptions.resetConfirm') }}
+        </button>
+      </template>
     </BaseDialog>
   </AppLayout>
 </template>
@@ -277,14 +353,12 @@ import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
-import { useAuthStore } from '@/stores/auth'
-import subscriptionsAPI from '@/api/subscriptions'
+import subscriptionsAPI, { type SubscriptionResetPreview } from '@/api/subscriptions'
 import type { UserSubscription } from '@/types'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
-import { buildEmbeddedUrl, detectTheme } from '@/utils/embedded-url'
-import { canOpenSubscriptionReset, isSubscriptionResetCompletion, trustedSubscriptionResetUrl } from '@/utils/subscriptionReset'
+import { canOpenSubscriptionReset } from '@/utils/subscriptionReset'
 import { formatDateTimeToMinute } from '@/utils/format'
 import { hasPeakRate, formatPeakRateWindow, serverTimezoneLabel } from '@/utils/peak-rate'
 import { platformBorderClass, platformBadgeClass, platformButtonClass, platformLabel } from '@/utils/platformColors'
@@ -305,45 +379,97 @@ function platformAccentDotClass(p: string): string {
   }
 }
 
-const { t, locale } = useI18n()
+const { t } = useI18n()
 const router = useRouter()
 const appStore = useAppStore()
-const authStore = useAuthStore()
 
 const subscriptions = ref<UserSubscription[]>([])
 const loading = ref(true)
 const currentTime = ref(Date.now())
-const resetEndpoint = computed(() => trustedSubscriptionResetUrl(appStore.cachedPublicSettings?.subscription_reset_url))
-const resetTarget = ref<{ id: number; url: string; origin: string } | null>(null)
-const resetFrame = ref<HTMLIFrameElement | null>(null)
+const resetEnabled = computed(() => appStore.cachedPublicSettings?.subscription_reset_enabled === true)
+const resetTarget = ref<number | null>(null)
+const resetPreview = ref<SubscriptionResetPreview | null>(null)
+const resetLoading = ref(false)
+const resetSubmitting = ref(false)
+const resetAccepted = ref(false)
+const resetAttempted = ref(false)
+const resetError = ref('')
+let resetRequestVersion = 0
 let resetClock: ReturnType<typeof setInterval> | undefined
 
-// 2026-11-24: this opens the trusted storefront's confirmation flow. The UI
-// never grants quota itself; purchase eligibility is verified by that service.
+// 2026-11-24: keep confirmation in Sub2API. Every retry uses the original
+// preview token so a lost response cannot accidentally consume another renewal.
 function openSubscriptionReset(subscription: UserSubscription) {
-  const endpoint = resetEndpoint.value
-  if (!endpoint || !canOpenSubscriptionReset(subscription)) return
-  if (!authStore.token || !authStore.user?.id) {
-    appStore.showError(t('userSubscriptions.resetLoginRequired'))
-    return
+  if (!resetEnabled.value || resetSubmitting.value || !canOpenSubscriptionReset(subscription)) return
+  resetTarget.value = subscription.id
+  resetAttempted.value = false
+  void loadResetPreview()
+}
+
+async function loadResetPreview() {
+  const id = resetTarget.value
+  if (!id || resetSubmitting.value || resetAttempted.value) return
+  const version = ++resetRequestVersion
+  resetPreview.value = null
+  resetError.value = ''
+  resetAccepted.value = false
+  resetLoading.value = true
+  try {
+    const preview = await subscriptionsAPI.getSubscriptionResetPreview(id)
+    if (version === resetRequestVersion && id === resetTarget.value) {
+      if (preview.subscription_id !== id) {
+        resetError.value = t('userSubscriptions.resetPreviewFailed')
+        return
+      }
+      resetPreview.value = preview
+    }
+  } catch (error) {
+    if (version === resetRequestVersion) resetError.value = resetErrorMessage(error, 'userSubscriptions.resetPreviewFailed')
+  } finally {
+    if (version === resetRequestVersion) resetLoading.value = false
   }
-  const url = new URL(buildEmbeddedUrl(endpoint.href, authStore.user.id, authStore.token, detectTheme(), locale.value))
-  url.searchParams.set('subscription_id', String(subscription.id))
-  resetTarget.value = { id: subscription.id, origin: endpoint.origin, url: url.href }
+}
+
+function resetErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string' && error.message) return error.message
+  return t(fallback)
+}
+
+function formatResetDate(value: string): string {
+  return formatDateTimeToMinute(new Date(value))
+}
+
+async function confirmSubscriptionReset() {
+  const id = resetTarget.value
+  const preview = resetPreview.value
+  if (!id || !preview?.eligible || !preview.preview_token || !resetAccepted.value || resetSubmitting.value) return
+  resetSubmitting.value = true
+  resetAttempted.value = true
+  resetError.value = ''
+  try {
+    await subscriptionsAPI.resetSubscription(id, preview.preview_token)
+    resetSubmitting.value = false
+    appStore.showSuccess(t('userSubscriptions.resetSuccess'))
+    closeSubscriptionReset()
+  } catch (error) {
+    resetError.value = resetErrorMessage(error, 'userSubscriptions.resetFailed')
+  } finally {
+    resetSubmitting.value = false
+  }
 }
 
 function closeSubscriptionReset() {
-  if (!resetTarget.value) return
+  if (!resetTarget.value || resetSubmitting.value) return
+  const attempted = resetAttempted.value
+  resetRequestVersion++
   resetTarget.value = null
-  // Refresh on close as well: the storefront may finish while its completion
-  // message is lost, or the member may close the dialog immediately afterward.
-  void loadSubscriptions()
-}
-
-function handleSubscriptionResetMessage(event: MessageEvent) {
-  const target = resetTarget.value
-  if (!target || !isSubscriptionResetCompletion(event, target.origin, resetFrame.value?.contentWindow, target.id)) return
-  closeSubscriptionReset()
+  resetPreview.value = null
+  resetAccepted.value = false
+  resetError.value = ''
+  resetAttempted.value = false
+  // A failed response can still represent a committed reset; refresh when the
+  // member closes after an attempt without changing the operation on retry.
+  if (attempted) void loadSubscriptions()
 }
 
 function subscriptionHasPeakRate(subscription: UserSubscription): boolean {
@@ -454,12 +580,11 @@ function formatResetTime(windowStart: string | null, windowHours: number): strin
 onMounted(() => {
   void loadSubscriptions()
   void appStore.fetchPublicSettings()
-  window.addEventListener('message', handleSubscriptionResetMessage)
   resetClock = setInterval(() => { currentTime.value = Date.now() }, 1000)
 })
 
 onUnmounted(() => {
-  window.removeEventListener('message', handleSubscriptionResetMessage)
+  resetRequestVersion++
   if (resetClock) clearInterval(resetClock)
 })
 </script>

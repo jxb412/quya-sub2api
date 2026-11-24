@@ -155,7 +155,7 @@ type SystemSettings struct {
 	APIBaseURL                  string           `json:"api_base_url"`
 	ContactInfo                 string           `json:"contact_info"`
 	DocURL                      string           `json:"doc_url"`
-	SubscriptionResetURL        string           `json:"subscription_reset_url"`
+	SubscriptionResetEnabled    bool             `json:"subscription_reset_enabled"`
 	HomeContent                 string           `json:"home_content"`
 	CompactHomeEnabled          bool             `json:"compact_home_enabled"`
 	HideCcsImportButton         bool             `json:"hide_ccs_import_button"`
@@ -396,7 +396,7 @@ type PublicSettings struct {
 	APIBaseURL                          string                   `json:"api_base_url"`
 	ContactInfo                         string                   `json:"contact_info"`
 	DocURL                              string                   `json:"doc_url"`
-	SubscriptionResetURL                string                   `json:"subscription_reset_url"`
+	SubscriptionResetEnabled            bool                     `json:"subscription_reset_enabled"`
 	HomeContent                         string                   `json:"home_content"`
 	CompactHomeEnabled                  bool                     `json:"compact_home_enabled"`
 	HideCcsImportButton                 bool                     `json:"hide_ccs_import_button"`

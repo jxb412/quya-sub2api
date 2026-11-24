@@ -238,7 +238,7 @@ export interface PublicSettings {
   api_base_url: string
   contact_info: string
   doc_url: string
-  subscription_reset_url?: string
+  subscription_reset_enabled?: boolean
   home_content: string
   compact_home_enabled: boolean
   hide_ccs_import_button: boolean

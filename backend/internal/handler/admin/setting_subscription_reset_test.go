@@ -12,9 +12,9 @@ import (
 
 func TestSubscriptionResetSettingAuditAndOmission(t *testing.T) {
 	before := &service.SystemSettings{}
-	after := &service.SystemSettings{SubscriptionResetURL: "https://www.yunqiao.me/subscription-reset"}
+	after := &service.SystemSettings{SubscriptionResetEnabled: true}
 	changed := diffSettings(before, after, nil, nil, UpdateSettingsRequest{})
-	require.Contains(t, changed, "subscription_reset_url")
-	require.Contains(t, omittedSettingKeys(map[string]json.RawMessage{}), service.SettingKeySubscriptionResetURL)
-	require.NotContains(t, omittedSettingKeys(map[string]json.RawMessage{"subscription_reset_url": json.RawMessage(`""`)}), service.SettingKeySubscriptionResetURL)
+	require.Contains(t, changed, "subscription_reset_enabled")
+	require.Contains(t, omittedSettingKeys(map[string]json.RawMessage{}), service.SettingKeySubscriptionResetEnabled)
+	require.NotContains(t, omittedSettingKeys(map[string]json.RawMessage{"subscription_reset_enabled": json.RawMessage(`false`)}), service.SettingKeySubscriptionResetEnabled)
 }
