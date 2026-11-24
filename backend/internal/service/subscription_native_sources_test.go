@@ -48,6 +48,22 @@ func TestNativeSubscriptionSourcesQueuedPurchasesAndStateToken(t *testing.T) {
 	require.NotEqual(t, token, renewalActivationHash(1, s.activationInput()), "preview must bind the local order proof")
 }
 
+func TestNativeSubscriptionSourcesRejectMultipleUndeletedRows(t *testing.T) {
+	for _, status := range []string{"active", "expired", "suspended"} {
+		t.Run(status, func(t *testing.T) {
+			h, now := nativeHistoryFixture()
+			h.Nodes[8] = nativeSubscriptionNode{ID: 8, UserID: 10, GroupID: 20, StartsAt: now.AddDate(0, 0, -10), ExpiresAt: now.AddDate(0, 0, -3), Status: status, Notes: "管理员赠送，无商城购买码"}
+			_, err := h.resolve(1, map[int64]bool{})
+			require.ErrorContains(t, err, "多个未撤销套餐")
+			other := h.Nodes[8]
+			other.DeletedAt = sql.NullTime{Time: now, Valid: true}
+			h.Nodes[8] = other
+			_, err = h.resolve(1, map[int64]bool{})
+			require.NoError(t, err, "unrelated deleted history does not create a live-row ambiguity")
+		})
+	}
+}
+
 func TestNativeSubscriptionSourcesRejectUnprovenRights(t *testing.T) {
 	cases := map[string]func(*nativeSubscriptionHistory){
 		"gift": func(h *nativeSubscriptionHistory) {

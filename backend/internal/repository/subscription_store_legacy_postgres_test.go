@@ -84,7 +84,8 @@ func (r *legacyStorePostgresSubRepo) GetByID(ctx context.Context, id int64) (*se
 func legacyStorePostgres(t *testing.T) (*sql.DB, *service.SubscriptionService, *service.RedeemService, *service.ActivateSubscriptionRenewalInput) {
 	t.Helper()
 	db, _, in := renewalPostgres(t)
-	_, err := db.Exec(`ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC NOT NULL DEFAULT 0;
+	_, err := db.Exec(`DROP INDEX renewal_active_sub;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS balance NUMERIC NOT NULL DEFAULT 0;
 ALTER TABLE redeem_codes ADD COLUMN IF NOT EXISTS notes TEXT;
 ALTER TABLE redeem_codes ADD COLUMN IF NOT EXISTS value NUMERIC NOT NULL DEFAULT 1;
 ALTER TABLE redeem_codes ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
@@ -254,6 +255,69 @@ func TestLegacyStorePostgresCronRejectsUnrelatedRevokedPurchaseCopy(t *testing.T
 	var count int
 	require.NoError(t, db.QueryRow(`SELECT count(*) FROM user_subscriptions`).Scan(&count))
 	require.Equal(t, 2, count)
+}
+
+func TestLegacyStorePostgresCronRejectsUnrelatedLiveRowWithoutUniqueIndex(t *testing.T) {
+	db, subs, _, _ := legacyStorePostgres(t)
+	ctx := context.Background()
+	require.NoError(t, subs.RevokeSubscription(ctx, 1))
+	var otherID int64
+	var originalExpiry time.Time
+	require.NoError(t, db.QueryRow(`INSERT INTO user_subscriptions (user_id,group_id,starts_at,expires_at,status,notes) VALUES (10,20,NOW(),NOW()+INTERVAL '7 days','active','管理员单独赠送') RETURNING id,expires_at`).Scan(&otherID, &originalExpiry))
+	var uniqueIndexes int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND tablename='user_subscriptions' AND indexdef LIKE 'CREATE UNIQUE INDEX%' AND indexname<>'user_subscriptions_pkey'`).Scan(&uniqueIndexes))
+	require.Zero(t, uniqueIndexes, "production has no live user/group unique index")
+	_, err := subs.AssignSubscription(ctx, &service.AssignSubscriptionInput{UserID: 10, GroupID: 20, ValidityDays: 61, Notes: legacyStoreNotes(1, "store_next", "store_queued")})
+	require.ErrorContains(t, err, "已有其他有效套餐")
+	var active, total int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FILTER (WHERE deleted_at IS NULL),count(*) FROM user_subscriptions`).Scan(&active, &total))
+	require.Equal(t, 1, active)
+	require.Equal(t, 2, total)
+	var expiry time.Time
+	var notes string
+	require.NoError(t, db.QueryRow(`SELECT expires_at,notes FROM user_subscriptions WHERE id=$1`, otherID).Scan(&expiry, &notes))
+	require.Equal(t, originalExpiry, expiry)
+	require.Equal(t, "管理员单独赠送", notes)
+}
+
+func TestLegacyStorePostgresConcurrentCronAndAdminGrantWithoutUniqueIndex(t *testing.T) {
+	db, subs, _, _ := legacyStorePostgres(t)
+	setupCtx, setupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer setupCancel()
+	require.NoError(t, subs.RevokeSubscription(setupCtx, 1))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, errs[0] = subs.AssignSubscription(ctx, &service.AssignSubscriptionInput{UserID: 10, GroupID: 20, ValidityDays: 61, Notes: legacyStoreNotes(1, "store_next", "store_queued")})
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, errs[1] = subs.AssignSubscription(ctx, &service.AssignSubscriptionInput{UserID: 10, GroupID: 20, ValidityDays: 7, Notes: "管理员并发赠送"})
+	}()
+	close(start)
+	wg.Wait()
+	require.NoError(t, ctx.Err(), "contenders did not finish: cron=%v admin=%v", errs[0], errs[1])
+	require.NotEqual(t, errs[0] == nil, errs[1] == nil, "only one subscription may be created")
+	for _, err := range errs {
+		require.NotErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, context.DeadlineExceeded)
+		if err != nil {
+			require.True(t, infraerrors.IsConflict(err), "loser must be a domain conflict: %v", err)
+		}
+	}
+	assertCtx, assertCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer assertCancel()
+	var active, total int
+	require.NoError(t, db.QueryRowContext(assertCtx, `SELECT count(*) FILTER (WHERE deleted_at IS NULL),count(*) FROM user_subscriptions`).Scan(&active, &total))
+	require.Equal(t, 1, active)
+	require.Equal(t, 2, total)
 }
 
 func TestLegacyStorePostgresConcurrentCronAndRefundClaimExactlyOnce(t *testing.T) {

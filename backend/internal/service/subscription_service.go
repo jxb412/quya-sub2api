@@ -413,6 +413,37 @@ func appendSubscriptionNotes(existingNotes, newNotes string) string {
 
 // createSubscription 创建新订阅（内部方法）
 func (s *SubscriptionService) createSubscription(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, error) {
+	if s.entClient == nil {
+		return s.createSubscriptionRow(ctx, input)
+	}
+	var result *UserSubscription
+	err := s.withSubscriptionUpdateTx(ctx, func(txCtx context.Context) error {
+		client := dbent.TxFromContext(txCtx).Client()
+		if err := lockStoreSubscriptionUser(txCtx, client, input.UserID); err != nil {
+			return err
+		}
+		// 2026-11-25: production has no live user/group unique index. Recheck under the
+		// shared claim so an administrator grant cannot race a store renewal.
+		rows, err := client.QueryContext(txCtx, `SELECT id FROM user_subscriptions WHERE user_id=$1 AND group_id=$2 AND deleted_at IS NULL LIMIT 1`, input.UserID, input.GroupID)
+		if err != nil {
+			return err
+		}
+		exists := rows.Next()
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if exists {
+			return ErrSubscriptionAlreadyExists
+		}
+		result, err = s.createSubscriptionRow(txCtx, input)
+		return err
+	})
+	return result, err
+}
+
+func (s *SubscriptionService) createSubscriptionRow(ctx context.Context, input *AssignSubscriptionInput) (*UserSubscription, error) {
 	validityDays := input.ValidityDays
 	if validityDays <= 0 {
 		validityDays = 30

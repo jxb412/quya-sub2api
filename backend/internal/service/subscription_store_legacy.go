@@ -397,6 +397,22 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 		if receipt != nil {
 			return renewalConflict("原套餐已完成重置，请管理员核对；不会重复发放续购权益")
 		}
+		// 2026-11-25: production permits multiple rows per group and has no
+		// live-row unique index. An unrelated live row must never be reused or
+		// supplemented by a stale legacy replacement request.
+		rows, err = client.QueryContext(txCtx, `SELECT id FROM user_subscriptions WHERE user_id=$1 AND group_id=$2 AND deleted_at IS NULL LIMIT 1`, in.UserID, in.GroupID)
+		if err != nil {
+			return err
+		}
+		hasLiveSubscription := rows.Next()
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if hasLiveSubscription {
+			return renewalConflict("该分组已有其他有效套餐，请管理员核对；不会自动重复发放")
+		}
 		sources, err := resolveNativeSubscriptionSources(txCtx, client, marker.parentID, in.UserID, in.GroupID)
 		if err != nil {
 			return err
@@ -474,8 +490,8 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 		if !groupOK {
 			return ErrGroupNotSubscriptionType
 		}
-		// Creation fails against the existing partial unique index if any other
-		// live row exists. Never reuse/extend that row for a stale cron assignment.
+		// Store fulfillment, reset and this check/create hold the same user
+		// claim. Never reuse/extend another row for a stale cron assignment.
 		result, err = s.createSubscription(txCtx, in)
 		return err
 	})

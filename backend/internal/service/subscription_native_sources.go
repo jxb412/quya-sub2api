@@ -195,6 +195,16 @@ func (h *nativeSubscriptionHistory) resolve(id int64, visiting map[int64]bool) (
 	if !ok || visiting[id] || len(visiting) >= 30 {
 		return nil, nativeSourceConflict("套餐历史链缺失或循环")
 	}
+	// 2026-11-25: production may lack the live user/group unique index. Reject
+	// an ambiguous active target even when the competing row has no store codes.
+	// Deleted ancestors remain resolvable while validating replacement history.
+	if !n.DeletedAt.Valid {
+		for otherID, other := range h.Nodes {
+			if otherID != id && other.UserID == n.UserID && other.GroupID == n.GroupID && !other.DeletedAt.Valid {
+				return nil, nativeSourceConflict("该分组存在多个未撤销套餐，暂不能自助重置")
+			}
+		}
+	}
 	visiting[id] = true
 	defer delete(visiting, id)
 	if n.StartsAt.IsZero() || !n.ExpiresAt.After(n.StartsAt) || len(n.Notes) > 65536 {

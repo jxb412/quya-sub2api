@@ -121,3 +121,39 @@ func TestNativeResetPostgresUsageChangesDoNotInvalidateConfirmation(t *testing.T
 	_, err = svc.ResetUserSubscription(ctx, 10, 1, strings.Repeat("f", 64), true)
 	require.Error(t, err)
 }
+
+func TestNativeResetPostgresRejectsCompetingLiveRowWithoutUniqueIndex(t *testing.T) {
+	db, svc, in := renewalPostgres(t)
+	ctx := context.Background()
+	_, err := db.Exec(`DROP INDEX renewal_active_sub`)
+	require.NoError(t, err)
+	p, err := svc.PreviewSubscriptionReset(ctx, 10, 1)
+	require.NoError(t, err)
+	require.True(t, p.Eligible)
+	var otherID int64
+	require.NoError(t, db.QueryRow(`INSERT INTO user_subscriptions(user_id,group_id,starts_at,expires_at,status,notes) VALUES(10,20,NOW(),NOW()+INTERVAL '7 days','active','管理员单独赠送') RETURNING id`).Scan(&otherID))
+	denied, err := svc.PreviewSubscriptionReset(ctx, 10, 1)
+	require.NoError(t, err)
+	require.False(t, denied.Eligible)
+	require.Contains(t, denied.Reason, "多个未撤销套餐")
+	_, err = svc.ResetUserSubscription(ctx, 10, 1, p.PreviewToken, true)
+	require.ErrorContains(t, err, "多个未撤销套餐")
+	_, err = svc.ActivateSubscriptionRenewal(ctx, 1, in)
+	require.ErrorContains(t, err, "多个未撤销套餐", "legacy full-admin activation must use the same guard")
+	var live, total, receipts int
+	require.NoError(t, db.QueryRow(`SELECT count(*) FILTER(WHERE deleted_at IS NULL),count(*) FROM user_subscriptions`).Scan(&live, &total))
+	require.Equal(t, 2, live)
+	require.Equal(t, 2, total)
+	require.NoError(t, db.QueryRow(`SELECT count(*) FROM subscription_renewal_activations`).Scan(&receipts))
+	require.Zero(t, receipts)
+	var expiry time.Time
+	var notes string
+	require.NoError(t, db.QueryRow(`SELECT expires_at,notes FROM user_subscriptions WHERE id=1`).Scan(&expiry, &notes))
+	require.Equal(t, in.ExpectedExpiresAt, expiry)
+	require.Equal(t, in.ExpectedNotes, notes)
+	_, err = db.Exec(`UPDATE user_subscriptions SET deleted_at=NOW() WHERE id=$1`, otherID)
+	require.NoError(t, err)
+	recovered, err := svc.PreviewSubscriptionReset(ctx, 10, 1)
+	require.NoError(t, err)
+	require.True(t, recovered.Eligible, "clearing only the conflicting row restores eligibility")
+}
