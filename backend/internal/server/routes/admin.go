@@ -699,6 +699,8 @@ func registerSubscriptionRoutes(admin *gin.RouterGroup, h *handler.Handlers, set
 		subscriptions.POST("/:id/extend", h.Admin.Subscription.Extend)
 		subscriptions.POST("/:id/reset-quota", h.Admin.Subscription.ResetQuota)
 		subscriptions.POST("/:id/activate-renewal", subscriptionResetEnabledGuard(settingService), h.Admin.Subscription.ActivateRenewal)
+		// 2026-11-26: store cron replacement is atomic and independent of user self-reset settings.
+		subscriptions.POST("/:id/replace-store", h.Admin.Subscription.ReplaceStore)
 		subscriptions.GET("/:id/renewal-activation", h.Admin.Subscription.GetRenewalActivation)
 		subscriptions.POST("/:id/revoke", h.Admin.Subscription.Revoke)
 		subscriptions.POST("/:id/restore", h.Admin.Subscription.Restore)

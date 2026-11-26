@@ -105,6 +105,47 @@ func parseLegacyStoreReplacement(notes string) (*legacyStoreReplacement, error) 
 	return out, nil
 }
 
+// 2026-11-26: historical rows can append purchases after an old cron grant.
+// Identify their parent before applying the stricter new-request parser, so an
+// unrelated old row cannot block today's replacement. Ambiguous parent markers
+// still fail closed because they might conceal a prior grant for this parent.
+func legacyStoreHistoryParent(notes string) (int64, error) {
+	const prefix = "套餐循环检查自动重开，原订阅ID"
+	if !strings.Contains(notes, prefix) {
+		return 0, nil
+	}
+	parents := storeParentMarker.FindAllStringSubmatch(notes, -1)
+	if len(parents) != 1 || strings.Count(notes, prefix) != 1 {
+		return 0, renewalConflict("历史套餐的原订阅标记不明确，请管理员核对自动重开记录")
+	}
+	id, err := strconv.ParseInt(parents[0][1], 10, 64)
+	if err != nil || id <= 0 {
+		return 0, renewalConflict("历史套餐的原订阅标记不明确，请管理员核对自动重开记录")
+	}
+	return id, nil
+}
+
+// 2026-11-26: only legacy history without an explicit current-code marker may
+// need source resolution. Never relax the parser used for a new grant request,
+// and never guess the current purchase from the first of multiple grant lines.
+func legacyStoreHistoricalCurrent(ctx context.Context, client renewalSQLClient, id, userID, groupID int64, notes string) (string, error) {
+	prior, err := parseLegacyStoreReplacement(notes)
+	if err == nil {
+		if prior == nil {
+			return "", renewalConflict("历史套餐缺少自动重开来源，请管理员核对")
+		}
+		return prior.current, nil
+	}
+	if strings.Contains(notes, "套餐当前购买码") || len(storeRedeemedMarker.FindAllStringSubmatch(notes, -1)) < 2 {
+		return "", err
+	}
+	sources, err := resolveNativeSubscriptionSources(ctx, client, id, userID, groupID)
+	if err != nil {
+		return "", err
+	}
+	return sources.CurrentCode, nil
+}
+
 func storeRefundCode(userID int64, purchaseCode string) string {
 	sum := sha256.Sum256([]byte(strconv.FormatInt(userID, 10) + ":" + purchaseCode))
 	return "sbr_" + hex.EncodeToString(sum[:])[:28]
@@ -356,6 +397,7 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 		}
 		var successorID int64
 		historyNotes := map[int64]string{}
+		var successorCandidates []int64
 		for rows.Next() {
 			var id int64
 			var notes string
@@ -364,24 +406,35 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 				return err
 			}
 			historyNotes[id] = notes
-			prior, parseErr := parseLegacyStoreReplacement(notes)
+			parentID, parseErr := legacyStoreHistoryParent(notes)
 			if parseErr != nil {
 				rows.Close()
 				return parseErr
 			}
-			if prior == nil || prior.parentID != marker.parentID {
+			if parentID != marker.parentID {
 				continue
 			}
-			if prior.current != marker.current || successorID != 0 {
-				rows.Close()
-				return renewalConflict("原套餐已有其他重开记录，请管理员核对；不会再次发放")
-			}
-			successorID = id
+			successorCandidates = append(successorCandidates, id)
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
 			return err
+		}
+		// Close the history cursor before a legacy candidate needs SQL-backed
+		// purchase proof on this transaction's connection.
+		if len(successorCandidates) > 1 {
+			return renewalConflict("原套餐已有其他重开记录，请管理员核对；不会再次发放")
+		}
+		for _, id := range successorCandidates {
+			current, err := legacyStoreHistoricalCurrent(txCtx, client, id, in.UserID, in.GroupID, historyNotes[id])
+			if err != nil {
+				return err
+			}
+			if current != marker.current {
+				return renewalConflict("原套餐已有其他重开记录，请管理员核对；不会再次发放")
+			}
+			successorID = id
 		}
 		if successorID != 0 {
 			// Return a receipt-like success for unchanged cron recovery without
