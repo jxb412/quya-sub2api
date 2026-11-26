@@ -64,9 +64,6 @@ var definitions = []permissionDefinition{
 	{Permission{"payment.plans.write", "创建、修改和删除支付套餐", "财务", "global"}, []string{"POST /payment/plans", "PUT /payment/plans/:id", "DELETE /payment/plans/:id"}},
 	{Permission{"subscriptions.read", "读取全站订阅记录", "订阅", "global"}, []string{"GET /subscriptions", "GET /subscriptions/:id", "GET /subscriptions/:id/progress", "GET /groups/:id/subscriptions", "GET /users/:id/subscriptions"}},
 	{Permission{"subscriptions.assign", "分配全站用户订阅", "订阅", "global"}, []string{"POST /subscriptions/assign", "POST /subscriptions/bulk-assign"}},
-	// 2026-11-26: replacing a paid period both revokes and grants rights; require
-	// its own explicit permission instead of inheriting assign or revoke access.
-	{Permission{"subscriptions.replace", "原子重开商城订阅", "订阅", "global"}, []string{"POST /subscriptions/:id/replace-store"}},
 	{Permission{"subscriptions.extend", "延长订阅有效期", "订阅", "global"}, []string{"POST /subscriptions/:id/extend"}},
 	{Permission{"subscriptions.revoke", "撤销订阅", "订阅", "global"}, []string{"POST /subscriptions/:id/revoke", "DELETE /subscriptions/:id"}},
 	{Permission{"subscriptions.restore", "恢复订阅", "订阅", "global"}, []string{"POST /subscriptions/:id/restore"}},
