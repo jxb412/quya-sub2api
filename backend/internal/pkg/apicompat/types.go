@@ -389,6 +389,19 @@ type ResponsesInputItem struct {
 	outputRaw json.RawMessage
 }
 
+// 2026-11-26: output is required even when a tool returned no text. Keeping the
+// empty string allows zero-added-prompt conversion without an "(empty)" filler.
+func (i ResponsesInputItem) MarshalJSON() ([]byte, error) {
+	type alias ResponsesInputItem
+	if i.Type == "function_call_output" {
+		return json.Marshal(struct {
+			alias
+			Output string `json:"output"`
+		}{alias: alias(i), Output: i.Output})
+	}
+	return json.Marshal(alias(i))
+}
+
 func (i *ResponsesInputItem) UnmarshalJSON(data []byte) error {
 	type alias ResponsesInputItem
 	var wire struct {

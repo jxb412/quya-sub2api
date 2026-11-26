@@ -14,12 +14,16 @@ import (
 // enables Anthropic platform groups to accept OpenAI Responses API requests
 // by converting them to the native /v1/messages format before forwarding upstream.
 func ResponsesToAnthropicRequest(req *ResponsesRequest) (*AnthropicRequest, error) {
+	return ResponsesToAnthropicRequestWithPromptPolicy(req, false)
+}
+
+func ResponsesToAnthropicRequestWithPromptPolicy(req *ResponsesRequest, zeroPromptInjection bool) (*AnthropicRequest, error) {
 	isOpus55 := claude.IsOpus55(req.Model)
 	isSonnet55 := claude.IsSonnet55(req.Model)
 	isHaiku55 := claude.IsHaiku55(req.Model)
 	isFableOrMythos52 := claude.IsFable52(req.Model) || claude.IsMythos52(req.Model)
 	isAdaptiveModel := isOpus55 || isSonnet55 || isHaiku55 || isFableOrMythos52
-	system, messages, err := convertResponsesInputToAnthropic(req.Instructions, req.Input, isAdaptiveModel)
+	system, messages, err := convertResponsesInputToAnthropicWithPromptPolicy(req.Instructions, req.Input, isAdaptiveModel, zeroPromptInjection)
 	if err != nil {
 		return nil, err
 	}
@@ -185,9 +189,17 @@ func mapResponsesEffortToAnthropic(effort string) string {
 // a Responses API instructions + input array. Returns the system as raw JSON
 // (for Anthropic's polymorphic system field) and a list of Anthropic messages.
 func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMessage, preserveThinking bool) (json.RawMessage, []AnthropicMessage, error) {
+	return convertResponsesInputToAnthropicWithPromptPolicy(instructions, inputRaw, preserveThinking, false)
+}
+
+func convertResponsesInputToAnthropicWithPromptPolicy(instructions string, inputRaw json.RawMessage, preserveThinking, zeroPromptInjection bool) (json.RawMessage, []AnthropicMessage, error) {
 	var systemParts []string
 	if strings.TrimSpace(instructions) != "" {
-		systemParts = append(systemParts, strings.TrimSpace(instructions))
+		text := strings.TrimSpace(instructions)
+		if zeroPromptInjection {
+			text = instructions
+		}
+		systemParts = append(systemParts, text)
 	}
 
 	// Try as plain string input.
@@ -236,7 +248,7 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 
 		case item.Type == "function_call_output":
 			// function_call_output → user message with tool_result block
-			contentJSON := responsesFunctionOutputToAnthropicContent(item)
+			contentJSON := responsesFunctionOutputToAnthropicContent(item, zeroPromptInjection)
 			block := AnthropicContentBlock{
 				Type:      "tool_result",
 				ToolUseID: fromResponsesCallIDToAnthropic(item.CallID),
@@ -340,10 +352,10 @@ func convertResponsesInputToAnthropic(instructions string, inputRaw json.RawMess
 	return system, messages, nil
 }
 
-func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.RawMessage {
+func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem, zeroPromptInjection bool) json.RawMessage {
 	if len(item.outputRaw) == 0 {
 		output := item.Output
-		if output == "" {
+		if output == "" && !zeroPromptInjection {
 			output = "(empty)"
 		}
 		content, _ := json.Marshal(output)
@@ -370,7 +382,11 @@ func responsesFunctionOutputToAnthropicContent(item ResponsesInputItem) json.Raw
 			return content
 		}
 		if len(parts) == 0 {
-			content, _ := json.Marshal("(empty)")
+			output := "(empty)"
+			if zeroPromptInjection {
+				output = ""
+			}
+			content, _ := json.Marshal(output)
 			return content
 		}
 	}

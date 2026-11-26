@@ -108,6 +108,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 	defaultMappedModel string,
 	compatPromptCacheTenantIsolated bool,
 ) (*OpenAIForwardResult, error) {
+	zeroPromptInjection := openAIZeroPromptInjection(c)
 	rememberOpenCodeInboundBody(c, body)
 	beginUpstreamResponseModelObservation(c)
 	ClearActualOpenAIUpstreamEndpoint(c)
@@ -188,7 +189,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 		return s.forwardChatCompletionsViaNativeAnthropic(ctx, c, account, body, defaultMappedModel)
 	case APIProtocolChatCompletions:
 		if convertResponsesShape {
-			chatBody, err := s.convertResponsesShapedChatBody(body)
+			chatBody, err := s.convertResponsesShapedChatBodyWithPromptPolicy(body, zeroPromptInjection)
 			if err != nil {
 				return nil, err
 			}
@@ -283,7 +284,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 		// Normal path: convert Chat Completions → Responses.
 		// ChatCompletionsToResponses always sets Stream=true (upstream always streams).
 		chatReq.Model = upstreamModel
-		responsesReq, err = chatCompletionsToResponses(s.cfg, &chatReq)
+		responsesReq, err = chatCompletionsToResponsesWithPromptPolicy(s.cfg, &chatReq, zeroPromptInjection)
 		if err != nil {
 			return nil, fmt.Errorf("convert chat completions to responses: %w", err)
 		}
@@ -321,6 +322,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 		}
 		isJSONObjectFormat := strings.EqualFold(strings.TrimSpace(gjson.GetBytes(responsesBody, "text.format.type").String()), "json_object")
 		codexResult := applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
+			ZeroPromptInjection:                 zeroPromptInjection,
 			SkipDefaultInstructions:             !isResponsesShape,
 			OmitPromotedSystemMessagesFromInput: !isResponsesShape && !isJSONObjectFormat,
 		})

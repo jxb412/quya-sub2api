@@ -259,6 +259,10 @@ func (Group) Fields() []ent.Field {
 		field.Bool("free_openai_fast").
 			Default(false).
 			Comment("是否让此 OpenAI/Composite 分组的 Fast 请求按 Standard 价格计费"),
+		// 2026-11-26: 分组可禁止网关新增提示词，默认关闭以保留现有请求行为。
+		field.Bool("openai_zero_prompt_injection").
+			Default(false).
+			Comment("是否禁止此 OpenAI 分组请求新增合成提示词，保留客户端原有内容"),
 		field.Bool("require_oauth_only").
 			Default(false).
 			Comment("仅允许非 apikey 类型账号关联到此分组"),

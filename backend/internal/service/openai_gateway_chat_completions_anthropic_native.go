@@ -58,7 +58,7 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 	clientStream := ccReq.Stream
 
 	// 2. Convert CC → Responses → Anthropic (chained conversion)
-	responsesReq, err := chatCompletionsToResponses(s.cfg, &ccReq)
+	responsesReq, err := chatCompletionsToResponsesWithPromptPolicy(s.cfg, &ccReq, openAIZeroPromptInjection(c))
 	if err != nil {
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", "Failed to convert request")
 		return nil, fmt.Errorf("convert chat completions to responses: %w", err)
@@ -71,7 +71,7 @@ func (s *OpenAIGatewayService) forwardChatCompletionsViaNativeAnthropic(
 		return nil, err
 	}
 	responsesReq.Model = upstreamModel
-	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(responsesReq)
+	anthropicReq, err := apicompat.ResponsesToAnthropicRequestWithPromptPolicy(responsesReq, openAIZeroPromptInjection(c))
 	if err != nil {
 		writeChatCompletionsError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, fmt.Errorf("convert responses to anthropic: %w", err)

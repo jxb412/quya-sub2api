@@ -1571,6 +1571,29 @@
             </div>
           </div>
         </div>
+        <!-- 2026-11-26：分组控制网关新增提示词，保留客户端指令与必要协议转换。 -->
+        <div
+          v-if="createForm.platform === 'openai'"
+          class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {{ t("admin.groups.openaiZeroPromptInjection.title") }}
+            </label>
+            <Toggle
+              data-testid="create-openai-zero-prompt-injection"
+              :aria-label="t('admin.groups.openaiZeroPromptInjection.title')"
+              v-model="createForm.openai_zero_prompt_injection"
+            />
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiZeroPromptInjection.hint") }}
+          </p>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiZeroPromptInjection.scopeHint") }}
+          </p>
+        </div>
+
         <!-- OpenAI Fast 开关（OpenAI 与 Composite 平台） -->
         <div
           v-if="supportsGroupOpenAIFast(createForm.platform)"
@@ -3248,6 +3271,29 @@
             </div>
           </div>
         </div>
+        <!-- 2026-11-26：分组控制网关新增提示词，保留客户端指令与必要协议转换。 -->
+        <div
+          v-if="editForm.platform === 'openai'"
+          class="border-t border-gray-200 dark:border-dark-400 pt-4 mt-4"
+        >
+          <div class="flex items-center justify-between gap-4">
+            <label class="text-sm font-medium text-gray-700 dark:text-gray-300">
+              {{ t("admin.groups.openaiZeroPromptInjection.title") }}
+            </label>
+            <Toggle
+              data-testid="edit-openai-zero-prompt-injection"
+              :aria-label="t('admin.groups.openaiZeroPromptInjection.title')"
+              v-model="editForm.openai_zero_prompt_injection"
+            />
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiZeroPromptInjection.hint") }}
+          </p>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiZeroPromptInjection.scopeHint") }}
+          </p>
+        </div>
+
         <!-- OpenAI Fast 开关（OpenAI 与 Composite 平台） -->
         <div
           v-if="supportsGroupOpenAIFast(editForm.platform)"
@@ -5013,6 +5059,7 @@ const createForm = reactive({
   force_openai_fast: false,
   force_openai_ultrafast: false,
   free_openai_fast: false,
+  openai_zero_prompt_injection: false,
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
@@ -5381,6 +5428,7 @@ const editForm = reactive({
   force_openai_fast: false,
   force_openai_ultrafast: false,
   free_openai_fast: false,
+  openai_zero_prompt_injection: false,
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
@@ -5874,6 +5922,7 @@ const closeCreateModal = () => {
   createForm.force_openai_fast = false;
   createForm.force_openai_ultrafast = false;
   createForm.free_openai_fast = false;
+  createForm.openai_zero_prompt_injection = false;
   createForm.model_pricing = [];
   createForm.web_search_price_per_call = null;
   createForm.search_price_per_1k = null;
@@ -5995,6 +6044,8 @@ const handleCreateGroup = async () => {
     // 构建请求数据，包含模型路由配置
     const requestData = {
       ...createGroupForm,
+      openai_zero_prompt_injection:
+        createForm.platform === "openai" && createForm.openai_zero_prompt_injection,
       force_openai_fast: normalizeGroupOpenAIFast(
         createForm.platform,
         createForm.force_openai_fast,
@@ -6154,6 +6205,7 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.force_openai_fast = group.force_openai_fast ?? false;
   editForm.force_openai_ultrafast = group.force_openai_ultrafast ?? false;
   editForm.free_openai_fast = group.free_openai_fast ?? false;
+  editForm.openai_zero_prompt_injection = group.openai_zero_prompt_injection ?? false;
   editForm.model_pricing = groupPricingFromAPI(group.model_pricing);
   editForm.allow_image_generation = group.allow_image_generation ?? false;
   editForm.allow_batch_image_generation =
@@ -6290,6 +6342,7 @@ const closeEditModal = () => {
   editForm.force_openai_fast = false;
   editForm.force_openai_ultrafast = false;
   editForm.free_openai_fast = false;
+  editForm.openai_zero_prompt_injection = false;
   editForm.model_pricing = [];
   editForm.web_search_price_per_call = null;
   editForm.search_price_per_1k = null;
@@ -6345,6 +6398,8 @@ const handleUpdateGroup = async () => {
     // 转换 fallback_group_id: null -> 0 (后端使用 0 表示清除)
     const payload = {
       ...editForm,
+      openai_zero_prompt_injection:
+        editForm.platform === "openai" && editForm.openai_zero_prompt_injection,
       force_openai_fast: normalizeGroupOpenAIFast(
         editForm.platform,
         editForm.force_openai_fast,
@@ -6779,6 +6834,9 @@ watch(
 watch(
   () => createForm.platform,
   (newVal) => {
+    if (newVal !== "openai") {
+      createForm.openai_zero_prompt_injection = false;
+    }
     if (!["anthropic", "antigravity"].includes(newVal)) {
       createForm.fallback_group_id_on_invalid_request = null;
     }
@@ -6837,6 +6895,9 @@ watch(
 watch(
   () => editForm.platform,
   (newVal) => {
+    if (newVal !== "openai") {
+      editForm.openai_zero_prompt_injection = false;
+    }
     if (!["anthropic", "antigravity"].includes(newVal)) {
       editForm.fallback_group_id_on_invalid_request = null;
     }

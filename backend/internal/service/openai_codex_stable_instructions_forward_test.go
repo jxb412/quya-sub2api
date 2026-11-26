@@ -8,12 +8,13 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
 // Exercise the public forwarding paths: an early default-instructions patch or
 // alias mapping must not undo the model-specific transform farther downstream.
-func forwardStableInstructionsPayload(t *testing.T, model, transport, endpoint, body, template string) map[string]any {
+func forwardStableInstructionsPayload(t *testing.T, model, transport, endpoint, body, template string, configure ...func(*OpenAIGatewayService, *Account, *gin.Context)) map[string]any {
 	t.Helper()
 	svc, account, upstream := newHTTPWSPolicyTestService(t, "https://unused.example")
 	account.Type = AccountTypeOAuth
@@ -43,6 +44,9 @@ func forwardStableInstructionsPayload(t *testing.T, model, transport, endpoint, 
 		svc.getOpenAIWSConnPool().setClientDialerForTest(dialer)
 	}
 	c, rec := newHTTPWSPolicyTestContext(endpoint)
+	for _, setup := range configure {
+		setup(svc, account, c)
+	}
 	var result *OpenAIForwardResult
 	var err error
 	switch endpoint {

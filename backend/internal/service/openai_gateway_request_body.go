@@ -139,6 +139,10 @@ func deleteOpenAIResponsesNoneReasoningEffortFromObject(account *Account, body m
 // 平台但 base_url 指向 api.deepseek.com 的映射账号同样走这条出站改写。
 // 非 CN / 非 DeepSeek 上游原样返回。
 func normalizeDeepSeekResponsesRequestBody(account *Account, body []byte) []byte {
+	return normalizeDeepSeekResponsesRequestBodyWithPromptPolicy(account, body, false)
+}
+
+func normalizeDeepSeekResponsesRequestBodyWithPromptPolicy(account *Account, body []byte, zeroPromptInjection bool) []byte {
 	if account == nil {
 		return body
 	}
@@ -170,7 +174,7 @@ func normalizeDeepSeekResponsesRequestBody(account *Account, body []byte) []byte
 	}
 
 	changed := false
-	if liftedInput, lifted := apicompat.LiftResponsesToolOutputMedia(input); lifted {
+	if liftedInput, lifted := apicompat.LiftResponsesToolOutputMediaWithPromptPolicy(input, zeroPromptInjection); lifted {
 		requestBody["input"] = liftedInput
 		input = liftedInput
 		changed = true
@@ -1647,9 +1651,14 @@ func normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(cfg *config.Co
 	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{Config: cfg, ResponsesLite: responsesLite})
 }
 
+func normalizeOpenAIResponsesWebSocketCompatibilityBodyWithPromptPolicy(cfg *config.Config, body []byte, account *Account, responsesLite, zeroPromptInjection bool) ([]byte, bool, error) {
+	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{Config: cfg, ResponsesLite: responsesLite, ZeroPromptInjection: zeroPromptInjection})
+}
+
 type openAIResponsesCompatibilityOptions struct {
-	Config        *config.Config
-	ResponsesLite bool
+	ZeroPromptInjection bool
+	Config              *config.Config
+	ResponsesLite       bool
 	// Compact marks the /responses/compact wire shape, which is left as-is
 	// by request-shape compatibility rewrites such as web_search history.
 	Compact bool
@@ -1664,7 +1673,7 @@ func normalizeOpenAIResponsesCompatibilityBodyWithOptions(body []byte, account *
 	changed := false
 	if account.IsOpenAIOAuthLike() {
 		var err error
-		normalized, changed, err = normalizeOpenAIResponsesLegacyIngressWithConfig(opts.Config, body)
+		normalized, changed, err = normalizeOpenAIResponsesLegacyIngressWithPromptPolicy(opts.Config, body, opts.ZeroPromptInjection)
 		if err != nil {
 			return body, false, err
 		}

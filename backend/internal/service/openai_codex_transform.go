@@ -96,9 +96,12 @@ type codexTransformResult struct {
 }
 
 type codexOAuthTransformOptions struct {
-	IsCodexCLI                          bool
-	IsCompact                           bool
-	SkipDefaultInstructions             bool
+	IsCodexCLI              bool
+	IsCompact               bool
+	SkipDefaultInstructions bool
+	// ZeroPromptInjection preserves caller guidance without adding or duplicating
+	// text, including model-specific compatibility hints (2026-11-26).
+	ZeroPromptInjection                 bool
 	PreserveToolCallIDs                 bool
 	OmitPromotedSystemMessagesFromInput bool
 	// ResponsesLite selects where an injected hosted tool is declared.
@@ -301,7 +304,13 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 		}
 	}
 
-	if !opts.IsCompact && useCodexStableInstructionPrefix(normalizedModel) {
+	if opts.ZeroPromptInjection {
+		// Keep guidance in place; only map the unsupported system role and supply
+		// an empty required field. Do not promote/copy it into instructions again.
+		if prepareCodexStableInstructions(reqBody, false) {
+			result.Modified = true
+		}
+	} else if !opts.IsCompact && useCodexStableInstructionPrefix(normalizedModel) {
 		// GPT-6.2 places top-level instructions after input as turn-scoped
 		// guidance. Keep stable prompts in input so later turns reuse the prefix.
 		if prepareCodexStableInstructions(reqBody, !opts.SkipDefaultInstructions) {
@@ -316,7 +325,7 @@ func applyCodexOAuthTransformWithOptions(reqBody map[string]any, opts codexOAuth
 			result.Modified = true
 		}
 	}
-	if isCodexSparkModel(normalizedModel) && applyCodexSparkImageUnsupportedInstructions(reqBody) {
+	if !opts.ZeroPromptInjection && isCodexSparkModel(normalizedModel) && applyCodexSparkImageUnsupportedInstructions(reqBody) {
 		result.Modified = true
 	}
 	// gpt-5.3-codex-spark rejects the image_generation tool upstream (HTTP 400,

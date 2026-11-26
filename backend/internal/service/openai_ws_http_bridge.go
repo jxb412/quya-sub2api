@@ -484,10 +484,11 @@ func (s *OpenAIGatewayService) proxyOpenAIWSHTTPBridgeTurn(
 		}
 		inheritedState, _ := openAIWSHTTPBridgeToolStateFromContext(c)
 		inheritedLoweredTools := decodeOpenAIWSHTTPBridgeLoweredTools(inheritedState.LoweredTools)
-		body, clientToolMapping, err = adaptResponsesClientToolsForFunctionUpstreamWithMapping(
+		body, clientToolMapping, err = adaptResponsesClientToolsForFunctionUpstreamWithPromptPolicy(
 			body,
 			openAIWSHTTPBridgeToolUpstreamName(account),
 			inheritedState.ClientMapping,
+			openAIZeroPromptInjection(c),
 			inheritedLoweredTools,
 		)
 		if err != nil {

@@ -1276,6 +1276,11 @@ export default {
         free: '免费 Fast',
         freeHint: '该分组的 Fast 请求仍使用 priority 档位，但客户实际费用按同一请求的 Standard 价格计算。'
       },
+      openaiZeroPromptInjection: {
+        title: '零新增提示词',
+        hint: '适用于本分组的 OAuth 和 API Key 账号。开启后，网关不再添加默认指令、强制模板或兼容提示，保留客户提交的提示词及必要协议转换。默认关闭。',
+        scopeHint: '无法控制客户端或上游服务自行添加的指令。建议开启后新建会话；已建立的 WebSocket 连接需重连，旧会话中的提示词不会被清除。'
+      },
       invalidRequestFallback: {
         title: '无效请求兜底分组',
         hint: '仅当上游明确返回 prompt too long 时才会触发，留空表示不兜底',

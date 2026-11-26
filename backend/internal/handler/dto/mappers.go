@@ -151,6 +151,7 @@ func GroupFromServiceAdmin(g *service.Group) *AdminGroup {
 		ForceOpenAIFast:             g.ForceOpenAIFast,
 		ForceOpenAIUltrafast:        g.ForceOpenAIUltrafast,
 		FreeOpenAIFast:              g.FreeOpenAIFast,
+		OpenAIZeroPromptInjection:   g.OpenAIZeroPromptInjection,
 		ProfitControlEnabled:        g.ProfitControlEnabled,
 		ProfitMinMargin:             g.ProfitMinMargin,
 		ProfitSafetyBuffer:          g.ProfitSafetyBuffer,

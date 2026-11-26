@@ -33,6 +33,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	zeroPromptInjection := openAIZeroPromptInjection(c)
 	// 工具 Schema 清洗必须先于所有分流：下游每条路径（原生 Anthropic 直通、
 	// Chat Completions 转换、Responses 转换）都会把 tools 原样带给上游，而
 	// xAI / Moonshot 等严格校验方会因 input_schema 里的 required:null 或
@@ -158,6 +159,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 	// 3. Convert Anthropic → Responses after compatibility-only replay guard.
 	anthropicReq.Model = upstreamModel
 	responsesReq, err := apicompat.AnthropicToResponsesWithOptions(&anthropicReq, apicompat.AnthropicToResponsesOptions{
+		ZeroPromptInjection:            zeroPromptInjection,
 		MinOutputTokens:                configuredMinOutputTokens(s.cfg),
 		DeferReasoningEffortValidation: true,
 	})
@@ -180,7 +182,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 	// the top-level tools.
 	if account.UsesOpenAICodexProtocol() && account.Platform != PlatformGrok &&
 		string(accountCodexToolCapabilities(account, upstreamModel)["supports_search_tool"]) == "true" {
-		if err := apicompat.ApplyNativeToolSearch(&anthropicReq, responsesReq); err != nil {
+		if err := apicompat.ApplyNativeToolSearchWithPromptPolicy(&anthropicReq, responsesReq, zeroPromptInjection); err != nil {
 			return nil, fmt.Errorf("apply native tool_search: %w", err)
 		}
 	}
@@ -193,7 +195,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 		responsesReq.PreviousResponseID = previousResponseID
 		trimAnthropicCompatResponsesInputToLatestTurn(responsesReq)
 	}
-	if compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() {
+	if !zeroPromptInjection && compatReplayGuardEnabled && !account.UsesOpenAICodexProtocol() {
 		appendOpenAICompatClaudeCodeTodoGuard(responsesReq)
 	}
 
@@ -246,6 +248,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 			return nil, fmt.Errorf("unmarshal for codex transform: %w", err)
 		}
 		codexResult := applyCodexOAuthTransformWithOptions(reqBody, codexOAuthTransformOptions{
+			ZeroPromptInjection:     zeroPromptInjection,
 			SkipDefaultInstructions: true,
 			PreserveToolCallIDs:     true,
 		})
@@ -255,7 +258,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 		}
 		setCodexToolNameReverse(c, codexResult.ToolNameReverse)
 		forcedTemplateText := ""
-		if s.cfg != nil {
+		if s.cfg != nil && !zeroPromptInjection {
 			forcedTemplateText = s.cfg.Gateway.ForcedCodexInstructionsTemplate
 		}
 		templateUpstreamModel := upstreamModel
@@ -276,7 +279,7 @@ func (s *OpenAIGatewayService) forwardAsAnthropicPrepared(
 			return nil, err
 		}
 		ensureCodexOAuthInstructionsField(reqBody)
-		if shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
+		if !zeroPromptInjection && shouldAutoInjectPromptCacheKeyForCompat(upstreamModel) {
 			appendOpenAICompatClaudeCodeTodoGuardToRequestBody(reqBody)
 		}
 		if codexResult.NormalizedModel != "" {

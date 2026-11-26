@@ -45,7 +45,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaNativeAnthropic(
 	SetActualOpenAIUpstreamEndpoint(c, "/v1/messages")
 
 	// 1. Lower Codex client-side tools to function tools understood by Anthropic.
-	adaptedBody, clientToolMapping, err := adaptResponsesClientToolsForAnthropic(body)
+	adaptedBody, clientToolMapping, err := adaptResponsesClientToolsForAnthropicWithPromptPolicy(body, openAIZeroPromptInjection(c))
 	if err != nil {
 		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", "Failed to adapt request tools")
 		return nil, fmt.Errorf("adapt responses client tools: %w", err)
@@ -73,7 +73,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaNativeAnthropic(
 		return nil, err
 	}
 	responsesReq.Model = upstreamModel
-	anthropicReq, err := apicompat.ResponsesToAnthropicRequest(&responsesReq)
+	anthropicReq, err := apicompat.ResponsesToAnthropicRequestWithPromptPolicy(&responsesReq, openAIZeroPromptInjection(c))
 	if err != nil {
 		writeResponsesError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, fmt.Errorf("convert responses to anthropic: %w", err)

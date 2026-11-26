@@ -1278,6 +1278,11 @@ export default {
         free: 'Free Fast',
         freeHint: 'Fast requests in this group still use the priority tier, but customers are charged the equivalent Standard price.'
       },
+      openaiZeroPromptInjection: {
+        title: 'No added prompts',
+        hint: 'Applies to OAuth and API key accounts in this group. Stops the gateway from adding default instructions, forced templates, or compatibility prompts while preserving client prompts and necessary protocol conversion. Disabled by default.',
+        scopeHint: 'Cannot control instructions added by clients or upstream services. Start a new conversation after enabling and reconnect existing WebSocket connections. Instructions in previous conversations are not removed.'
+      },
       invalidRequestFallback: {
         title: 'Invalid Request Fallback Group',
         hint: 'Triggered only when upstream explicitly returns prompt too long. Leave empty to disable fallback.',

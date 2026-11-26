@@ -17,6 +17,10 @@ type responsesToolOutputMedia struct {
 // returns an array containing input_image. Keeping the image inside the tool
 // output makes the upstream report "No tool output found for tool call ...".
 func LiftResponsesToolOutputMedia(input any) (any, bool) {
+	return LiftResponsesToolOutputMediaWithPromptPolicy(input, false)
+}
+
+func LiftResponsesToolOutputMediaWithPromptPolicy(input any, zeroPromptInjection bool) (any, bool) {
 	items, ok := input.([]any)
 	if !ok {
 		return input, false
@@ -49,7 +53,7 @@ func LiftResponsesToolOutputMedia(input any) (any, bool) {
 				break
 			}
 			if isResponsesToolOutputItem(item) {
-				rewrittenItem, media, didRewrite := liftResponsesToolOutputMediaItem(item)
+				rewrittenItem, media, didRewrite := liftResponsesToolOutputMediaItem(item, zeroPromptInjection)
 				if didRewrite {
 					batchChanged = true
 					pending = append(pending, media...)
@@ -73,7 +77,7 @@ func LiftResponsesToolOutputMedia(input any) (any, bool) {
 
 		rewritten = append(rewritten, outputs...)
 		if len(pending) > 0 {
-			rewritten = append(rewritten, buildResponsesToolOutputMediaMessage(pending))
+			rewritten = append(rewritten, buildResponsesToolOutputMediaMessage(pending, zeroPromptInjection))
 		}
 		rewritten = append(rewritten, trailing...)
 		changed = true
@@ -85,7 +89,7 @@ func LiftResponsesToolOutputMedia(input any) (any, bool) {
 	return rewritten, true
 }
 
-func liftResponsesToolOutputMediaItem(item map[string]any) (any, []responsesToolOutputMedia, bool) {
+func liftResponsesToolOutputMediaItem(item map[string]any, zeroPromptInjection bool) (any, []responsesToolOutputMedia, bool) {
 	output, exists := item["output"]
 	if !exists {
 		return item, nil, false
@@ -95,7 +99,7 @@ func liftResponsesToolOutputMediaItem(item map[string]any) (any, []responsesTool
 		return item, nil, false
 	}
 
-	outputText, media, didRewrite := extractToolOutputMedia(outputRaw)
+	outputText, media, didRewrite := extractToolOutputMedia(outputRaw, zeroPromptInjection)
 	if !didRewrite {
 		return item, nil, false
 	}
@@ -119,11 +123,11 @@ func liftResponsesToolOutputMediaItem(item map[string]any) (any, []responsesTool
 	return item, lifted, true
 }
 
-func buildResponsesToolOutputMediaMessage(pending []responsesToolOutputMedia) map[string]any {
+func buildResponsesToolOutputMediaMessage(pending []responsesToolOutputMedia, zeroPromptInjection bool) map[string]any {
 	content := make([]map[string]any, 0, len(pending)*2)
 	lastCallID := ""
 	for _, media := range pending {
-		if media.callID != lastCallID {
+		if !zeroPromptInjection && media.callID != lastCallID {
 			text := "Tool output media"
 			if media.callID != "" {
 				text = fmt.Sprintf(toolOutputMediaAttribution, media.callID)

@@ -24,10 +24,14 @@ func ChatCompletionsToResponses(req *ChatCompletionsRequest) (*ResponsesRequest,
 // ChatCompletionsToResponsesWithMinOutputTokens converts a Chat Completions
 // request using the supplied max_output_tokens floor.
 func ChatCompletionsToResponsesWithMinOutputTokens(req *ChatCompletionsRequest, minOutputTokens int) (*ResponsesRequest, error) {
+	return ChatCompletionsToResponsesWithPromptPolicy(req, minOutputTokens, false)
+}
+
+func ChatCompletionsToResponsesWithPromptPolicy(req *ChatCompletionsRequest, minOutputTokens int, zeroPromptInjection bool) (*ResponsesRequest, error) {
 	if err := openai.ValidateGPT61ReasoningEffort(req.Model, req.ReasoningEffort); err != nil {
 		return nil, err
 	}
-	input, err := convertChatMessagesToResponsesInput(req.Messages)
+	input, err := convertChatMessagesToResponsesInput(req.Messages, zeroPromptInjection)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +116,7 @@ func ChatCompletionsToResponsesWithMinOutputTokens(req *ChatCompletionsRequest, 
 
 // convertChatMessagesToResponsesInput converts the Chat Completions messages
 // array into a Responses API input items array.
-func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputItem, error) {
+func convertChatMessagesToResponsesInput(msgs []ChatMessage, zeroPromptInjection bool) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
 	legacyIDs := legacyFunctionCallIDs{msgs: msgs}
 	for _, m := range msgs {
@@ -126,7 +130,7 @@ func convertChatMessagesToResponsesInput(msgs []ChatMessage) ([]ResponsesInputIt
 		case m.Role == "function" && m.ToolCallID == "":
 			m.ToolCallID = legacyIDs.claim(m.Name)
 		}
-		items, err := chatMessageToResponsesItems(m)
+		items, err := chatMessageToResponsesItems(m, zeroPromptInjection)
 		if err != nil {
 			return nil, err
 		}
@@ -189,7 +193,7 @@ func (ids *legacyFunctionCallIDs) claim(name string) string {
 
 // chatMessageToResponsesItems converts a single ChatMessage into one or more
 // ResponsesInputItem values.
-func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatMessageToResponsesItems(m ChatMessage, zeroPromptInjection bool) ([]ResponsesInputItem, error) {
 	switch m.Role {
 	case "system", "developer":
 		return chatSystemToResponses(m)
@@ -198,9 +202,9 @@ func chatMessageToResponsesItems(m ChatMessage) ([]ResponsesInputItem, error) {
 	case "assistant":
 		return chatAssistantToResponses(m)
 	case "tool":
-		return chatToolToResponses(m)
+		return chatToolToResponses(m, zeroPromptInjection)
 	case "function":
-		return chatFunctionToResponses(m)
+		return chatFunctionToResponses(m, zeroPromptInjection)
 	default:
 		return chatUserToResponses(m)
 	}
@@ -359,12 +363,12 @@ func parseAssistantContent(raw json.RawMessage) (string, error) {
 
 // chatToolToResponses converts a tool result message (role=tool) into a
 // function_call_output item.
-func chatToolToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatToolToResponses(m ChatMessage, zeroPromptInjection bool) ([]ResponsesInputItem, error) {
 	output, err := parseChatContent(m.Content)
 	if err != nil {
 		return nil, err
 	}
-	if output == "" {
+	if output == "" && !zeroPromptInjection {
 		output = "(empty)"
 	}
 	return []ResponsesInputItem{{
@@ -378,12 +382,12 @@ func chatToolToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
 // (role=function) into a function_call_output item. ToolCallID holds the ID
 // assigned to the matching legacy call (see legacyFunctionCallIDs); without a
 // matching call the Name field is used as call_id.
-func chatFunctionToResponses(m ChatMessage) ([]ResponsesInputItem, error) {
+func chatFunctionToResponses(m ChatMessage, zeroPromptInjection bool) ([]ResponsesInputItem, error) {
 	output, err := parseChatContent(m.Content)
 	if err != nil {
 		return nil, err
 	}
-	if output == "" {
+	if output == "" && !zeroPromptInjection {
 		output = "(empty)"
 	}
 	callID := m.ToolCallID

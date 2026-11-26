@@ -375,6 +375,14 @@ func sanitizeGroupOpenAIFast(group *Group) {
 	}
 }
 
+// 2026-11-26: Prompt injection policy belongs only to OpenAI groups; clear it
+// when switching platforms so a previously enabled policy cannot leak later.
+func sanitizeGroupOpenAIZeroPromptInjection(group *Group) {
+	if group != nil && group.Platform != PlatformOpenAI {
+		group.OpenAIZeroPromptInjection = false
+	}
+}
+
 func normalizeCreateGroupInputForSimpleMode(input *CreateGroupInput) {
 	if input == nil {
 		return
@@ -629,6 +637,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 		ForceOpenAIFast:                 input.ForceOpenAIFast,
 		ForceOpenAIUltrafast:            input.ForceOpenAIUltrafast,
 		FreeOpenAIFast:                  input.FreeOpenAIFast,
+		OpenAIZeroPromptInjection:       input.OpenAIZeroPromptInjection,
 		RequireOAuthOnly:                input.RequireOAuthOnly,
 		RequirePrivacySet:               input.RequirePrivacySet,
 		DefaultMappedModel:              input.DefaultMappedModel,
@@ -644,6 +653,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	}
 	sanitizeGroupMessagesDispatchFields(group)
 	sanitizeGroupOpenAIFast(group)
+	sanitizeGroupOpenAIZeroPromptInjection(group)
 	if group.Platform != PlatformOpenAI && group.Platform != PlatformComposite {
 		group.AllowLive = false
 	}
@@ -1027,6 +1037,9 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	if input.FreeOpenAIFast != nil {
 		group.FreeOpenAIFast = *input.FreeOpenAIFast
 	}
+	if input.OpenAIZeroPromptInjection != nil {
+		group.OpenAIZeroPromptInjection = *input.OpenAIZeroPromptInjection
+	}
 	if input.RequireOAuthOnly != nil {
 		group.RequireOAuthOnly = *input.RequireOAuthOnly
 	}
@@ -1075,6 +1088,7 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	sanitizeGroupMessagesDispatchFields(group)
 	sanitizeGroupOpenAIFast(group)
+	sanitizeGroupOpenAIZeroPromptInjection(group)
 	if group.Platform != PlatformOpenAI && group.Platform != PlatformComposite {
 		group.AllowLive = false
 	}

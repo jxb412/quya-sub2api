@@ -14,7 +14,9 @@ import (
 	"github.com/dgraph-io/ristretto"
 )
 
-const apiKeyAuthSnapshotVersion = 28 // v28: group force_openai_ultrafast (OpenAI gateway reads it from ctx)
+// 2026-11-26: Reject old snapshots lacking the group prompt policy, including
+// snapshots written by an older instance during a rolling deployment.
+const apiKeyAuthSnapshotVersion = 29 // v29: group openai_zero_prompt_injection
 
 type apiKeyAuthCacheConfig struct {
 	l1Size        int
@@ -423,6 +425,7 @@ func (s *APIKeyService) snapshotFromAPIKey(ctx context.Context, apiKey *APIKey) 
 			ForceOpenAIFast:                 apiKey.Group.ForceOpenAIFast,
 			ForceOpenAIUltrafast:            apiKey.Group.ForceOpenAIUltrafast,
 			FreeOpenAIFast:                  apiKey.Group.FreeOpenAIFast,
+			OpenAIZeroPromptInjection:       apiKey.Group.OpenAIZeroPromptInjection,
 			DefaultMappedModel:              apiKey.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     apiKey.Group.MessagesDispatchModelConfig,
 			ModelAllowlist:                  apiKey.Group.ModelAllowlist,
@@ -529,6 +532,7 @@ func (s *APIKeyService) snapshotToAPIKey(key string, snapshot *APIKeyAuthSnapsho
 			ForceOpenAIFast:                 snapshot.Group.ForceOpenAIFast,
 			ForceOpenAIUltrafast:            snapshot.Group.ForceOpenAIUltrafast,
 			FreeOpenAIFast:                  snapshot.Group.FreeOpenAIFast,
+			OpenAIZeroPromptInjection:       snapshot.Group.OpenAIZeroPromptInjection,
 			DefaultMappedModel:              snapshot.Group.DefaultMappedModel,
 			MessagesDispatchModelConfig:     snapshot.Group.MessagesDispatchModelConfig,
 			ModelAllowlist:                  snapshot.Group.ModelAllowlist,

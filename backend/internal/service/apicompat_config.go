@@ -16,6 +16,10 @@ func chatCompletionsToResponses(cfg *config.Config, req *apicompat.ChatCompletio
 	return apicompat.ChatCompletionsToResponsesWithMinOutputTokens(req, configuredMinOutputTokens(cfg))
 }
 
+func chatCompletionsToResponsesWithPromptPolicy(cfg *config.Config, req *apicompat.ChatCompletionsRequest, zeroPromptInjection bool) (*apicompat.ResponsesRequest, error) {
+	return apicompat.ChatCompletionsToResponsesWithPromptPolicy(req, configuredMinOutputTokens(cfg), zeroPromptInjection)
+}
+
 func settingServiceConfig(settingService *SettingService) *config.Config {
 	if settingService == nil {
 		return nil

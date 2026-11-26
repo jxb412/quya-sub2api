@@ -766,6 +766,20 @@ func (_c *GroupCreate) SetNillableFreeOpenaiFast(v *bool) *GroupCreate {
 	return _c
 }
 
+// SetOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field.
+func (_c *GroupCreate) SetOpenaiZeroPromptInjection(v bool) *GroupCreate {
+	_c.mutation.SetOpenaiZeroPromptInjection(v)
+	return _c
+}
+
+// SetNillableOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableOpenaiZeroPromptInjection(v *bool) *GroupCreate {
+	if v != nil {
+		_c.SetOpenaiZeroPromptInjection(*v)
+	}
+	return _c
+}
+
 // SetRequireOauthOnly sets the "require_oauth_only" field.
 func (_c *GroupCreate) SetRequireOauthOnly(v bool) *GroupCreate {
 	_c.mutation.SetRequireOauthOnly(v)
@@ -1205,6 +1219,10 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultFreeOpenaiFast
 		_c.mutation.SetFreeOpenaiFast(v)
 	}
+	if _, ok := _c.mutation.OpenaiZeroPromptInjection(); !ok {
+		v := group.DefaultOpenaiZeroPromptInjection
+		_c.mutation.SetOpenaiZeroPromptInjection(v)
+	}
 	if _, ok := _c.mutation.RequireOauthOnly(); !ok {
 		v := group.DefaultRequireOauthOnly
 		_c.mutation.SetRequireOauthOnly(v)
@@ -1418,6 +1436,9 @@ func (_c *GroupCreate) check() error {
 	}
 	if _, ok := _c.mutation.FreeOpenaiFast(); !ok {
 		return &ValidationError{Name: "free_openai_fast", err: errors.New(`ent: missing required field "Group.free_openai_fast"`)}
+	}
+	if _, ok := _c.mutation.OpenaiZeroPromptInjection(); !ok {
+		return &ValidationError{Name: "openai_zero_prompt_injection", err: errors.New(`ent: missing required field "Group.openai_zero_prompt_injection"`)}
 	}
 	if _, ok := _c.mutation.RequireOauthOnly(); !ok {
 		return &ValidationError{Name: "require_oauth_only", err: errors.New(`ent: missing required field "Group.require_oauth_only"`)}
@@ -1723,6 +1744,10 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.FreeOpenaiFast(); ok {
 		_spec.SetField(group.FieldFreeOpenaiFast, field.TypeBool, value)
 		_node.FreeOpenaiFast = value
+	}
+	if value, ok := _c.mutation.OpenaiZeroPromptInjection(); ok {
+		_spec.SetField(group.FieldOpenaiZeroPromptInjection, field.TypeBool, value)
+		_node.OpenaiZeroPromptInjection = value
 	}
 	if value, ok := _c.mutation.RequireOauthOnly(); ok {
 		_spec.SetField(group.FieldRequireOauthOnly, field.TypeBool, value)
@@ -2847,6 +2872,18 @@ func (u *GroupUpsert) SetFreeOpenaiFast(v bool) *GroupUpsert {
 // UpdateFreeOpenaiFast sets the "free_openai_fast" field to the value that was provided on create.
 func (u *GroupUpsert) UpdateFreeOpenaiFast() *GroupUpsert {
 	u.SetExcluded(group.FieldFreeOpenaiFast)
+	return u
+}
+
+// SetOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field.
+func (u *GroupUpsert) SetOpenaiZeroPromptInjection(v bool) *GroupUpsert {
+	u.Set(group.FieldOpenaiZeroPromptInjection, v)
+	return u
+}
+
+// UpdateOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateOpenaiZeroPromptInjection() *GroupUpsert {
+	u.SetExcluded(group.FieldOpenaiZeroPromptInjection)
 	return u
 }
 
@@ -4140,6 +4177,20 @@ func (u *GroupUpsertOne) SetFreeOpenaiFast(v bool) *GroupUpsertOne {
 func (u *GroupUpsertOne) UpdateFreeOpenaiFast() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateFreeOpenaiFast()
+	})
+}
+
+// SetOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field.
+func (u *GroupUpsertOne) SetOpenaiZeroPromptInjection(v bool) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetOpenaiZeroPromptInjection(v)
+	})
+}
+
+// UpdateOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateOpenaiZeroPromptInjection() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateOpenaiZeroPromptInjection()
 	})
 }
 
@@ -5628,6 +5679,20 @@ func (u *GroupUpsertBulk) SetFreeOpenaiFast(v bool) *GroupUpsertBulk {
 func (u *GroupUpsertBulk) UpdateFreeOpenaiFast() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateFreeOpenaiFast()
+	})
+}
+
+// SetOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field.
+func (u *GroupUpsertBulk) SetOpenaiZeroPromptInjection(v bool) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetOpenaiZeroPromptInjection(v)
+	})
+}
+
+// UpdateOpenaiZeroPromptInjection sets the "openai_zero_prompt_injection" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateOpenaiZeroPromptInjection() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateOpenaiZeroPromptInjection()
 	})
 }
 

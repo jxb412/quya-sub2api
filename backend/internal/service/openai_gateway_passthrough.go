@@ -34,6 +34,10 @@ func hasOpenAIResponsesClientToolMapping(mapping apicompat.ResponsesClientToolMa
 }
 
 func adaptOpenAIResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	return adaptOpenAIResponsesClientToolsWithPromptPolicy(body, false)
+}
+
+func adaptOpenAIResponsesClientToolsWithPromptPolicy(body []byte, zeroPromptInjection bool) ([]byte, apicompat.ResponsesClientToolMapping, error) {
 	if !needsOpenAIResponsesClientToolAdaptation(body) {
 		return body, apicompat.ResponsesClientToolMapping{}, nil
 	}
@@ -51,7 +55,7 @@ func adaptOpenAIResponsesClientTools(body []byte) ([]byte, apicompat.ResponsesCl
 		}
 		return body, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("decode OpenAI Responses client tools trailing data: %w", err)
 	}
-	mapping, changed, err := apicompat.AdaptResponsesClientTools(requestBody)
+	mapping, changed, err := apicompat.AdaptResponsesClientToolsWithPromptPolicy(requestBody, zeroPromptInjection)
 	if err != nil || !changed {
 		return body, mapping, err
 	}
@@ -158,7 +162,11 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 	if account != nil && account.UsesOpenAICodexProtocol() {
 		if isOpenAICodexModel(reqModel) && !gjson.GetBytes(body, "instructions").Exists() {
-			nextBody, setErr := sjson.SetBytes(body, "instructions", defaultCodexSynthInstructions(reqModel))
+			instructions := ""
+			if !openAIZeroPromptInjection(c) {
+				instructions = defaultCodexSynthInstructions(reqModel)
+			}
+			nextBody, setErr := sjson.SetBytes(body, "instructions", instructions)
 			if setErr != nil {
 				return nil, fmt.Errorf("set passthrough codex instructions: %w", setErr)
 			}
@@ -213,9 +221,10 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	if account != nil && account.IsOpenAI() {
 		responsesLite := isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) || isOpenAIResponsesLiteWebSocketPayload(body)
 		normalizedBody, normalized, normalizeErr := normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{
-			Config:        s.cfg,
-			ResponsesLite: responsesLite,
-			Compact:       isOpenAIResponsesCompactPath(c),
+			ZeroPromptInjection: openAIZeroPromptInjection(c),
+			Config:              s.cfg,
+			ResponsesLite:       responsesLite,
+			Compact:             isOpenAIResponsesCompactPath(c),
 		})
 		if normalizeErr != nil {
 			return nil, fmt.Errorf("normalize passthrough Responses compatibility: %w", normalizeErr)
@@ -237,7 +246,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 	if account != nil && account.Platform == PlatformOpenAI && account.Type == AccountTypeAPIKey &&
 		!isOpenAIResponsesCompactPath(c) && needsOpenAIResponsesClientToolAdaptation(body) {
-		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
+		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientToolsWithPromptPolicy(body, openAIZeroPromptInjection(c))
 		if adaptErr != nil {
 			return nil, adaptErr
 		}
@@ -579,7 +588,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 	targetURL = appendOpenAIResponsesRequestPathSuffix(targetURL, openAIResponsesRequestPathSuffix(c))
 
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现（见 normalizeDeepSeekResponsesRequestBody）。
-	body = normalizeDeepSeekResponsesRequestBody(account, body)
+	body = normalizeDeepSeekResponsesRequestBodyWithPromptPolicy(account, body, openAIZeroPromptInjection(c))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {

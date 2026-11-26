@@ -229,6 +229,10 @@ func (s *GatewayService) ForwardAsResponses(
 }
 
 func adaptResponsesClientToolsForAnthropic(body []byte) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	return adaptResponsesClientToolsForAnthropicWithPromptPolicy(body, false)
+}
+
+func adaptResponsesClientToolsForAnthropicWithPromptPolicy(body []byte, zeroPromptInjection bool) ([]byte, apicompat.ResponsesClientToolMapping, error) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	var requestBody map[string]any
@@ -240,7 +244,7 @@ func adaptResponsesClientToolsForAnthropic(body []byte) ([]byte, apicompat.Respo
 		return body, apicompat.ResponsesClientToolMapping{}, err
 	}
 
-	mapping, changed, err := apicompat.AdaptResponsesClientTools(requestBody)
+	mapping, changed, err := apicompat.AdaptResponsesClientToolsWithPromptPolicy(requestBody, zeroPromptInjection)
 	if err != nil {
 		return body, apicompat.ResponsesClientToolMapping{}, err
 	}

@@ -30,6 +30,16 @@ func adaptResponsesClientToolsForFunctionUpstreamWithMapping(
 	inherited apicompat.ResponsesClientToolMapping,
 	inheritedLoweredTools ...[]any,
 ) ([]byte, apicompat.ResponsesClientToolMapping, error) {
+	return adaptResponsesClientToolsForFunctionUpstreamWithPromptPolicy(body, upstream, inherited, false, inheritedLoweredTools...)
+}
+
+func adaptResponsesClientToolsForFunctionUpstreamWithPromptPolicy(
+	body []byte,
+	upstream string,
+	inherited apicompat.ResponsesClientToolMapping,
+	zeroPromptInjection bool,
+	inheritedLoweredTools ...[]any,
+) ([]byte, apicompat.ResponsesClientToolMapping, error) {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	var requestBody map[string]any
@@ -37,7 +47,7 @@ func adaptResponsesClientToolsForFunctionUpstreamWithMapping(
 		return body, apicompat.ResponsesClientToolMapping{}, fmt.Errorf("decode %s Responses client tools: %w", upstream, err)
 	}
 
-	mapping, changed, err := apicompat.AdaptResponsesClientToolsWithInheritedMapping(requestBody, inherited, inheritedLoweredTools...)
+	mapping, changed, err := apicompat.AdaptResponsesClientToolsWithInheritedMappingAndPromptPolicy(requestBody, inherited, zeroPromptInjection, inheritedLoweredTools...)
 	if err != nil {
 		return body, apicompat.ResponsesClientToolMapping{}, err
 	}

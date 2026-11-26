@@ -23,6 +23,10 @@ const emptyToolResultOutput = "(empty)"
 // the history's tool_search_output instead, so the top-level tools (the head of
 // the prompt-cache prefix) stay identical before and after a reveal.
 func ApplyNativeToolSearch(req *AnthropicRequest, out *ResponsesRequest) error {
+	return ApplyNativeToolSearchWithPromptPolicy(req, out, false)
+}
+
+func ApplyNativeToolSearchWithPromptPolicy(req *AnthropicRequest, out *ResponsesRequest, zeroPromptInjection bool) error {
 	declared := false
 	deferred := make(map[string]bool)
 	for _, t := range req.Tools {
@@ -133,7 +137,7 @@ func ApplyNativeToolSearch(req *AnthropicRequest, out *ResponsesRequest) error {
 				"status":    "completed",
 				"tools":     loaded,
 			}
-			if item.Output != "" && item.Output != emptyToolResultOutput {
+			if item.Output != "" && (zeroPromptInjection || item.Output != emptyToolResultOutput) {
 				pendingText = append(pendingText, item.Output)
 			}
 		default:

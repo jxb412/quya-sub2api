@@ -366,6 +366,10 @@ func isOpenAIImagesSelfBuiltRequest(ctx context.Context) bool {
 }
 
 func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel string) ([]byte, error) {
+	return buildOpenAIImagesResponsesRequestWithPromptPolicy(parsed, toolModel, false)
+}
+
+func buildOpenAIImagesResponsesRequestWithPromptPolicy(parsed *OpenAIImagesRequest, toolModel string, zeroPromptInjection bool) ([]byte, error) {
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
 	}
@@ -375,6 +379,16 @@ func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel st
 	prompt := strings.TrimSpace(parsed.Prompt)
 	if prompt == "" {
 		return nil, fmt.Errorf("prompt is required")
+	}
+	if zeroPromptInjection {
+		// 2026-11-26: preserve the caller's wording in zero-addition groups;
+		// the image tool remains explicitly selected without a gateway instruction.
+		prompt = parsed.Prompt
+		if !parsed.Multipart && gjson.ValidBytes(parsed.Body) {
+			if rawPrompt := gjson.GetBytes(parsed.Body, "prompt"); rawPrompt.Type == gjson.String {
+				prompt = rawPrompt.String()
+			}
+		}
 	}
 
 	inputImages := make([]string, 0, len(parsed.InputImageURLs)+len(parsed.Uploads))
@@ -396,7 +410,9 @@ func buildOpenAIImagesResponsesRequest(parsed *OpenAIImagesRequest, toolModel st
 
 	req := []byte(`{"instructions":"","stream":true,"reasoning":{"effort":"medium","summary":"auto"},"parallel_tool_calls":true,"include":["reasoning.encrypted_content"],"model":"","store":false,"tool_choice":{"type":"image_generation"}}`)
 	req, _ = sjson.SetBytes(req, "model", openAIImagesResponsesMainModelValue())
-	req, _ = sjson.SetBytes(req, "instructions", openAIImagesVerbatimPromptInstructions)
+	if !zeroPromptInjection {
+		req, _ = sjson.SetBytes(req, "instructions", openAIImagesVerbatimPromptInstructions)
+	}
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
 	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
@@ -1874,7 +1890,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 	if direct {
 		responsesBody, targetURL, err = buildOpenAIImagesOAuthPayload(parsed, upstreamModel)
 	} else {
-		responsesBody, err = buildOpenAIImagesResponsesRequest(parsed, upstreamModel)
+		responsesBody, err = buildOpenAIImagesResponsesRequestWithPromptPolicy(parsed, upstreamModel, openAIZeroPromptInjection(c))
 		targetURL = chatgptCodexURL
 	}
 	if err != nil {

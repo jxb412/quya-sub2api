@@ -18,6 +18,10 @@ func normalizeOpenAIResponsesLegacyIngress(body []byte) ([]byte, bool, error) {
 }
 
 func normalizeOpenAIResponsesLegacyIngressWithConfig(cfg *config.Config, body []byte) ([]byte, bool, error) {
+	return normalizeOpenAIResponsesLegacyIngressWithPromptPolicy(cfg, body, false)
+}
+
+func normalizeOpenAIResponsesLegacyIngressWithPromptPolicy(cfg *config.Config, body []byte, zeroPromptInjection bool) ([]byte, bool, error) {
 	if len(body) == 0 {
 		return body, false, nil
 	}
@@ -48,7 +52,7 @@ func normalizeOpenAIResponsesLegacyIngressWithConfig(cfg *config.Config, body []
 	if hasMessages {
 		messages, messagesAreArray := messagesValue.([]any)
 		if messagesAreArray && len(messages) > 0 {
-			legacy, err := convertLegacyResponsesMessages(cfg, body)
+			legacy, err := convertLegacyResponsesMessagesWithPromptPolicy(cfg, body, zeroPromptInjection)
 			if err != nil {
 				return body, false, err
 			}
@@ -111,12 +115,16 @@ type convertedLegacyResponsesMessages struct {
 }
 
 func convertLegacyResponsesMessages(cfg *config.Config, body []byte) (convertedLegacyResponsesMessages, error) {
+	return convertLegacyResponsesMessagesWithPromptPolicy(cfg, body, false)
+}
+
+func convertLegacyResponsesMessagesWithPromptPolicy(cfg *config.Config, body []byte, zeroPromptInjection bool) (convertedLegacyResponsesMessages, error) {
 	var converted convertedLegacyResponsesMessages
 	var chatRequest apicompat.ChatCompletionsRequest
 	if err := json.Unmarshal(body, &chatRequest); err != nil {
 		return converted, fmt.Errorf("normalize legacy Responses messages: %w", err)
 	}
-	responsesRequest, err := chatCompletionsToResponses(cfg, &chatRequest)
+	responsesRequest, err := chatCompletionsToResponsesWithPromptPolicy(cfg, &chatRequest, zeroPromptInjection)
 	if err != nil {
 		return converted, fmt.Errorf("normalize legacy Responses messages: %w", err)
 	}

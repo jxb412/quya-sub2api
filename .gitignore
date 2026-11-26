@@ -148,6 +148,7 @@ docs/*
 !docs/channel-monitor-v2-safe-defaults.md
 !docs/PROJECT_HANDOFF_CN.md
 !docs/codex-credits.md
+!docs/quya-zero-added-prompts.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/

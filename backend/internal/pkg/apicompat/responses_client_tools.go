@@ -20,6 +20,10 @@ type ResponsesClientToolMapping struct {
 // ordinary function tools. It mutates req and returns the mapping required to
 // restore the upstream response.
 func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, bool, error) {
+	return AdaptResponsesClientToolsWithPromptPolicy(req, false)
+}
+
+func AdaptResponsesClientToolsWithPromptPolicy(req map[string]any, zeroPromptInjection bool) (ResponsesClientToolMapping, bool, error) {
 	if req == nil {
 		return ResponsesClientToolMapping{}, false, nil
 	}
@@ -98,7 +102,7 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 			}
 			copy := copyClientTool(tool)
 			copy["type"] = "function"
-			copy["parameters"] = json.RawMessage(customToolInputSchema)
+			copy["parameters"] = customToolSchemaForPromptPolicy(zeroPromptInjection)
 			delete(copy, "format")
 			adapter.CustomTools[name] = true
 			lowered = append(lowered, copy)
@@ -109,10 +113,14 @@ func AdaptResponsesClientTools(req map[string]any) (ResponsesClientToolMapping, 
 				continue
 			}
 			seenSearch = true
+			proxy := toolSearchProxyChatTool(zeroPromptInjection)
+			if zeroPromptInjection {
+				proxy.Function.Description, _ = tool["description"].(string)
+			}
 			lowered = append(lowered, map[string]any{
 				"type": "function", "name": toolSearchProxyName,
-				"description": "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.",
-				"parameters":  json.RawMessage(toolSearchProxySchema),
+				"description": proxy.Function.Description,
+				"parameters":  proxy.Function.Parameters,
 			})
 			changed = true
 		default:
@@ -174,18 +182,27 @@ func AdaptResponsesClientToolsWithInheritedMapping(
 	inherited ResponsesClientToolMapping,
 	inheritedLoweredTools ...[]any,
 ) (ResponsesClientToolMapping, bool, error) {
+	return AdaptResponsesClientToolsWithInheritedMappingAndPromptPolicy(req, inherited, false, inheritedLoweredTools...)
+}
+
+func AdaptResponsesClientToolsWithInheritedMappingAndPromptPolicy(
+	req map[string]any,
+	inherited ResponsesClientToolMapping,
+	zeroPromptInjection bool,
+	inheritedLoweredTools ...[]any,
+) (ResponsesClientToolMapping, bool, error) {
 	if req == nil {
 		return ResponsesClientToolMapping{}, false, nil
 	}
 	if _, toolsPresent := req["tools"]; toolsPresent {
-		return AdaptResponsesClientTools(req)
+		return AdaptResponsesClientToolsWithPromptPolicy(req, zeroPromptInjection)
 	}
 	if len(inherited.CustomTools) == 0 && !inherited.ToolSearch && len(inherited.NamespaceTools) == 0 {
 		return ResponsesClientToolMapping{}, false, nil
 	}
 	if len(inheritedLoweredTools) > 0 && len(inheritedLoweredTools[0]) > 0 {
 		req["tools"] = restoreInheritedResponsesClientToolDeclarations(inheritedLoweredTools[0], inherited)
-		return AdaptResponsesClientTools(req)
+		return AdaptResponsesClientToolsWithPromptPolicy(req, zeroPromptInjection)
 	}
 
 	changed, err := rewriteClientToolHistory(req["input"], &inherited)

@@ -46,11 +46,15 @@ func AnthropicToChatCompletionsRequest(req *AnthropicRequest) (*ChatCompletionsR
 // AnthropicToChatCompletionsRequestWithMinOutputTokens converts an Anthropic
 // Messages request using the supplied max_completion_tokens floor.
 func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest, minOutputTokens int) (*ChatCompletionsRequest, error) {
+	return AnthropicToChatCompletionsRequestWithPromptPolicy(req, minOutputTokens, false)
+}
+
+func AnthropicToChatCompletionsRequestWithPromptPolicy(req *AnthropicRequest, minOutputTokens int, zeroPromptInjection bool) (*ChatCompletionsRequest, error) {
 	if req == nil {
 		return nil, fmt.Errorf("anthropic request is nil")
 	}
 
-	messages, err := anthropicToChatMessages(req.System, req.Messages)
+	messages, err := anthropicToChatMessages(req.System, req.Messages, zeroPromptInjection)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +121,7 @@ func AnthropicToChatCompletionsRequestWithMinOutputTokens(req *AnthropicRequest,
 // anthropicToChatMessages converts the Anthropic system field + message list
 // into Chat Completions messages. It mirrors convertAnthropicToResponsesInput +
 // responsesInputToChatMessages but produces ChatMessage directly.
-func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage) ([]ChatMessage, error) {
+func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage, zeroPromptInjection bool) ([]ChatMessage, error) {
 	var messages []ChatMessage
 
 	// System prompt → system message. parseAnthropicSystemContentParts handles
@@ -137,7 +141,7 @@ func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage) ([
 	}
 
 	for _, m := range msgs {
-		converted, err := anthropicMsgToChatMessages(m)
+		converted, err := anthropicMsgToChatMessages(m, zeroPromptInjection)
 		if err != nil {
 			return nil, err
 		}
@@ -151,12 +155,12 @@ func anthropicToChatMessages(system json.RawMessage, msgs []AnthropicMessage) ([
 // Chat messages. tool_result blocks become standalone "tool" role messages
 // (the Chat Completions convention); text/image blocks stay in a user message;
 // assistant tool_use blocks become tool_calls on the assistant message.
-func anthropicMsgToChatMessages(m AnthropicMessage) ([]ChatMessage, error) {
+func anthropicMsgToChatMessages(m AnthropicMessage, zeroPromptInjection bool) ([]ChatMessage, error) {
 	switch m.Role {
 	case "assistant":
 		return anthropicAssistantToChatMessages(m.Content)
 	default: // "user" and any unknown role
-		return anthropicUserToChatMessages(m.Content)
+		return anthropicUserToChatMessages(m.Content, zeroPromptInjection)
 	}
 }
 
@@ -165,7 +169,7 @@ func anthropicMsgToChatMessages(m AnthropicMessage) ([]ChatMessage, error) {
 // standalone "tool" role messages; images inside tool_results are lifted into a
 // follow-up user message as image_url parts (the Responses bridge does the same
 // — function_call_output only accepts strings, so images must travel separately).
-func anthropicUserToChatMessages(raw json.RawMessage) ([]ChatMessage, error) {
+func anthropicUserToChatMessages(raw json.RawMessage, zeroPromptInjection bool) ([]ChatMessage, error) {
 	// Plain string → single user message.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
@@ -186,7 +190,7 @@ func anthropicUserToChatMessages(raw json.RawMessage) ([]ChatMessage, error) {
 		if b.Type != "tool_result" {
 			continue
 		}
-		text, imageParts := convertToolResultOutput(b)
+		text, imageParts := convertToolResultOutput(b, zeroPromptInjection)
 		content, _ := json.Marshal(text)
 		out = append(out, ChatMessage{
 			Role:       "tool",

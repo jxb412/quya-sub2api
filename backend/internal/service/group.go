@@ -110,6 +110,8 @@ type Group struct {
 	DefaultMappedModel          string
 	MessagesDispatchModelConfig OpenAIMessagesDispatchModelConfig
 	ModelAllowlist              GroupModelAllowlist
+	// 2026-11-26: 仅 OpenAI 分组启用；保留客户端提示词，禁止网关新增合成提示词。
+	OpenAIZeroPromptInjection bool
 	// CodexModelsManifestConfig 开启后，普通模型列表与 Codex manifest 优先使用
 	// 固定账号列表拉取并合并，不经过调度器（仅 openai 平台）。
 	CodexModelsManifestConfig GroupCodexModelsManifestConfig

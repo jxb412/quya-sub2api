@@ -20,6 +20,7 @@ import (
 
 // Forward forwards request to OpenAI API
 func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
+	zeroPromptInjection := openAIZeroPromptInjection(c)
 	// 在任何账号级 client_metadata / prompt_cache_key / 指纹改写之前抓取
 	// 客户端原始会话信号。Forward 可能因上游失败被同一请求多次调用；已有快照时
 	// 保留首次值，确保换账号后 previous_response_id pin 与 BPS 会话锚点不漂移。
@@ -85,7 +86,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin
 	if normalized {
 		body = normalizedBody
 	}
-	legacyIngressBody, legacyIngressChanged, legacyIngressErr := normalizeOpenAIResponsesLegacyIngressWithConfig(s.cfg, body)
+	legacyIngressBody, legacyIngressChanged, legacyIngressErr := normalizeOpenAIResponsesLegacyIngressWithPromptPolicy(s.cfg, body, zeroPromptInjection)
 	if legacyIngressErr != nil {
 		return nil, legacyIngressErr
 	}
@@ -161,7 +162,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin
 	nativeDeepSeekResponses := account.Platform == PlatformDeepseek && nativeCNResponses
 	if nativeDeepSeekResponses && account.Type == AccountTypeAPIKey && !compactPath &&
 		needsOpenAIResponsesClientToolAdaptation(body) {
-		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientTools(body)
+		adaptedBody, mapping, adaptErr := adaptOpenAIResponsesClientToolsWithPromptPolicy(body, zeroPromptInjection)
 		if adaptErr != nil {
 			return nil, fmt.Errorf("adapt DeepSeek Responses client tools: %w", adaptErr)
 		}
@@ -393,7 +394,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin
 	if apiKey != nil {
 		imageGenerationAllowed = GroupAllowsImageGeneration(apiKey.Group)
 	}
-	codexImageGenerationBridgeEnabled := isCodexCLI &&
+	codexImageGenerationBridgeEnabled := !zeroPromptInjection && isCodexCLI &&
 		!isOpenAIResponsesLiteHeader(c.GetHeader(responsesLiteHeader)) &&
 		imageGenerationAllowed &&
 		codexImageGenerationExplicitToolPolicy != codexImageGenerationExplicitToolPolicyStrip &&
@@ -429,7 +430,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin
 	}
 	instructions := gjson.GetBytes(body, "instructions")
 	instructionsEmpty := !instructions.Exists() || instructions.Type != gjson.String || strings.TrimSpace(instructions.String()) == ""
-	if instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses &&
+	if !zeroPromptInjection && instructionsEmpty && account.UsesOpenAICodexProtocol() && !compatMessagesBridge && !nativeCNResponses &&
 		(isCompactRequest || !useCodexStableInstructionPrefix(upstreamModel)) {
 		markPatchSet("instructions", defaultCodexSynthInstructions(upstreamModel))
 	}
@@ -556,6 +557,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin
 				IsCodexCLI:                          isCodexCLI,
 				IsCompact:                           isCompactRequest,
 				SkipDefaultInstructions:             true,
+				ZeroPromptInjection:                 zeroPromptInjection,
 				PreserveToolCallIDs:                 true,
 				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
 				ResponsesLite:                       responsesLite,
@@ -566,6 +568,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPrepared(ctx context.Context, c *gin
 			codexResult = applyCodexOAuthTransformWithOptions(decoded, codexOAuthTransformOptions{
 				IsCodexCLI:                          isCodexCLI,
 				IsCompact:                           isCompactRequest,
+				ZeroPromptInjection:                 zeroPromptInjection,
 				OmitPromotedSystemMessagesFromInput: omitPromotedSystemMessages,
 				ResponsesLite:                       responsesLite,
 			})
@@ -1450,7 +1453,7 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现：强制 store=false、清除
 	// previous_response_id，避免携带状态字段被上游拒绝。
-	body = normalizeDeepSeekResponsesRequestBody(account, body)
+	body = normalizeDeepSeekResponsesRequestBodyWithPromptPolicy(account, body, openAIZeroPromptInjection(c))
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {

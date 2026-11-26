@@ -196,11 +196,12 @@ func (s *OpenAIGatewayService) MergeGroupConfiguredCodexModels(
 	if !group.CodexModelsManifestConfig.Enabled {
 		configuredModels = openAIConfiguredCodexModelIDsForGroup(visible, group)
 	}
-	body, changed, err := mergeConfiguredCodexModelsManifest(
+	body, changed, err := mergeConfiguredCodexModelsManifestWithPromptPolicy(
 		manifest.Body,
 		configuredModels,
 		group.ModelAllowlist.Models,
 		group.ModelAllowlistEnabled(),
+		group.OpenAIZeroPromptInjection,
 	)
 	if err != nil {
 		return fmt.Errorf("merge group configured Codex models: %w", err)
@@ -888,20 +889,27 @@ func (s *GatewayService) BuildCodexModelsManifestForGroup(
 	platformOverride string,
 	modelIDs []string,
 ) ([]byte, error) {
+	buildFallback := func() ([]byte, error) {
+		body, err := BuildCodexModelsManifest(modelIDs)
+		if err != nil {
+			return nil, err
+		}
+		return applyGeneratedCodexManifestPromptPolicy(body, group)
+	}
 	if s == nil || s.accountRepo == nil || group == nil {
-		return BuildCodexModelsManifest(modelIDs)
+		return buildFallback()
 	}
 	effectivePlatform := strings.TrimSpace(platformOverride)
 	if effectivePlatform == "" {
 		effectivePlatform = group.Platform
 	}
 	if effectivePlatform != PlatformComposite && !isConcreteRequestPlatform(effectivePlatform) {
-		return BuildCodexModelsManifest(modelIDs)
+		return buildFallback()
 	}
 
 	_, catalog, err := loadCodexGroupCatalogAccounts(ctx, s.accountRepo, group.ID)
 	if err != nil {
-		return BuildCodexModelsManifest(modelIDs)
+		return buildFallback()
 	}
 	var compositeRoutes []CompositeModelRoute
 	compositeRoutesAvailable := true
@@ -986,7 +994,11 @@ func buildCodexModelsManifestForAccounts(
 			modelMetadata[modelID] = metadata
 		}
 	}
-	return buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
+	body, err := buildCodexModelsManifest(modelIDs, imageInputModels, searchToolModels, metadataModels, modelMetadata)
+	if err != nil {
+		return nil, err
+	}
+	return applyGeneratedCodexManifestPromptPolicy(body, group)
 }
 
 func buildCodexModelsManifest(
@@ -1409,6 +1421,16 @@ func mergeConfiguredCodexModelsManifest(
 	selectedModels []string,
 	filterBySelection bool,
 ) ([]byte, bool, error) {
+	return mergeConfiguredCodexModelsManifestWithPromptPolicy(body, configuredModels, selectedModels, filterBySelection, false)
+}
+
+func mergeConfiguredCodexModelsManifestWithPromptPolicy(
+	body []byte,
+	configuredModels []string,
+	selectedModels []string,
+	filterBySelection bool,
+	zeroPromptInjection bool,
+) ([]byte, bool, error) {
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return nil, false, err
@@ -1487,6 +1509,19 @@ func mergeConfiguredCodexModelsManifest(
 		rawModel, err := json.Marshal(newConfiguredCodexModelDescriptor(modelID))
 		if err != nil {
 			return nil, false, err
+		}
+		if zeroPromptInjection {
+			generated, _, policyErr := applyCodexManifestPromptPolicy([]byte(`{"models":[`+string(rawModel)+`]}`), nil)
+			if policyErr != nil {
+				return nil, false, policyErr
+			}
+			var manifest struct {
+				Models []json.RawMessage `json:"models"`
+			}
+			if err := json.Unmarshal(generated, &manifest); err != nil {
+				return nil, false, err
+			}
+			rawModel = manifest.Models[0]
 		}
 		merged = append(merged, rawModel)
 		seen[modelID] = struct{}{}

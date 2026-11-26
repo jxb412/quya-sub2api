@@ -279,8 +279,20 @@ func projectAccountModelAliases(body []byte, account *Account, group *Group, cod
 // including ordinary discovery and pinned scheduler fallback. Locally generated
 // catalogs retain their existing policy and do not pass through this function.
 func ApplyPinnedCodexModelsMapping(response *OpenAIModelsResponse, account *Account, group *Group) error {
-	if group == nil || group.Platform != PlatformOpenAI {
+	if response == nil || response.NotModified || group == nil || group.Platform != PlatformOpenAI {
 		return nil
+	}
+	if group.OpenAIZeroPromptInjection && len(response.upstreamSourceBody) > 0 {
+		// Apply before alias projection: raw source slugs identify which prompt
+		// fields came from upstream rather than local descriptor completion.
+		body, changed, err := applyCodexManifestPromptPolicy(response.Body, response.upstreamSourceBody)
+		if err != nil {
+			return err
+		}
+		if changed {
+			response.Body = body
+			response.ETag = codexModelsManifestBodyETag(body)
+		}
 	}
 	body, err := projectAccountModelsBody(response.Body, account, group, true)
 	if err != nil {

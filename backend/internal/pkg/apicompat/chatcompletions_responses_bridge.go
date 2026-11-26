@@ -21,6 +21,8 @@ type toolOutputMediaByCallID map[string][]ChatContentPart
 // ResponsesToChatCompletionsRequestWithOptions. All fields are optional; a nil
 // *ResponsesToChatOptions behaves exactly like ResponsesToChatCompletionsRequest.
 type ResponsesToChatOptions struct {
+	// 2026-11-26: suppress gateway-authored prose while retaining protocol adapters.
+	ZeroPromptInjection bool
 	// ReasoningContentByID looks up the cached reasoning text for a reasoning
 	// item id. Codex histories may carry reasoning items with no plaintext
 	// summary (empty summary + opaque encrypted_content, e.g. after remote
@@ -71,7 +73,7 @@ func ResponsesToChatCompletionsRequestWithOptions(req *ResponsesRequest, opts *R
 		return nil, err
 	}
 	if len(effectiveTools) > 0 {
-		tools, err := responsesToolsToChatTools(effectiveTools)
+		tools, err := responsesToolsToChatTools(effectiveTools, opts != nil && opts.ZeroPromptInjection)
 		if err != nil {
 			return nil, err
 		}
@@ -340,7 +342,7 @@ func responsesInputToChatMessagesWithOptions(instructions string, inputRaw json.
 	if err != nil {
 		return nil, err
 	}
-	normalized := normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID)
+	normalized := normalizeChatMessagesWithToolOutputMedia(built, mediaByCallID, opts != nil && opts.ZeroPromptInjection)
 	return normalizeResponsesDerivedChatMessageRoles(normalized), nil
 }
 
@@ -560,7 +562,7 @@ func buildChatMessagesFromItems(messages []ChatMessage, rawItems []json.RawMessa
 			}
 			delete(mediaByCallID, callID)
 
-			outputText, media, rewritten := extractToolOutputMedia(outputRaw)
+			outputText, media, rewritten := extractToolOutputMedia(outputRaw, opts != nil && opts.ZeroPromptInjection)
 			if rewritten {
 				if callID != "" {
 					mediaByCallID[callID] = media
@@ -684,7 +686,7 @@ func AgentMessageText(raw json.RawMessage) string {
 // extractToolOutputMedia rewrites only recognized image nodes. Media-free
 // outputs return rewritten=false so the caller can preserve their original
 // bytes and prompt-cache prefix.
-func extractToolOutputMedia(outputRaw json.RawMessage) (string, []ChatContentPart, bool) {
+func extractToolOutputMedia(outputRaw json.RawMessage, zeroPromptInjection bool) (string, []ChatContentPart, bool) {
 	outputRaw = bytesTrimSpace(outputRaw)
 	if len(outputRaw) == 0 || string(outputRaw) == "null" {
 		return "", nil, false
@@ -693,14 +695,18 @@ func extractToolOutputMedia(outputRaw json.RawMessage) (string, []ChatContentPar
 	var outputString string
 	if err := json.Unmarshal(outputRaw, &outputString); err == nil {
 		if isToolOutputImageDataURL(outputString) {
-			return toolOutputMediaMarker, []ChatContentPart{toolOutputImagePart(outputString)}, true
+			marker := toolOutputMediaMarker
+			if zeroPromptInjection {
+				marker = ""
+			}
+			return marker, []ChatContentPart{toolOutputImagePart(outputString)}, true
 		}
 
 		nested, ok := decodeToolOutputJSON([]byte(outputString))
 		if !ok {
 			return "", nil, false
 		}
-		rewritten, media, changed := rewriteToolOutputMediaValue(nested)
+		rewritten, media, changed := rewriteToolOutputMediaValue(nested, zeroPromptInjection)
 		if !changed {
 			return "", nil, false
 		}
@@ -715,7 +721,7 @@ func extractToolOutputMedia(outputRaw json.RawMessage) (string, []ChatContentPar
 	if !ok {
 		return "", nil, false
 	}
-	rewritten, media, changed := rewriteToolOutputMediaValue(value)
+	rewritten, media, changed := rewriteToolOutputMediaValue(value, zeroPromptInjection)
 	if !changed {
 		return "", nil, false
 	}
@@ -739,13 +745,13 @@ func decodeToolOutputJSON(raw []byte) (any, bool) {
 	return value, true
 }
 
-func rewriteToolOutputMediaValue(value any) (any, []ChatContentPart, bool) {
+func rewriteToolOutputMediaValue(value any, zeroPromptInjection bool) (any, []ChatContentPart, bool) {
 	switch typed := value.(type) {
 	case []any:
 		var media []ChatContentPart
 		changed := false
 		for i, item := range typed {
-			rewritten, itemMedia, itemChanged := rewriteToolOutputMediaValue(item)
+			rewritten, itemMedia, itemChanged := rewriteToolOutputMediaValue(item, zeroPromptInjection)
 			if !itemChanged {
 				continue
 			}
@@ -756,9 +762,13 @@ func rewriteToolOutputMediaValue(value any) (any, []ChatContentPart, bool) {
 		return typed, media, changed
 	case map[string]any:
 		if imageURL, ok := recognizedToolOutputImageURL(typed); ok {
+			marker := toolOutputMediaMarker
+			if zeroPromptInjection {
+				marker = ""
+			}
 			return map[string]any{
 				"type": "input_text",
-				"text": toolOutputMediaMarker,
+				"text": marker,
 			}, []ChatContentPart{toolOutputImagePart(imageURL)}, true
 		}
 
@@ -766,7 +776,7 @@ func rewriteToolOutputMediaValue(value any) (any, []ChatContentPart, bool) {
 		if !ok {
 			return typed, nil, false
 		}
-		rewritten, media, changed := rewriteToolOutputMediaValue(content)
+		rewritten, media, changed := rewriteToolOutputMediaValue(content, zeroPromptInjection)
 		if !changed {
 			return typed, nil, false
 		}
@@ -853,10 +863,10 @@ func appendAssistantToolCall(messages []ChatMessage, toolCall ChatToolCall, pend
 // tool replies and intervening messages are emitted in their natural position
 // but never between an assistant tool_calls message and its replies.
 func normalizeChatMessages(messages []ChatMessage) []ChatMessage {
-	return normalizeChatMessagesWithToolOutputMedia(messages, nil)
+	return normalizeChatMessagesWithToolOutputMedia(messages, nil, false)
 }
 
-func normalizeChatMessagesWithToolOutputMedia(messages []ChatMessage, mediaByCallID toolOutputMediaByCallID) []ChatMessage {
+func normalizeChatMessagesWithToolOutputMedia(messages []ChatMessage, mediaByCallID toolOutputMediaByCallID, zeroPromptInjection bool) []ChatMessage {
 	// Index every tool reply by its tool_call_id (last wins on duplicates).
 	replies := make(map[string]ChatMessage)
 	for _, m := range messages {
@@ -910,10 +920,12 @@ func normalizeChatMessagesWithToolOutputMedia(messages []ChatMessage, mediaByCal
 				if len(media) == 0 {
 					continue
 				}
-				mediaParts = append(mediaParts, ChatContentPart{
-					Type: "text",
-					Text: fmt.Sprintf(toolOutputMediaAttribution, tc.ID),
-				})
+				if !zeroPromptInjection {
+					mediaParts = append(mediaParts, ChatContentPart{
+						Type: "text",
+						Text: fmt.Sprintf(toolOutputMediaAttribution, tc.ID),
+					})
+				}
 				mediaParts = append(mediaParts, media...)
 			}
 			if len(mediaParts) > 0 {
@@ -1095,7 +1107,16 @@ func chatContentFromSingleResponsesPart(partType string, part map[string]json.Ra
 // extractCustomToolCallInput）。
 const customToolInputSchema = `{"type":"object","properties":{"input":{"type":"string","description":"The raw input for this tool, passed through verbatim."}},"required":["input"]}`
 
-func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
+const customToolInputSchemaWithoutInstructions = `{"type":"object","properties":{"input":{"type":"string"}},"required":["input"]}`
+
+func customToolSchemaForPromptPolicy(zeroPromptInjection bool) json.RawMessage {
+	if zeroPromptInjection {
+		return json.RawMessage(customToolInputSchemaWithoutInstructions)
+	}
+	return json.RawMessage(customToolInputSchema)
+}
+
+func responsesToolsToChatTools(tools []ResponsesTool, zeroPromptInjection bool) ([]ChatTool, error) {
 	// 顶层 function/custom 工具名集合：namespace 子工具摊平后与其撞名时，chat
 	// 上游无法按 namespace 区分调用归属。这类请求在原生 Responses 上游是合法的
 	// （按 namespace+name 路由），歧义由摊平转换制造且无法消除，必须显式拒绝，
@@ -1132,7 +1153,7 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 				Function: &ChatFunction{
 					Name:        tool.Name,
 					Description: tool.Description,
-					Parameters:  json.RawMessage(customToolInputSchema),
+					Parameters:  customToolSchemaForPromptPolicy(zeroPromptInjection),
 				},
 			})
 		case "tool_search":
@@ -1146,7 +1167,11 @@ func responsesToolsToChatTools(tools []ResponsesTool) ([]ChatTool, error) {
 				continue
 			}
 			toolSearchDeclared = true
-			out = append(out, toolSearchProxyChatTool())
+			proxy := toolSearchProxyChatTool(zeroPromptInjection)
+			if zeroPromptInjection {
+				proxy.Function.Description = tool.Description
+			}
+			out = append(out, proxy)
 		case "namespace":
 			flattened, err := namespaceChildrenToChatTools(tool, topLevel, flatOwner)
 			if err != nil {
@@ -1176,8 +1201,10 @@ const toolSearchProxyName = "tool_search"
 
 const toolSearchProxySchema = `{"type":"object","properties":{"query":{"type":"string","description":"Search query for tools or connectors to load."},"limit":{"type":"integer","description":"Maximum number of tool groups to return."}},"required":["query"]}`
 
-func toolSearchProxyChatTool() ChatTool {
-	return ChatTool{
+const toolSearchProxySchemaWithoutInstructions = `{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer"}},"required":["query"]}`
+
+func toolSearchProxyChatTool(zeroPromptInjection bool) ChatTool {
+	tool := ChatTool{
 		Type: "function",
 		Function: &ChatFunction{
 			Name:        toolSearchProxyName,
@@ -1185,6 +1212,11 @@ func toolSearchProxyChatTool() ChatTool {
 			Parameters:  json.RawMessage(toolSearchProxySchema),
 		},
 	}
+	if zeroPromptInjection {
+		tool.Function.Description = ""
+		tool.Function.Parameters = json.RawMessage(toolSearchProxySchemaWithoutInstructions)
+	}
+	return tool
 }
 
 // namespaceChildrenToChatTools 将 namespace 工具的子 function 工具摊平为顶层

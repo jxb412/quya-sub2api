@@ -28,6 +28,7 @@ func AnthropicToResponsesWithMinOutputTokens(req *AnthropicRequest, minOutputTok
 type AnthropicToResponsesOptions struct {
 	MinOutputTokens                int
 	DeferReasoningEffortValidation bool
+	ZeroPromptInjection            bool
 }
 
 func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToResponsesOptions) (*ResponsesRequest, error) {
@@ -36,7 +37,7 @@ func AnthropicToResponsesWithOptions(req *AnthropicRequest, options AnthropicToR
 			return nil, err
 		}
 	}
-	input, err := convertAnthropicToResponsesInput(req.System, req.Messages)
+	input, err := convertAnthropicToResponsesInput(req.System, req.Messages, options.ZeroPromptInjection)
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +140,7 @@ func convertAnthropicToolChoiceToResponses(raw json.RawMessage) (json.RawMessage
 
 // convertAnthropicToResponsesInput builds the Responses API input items array
 // from the Anthropic system field and message list.
-func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMessage) ([]ResponsesInputItem, error) {
+func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMessage, zeroPromptInjection bool) ([]ResponsesInputItem, error) {
 	var out []ResponsesInputItem
 
 	// System prompt → developer role input item. ChatGPT Codex SSE behaves like
@@ -161,7 +162,7 @@ func convertAnthropicToResponsesInput(system json.RawMessage, msgs []AnthropicMe
 	}
 
 	for _, m := range msgs {
-		items, err := anthropicMsgToResponsesItems(m)
+		items, err := anthropicMsgToResponsesItems(m, zeroPromptInjection)
 		if err != nil {
 			return nil, err
 		}
@@ -200,16 +201,16 @@ func isAnthropicBillingHeaderText(text string) bool {
 
 // anthropicMsgToResponsesItems converts a single Anthropic message into one
 // or more Responses API input items.
-func anthropicMsgToResponsesItems(m AnthropicMessage) ([]ResponsesInputItem, error) {
+func anthropicMsgToResponsesItems(m AnthropicMessage, zeroPromptInjection bool) ([]ResponsesInputItem, error) {
 	switch m.Role {
 	case "user":
-		return anthropicUserToResponses(m.Content)
+		return anthropicUserToResponses(m.Content, zeroPromptInjection)
 	case "assistant":
 		return anthropicAssistantToResponses(m.Content)
 	case "system":
 		// Mid-conversation system turns (e.g. hook output) keep system-level
 		// authority: Responses uses developer for them, not user.
-		items, err := anthropicUserToResponses(m.Content)
+		items, err := anthropicUserToResponses(m.Content, zeroPromptInjection)
 		for i := range items {
 			if items[i].Role == "user" {
 				items[i].Role = "developer"
@@ -217,14 +218,14 @@ func anthropicMsgToResponsesItems(m AnthropicMessage) ([]ResponsesInputItem, err
 		}
 		return items, err
 	default:
-		return anthropicUserToResponses(m.Content)
+		return anthropicUserToResponses(m.Content, zeroPromptInjection)
 	}
 }
 
 // anthropicUserToResponses handles an Anthropic user message. Content can be a
 // plain string or an array of blocks. tool_result blocks are extracted into
 // function_call_output items. Image blocks are converted to input_image parts.
-func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error) {
+func anthropicUserToResponses(raw json.RawMessage, zeroPromptInjection bool) ([]ResponsesInputItem, error) {
 	// Try plain string.
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
@@ -251,7 +252,7 @@ func anthropicUserToResponses(raw json.RawMessage) ([]ResponsesInputItem, error)
 		if b.Type != "tool_result" {
 			continue
 		}
-		outputText, imageParts := convertToolResultOutput(b)
+		outputText, imageParts := convertToolResultOutput(b, zeroPromptInjection)
 		out = append(out, ResponsesInputItem{
 			Type:   "function_call_output",
 			CallID: toResponsesCallID(b.ToolUseID),
@@ -405,16 +406,20 @@ func anthropicImageToDataURI(src *AnthropicImageSource) string {
 // block. Returns the text as a string for the function_call_output Output
 // field, plus any image parts that must be sent in a separate user message
 // (the Responses API output field only accepts strings).
-func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesContentPart) {
+func convertToolResultOutput(b AnthropicContentBlock, zeroPromptInjection bool) (string, []ResponsesContentPart) {
+	empty := "(empty)"
+	if zeroPromptInjection {
+		empty = ""
+	}
 	if len(b.Content) == 0 {
-		return "(empty)", nil
+		return empty, nil
 	}
 
 	// Try plain string content.
 	var s string
 	if err := json.Unmarshal(b.Content, &s); err == nil {
 		if s == "" {
-			s = "(empty)"
+			s = empty
 		}
 		return s, nil
 	}
@@ -422,7 +427,7 @@ func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesConten
 	// Array of content blocks — may contain text and/or images.
 	var inner []AnthropicContentBlock
 	if err := json.Unmarshal(b.Content, &inner); err != nil {
-		return "(empty)", nil
+		return empty, nil
 	}
 
 	// Separate text (for function_call_output) from images (for user message).
@@ -443,7 +448,7 @@ func convertToolResultOutput(b AnthropicContentBlock) (string, []ResponsesConten
 
 	text := strings.Join(textParts, "\n\n")
 	if text == "" {
-		text = "(empty)"
+		text = empty
 	}
 	return text, imageParts
 }

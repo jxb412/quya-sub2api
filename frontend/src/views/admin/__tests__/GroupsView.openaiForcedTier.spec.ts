@@ -228,7 +228,7 @@ const submit = async (wrapper: ReturnType<typeof mountView>) => {
   return updateGroup.mock.calls[0][1];
 };
 
-describe("GroupsView OpenAI forced service tier", () => {
+describe("GroupsView OpenAI group policies", () => {
   beforeEach(() => {
     localStorage.clear();
     listGroups.mockReset();
@@ -321,6 +321,60 @@ describe("GroupsView OpenAI forced service tier", () => {
       force_openai_ultrafast: false,
     });
 
+    wrapper.unmount();
+  });
+
+  it("defaults zero added prompts to off for existing groups and saves opt-in", async () => {
+    const wrapper = await openEditDialog(sourceGroup);
+    const zeroPromptToggle = wrapper.get('[data-testid="edit-openai-zero-prompt-injection"]');
+    expect(zeroPromptToggle.attributes("aria-checked")).toBe("false");
+    await zeroPromptToggle.trigger("click");
+    expect(await submit(wrapper)).toMatchObject({ openai_zero_prompt_injection: true });
+    wrapper.unmount();
+  });
+
+  it("loads the zero added prompts setting and allows turning it off", async () => {
+    const wrapper = await openEditDialog({ ...sourceGroup, openai_zero_prompt_injection: true });
+    const zeroPromptToggle = wrapper.get('[data-testid="edit-openai-zero-prompt-injection"]');
+    expect(zeroPromptToggle.attributes("aria-checked")).toBe("true");
+    await zeroPromptToggle.trigger("click");
+    expect(await submit(wrapper)).toMatchObject({ openai_zero_prompt_injection: false });
+    wrapper.unmount();
+  });
+
+  it.each(["anthropic", "gemini", "composite"] as const)(
+    "does not enable zero added prompts for a %s group",
+    async (platform) => {
+      const wrapper = await openEditDialog({ ...sourceGroup, platform, openai_zero_prompt_injection: true });
+      expect(wrapper.find('[data-testid="edit-openai-zero-prompt-injection"]').exists()).toBe(false);
+      expect(await submit(wrapper)).toMatchObject({ openai_zero_prompt_injection: false });
+      wrapper.unmount();
+    },
+  );
+
+  it("creates an OpenAI group with zero added prompts and resets a reopened create form", async () => {
+    const wrapper = await openEditDialog(sourceGroup);
+    const createButton = wrapper.findAll("button").find((button) => button.text() === "admin.groups.createGroup");
+    expect(createButton).toBeTruthy();
+    await createButton!.trigger("click");
+    await flushPromises();
+    const platform = wrapper.findComponent('[data-tour="group-form-platform"]');
+    platform.vm.$emit("update:modelValue", "openai");
+    await flushPromises();
+    const zeroPromptToggle = wrapper.get('[data-testid="create-openai-zero-prompt-injection"]');
+    expect(zeroPromptToggle.attributes("aria-checked")).toBe("false");
+    await zeroPromptToggle.trigger("click");
+    await wrapper.get('#create-group-form input[data-tour="group-form-name"]').setValue("No added prompts");
+    createGroup.mockResolvedValue({ ...sourceGroup, openai_zero_prompt_injection: true });
+    await wrapper.get("#create-group-form").trigger("submit");
+    await flushPromises();
+    expect(createGroup).toHaveBeenCalledTimes(1);
+    expect(createGroup.mock.calls[0][0]).toMatchObject({ platform: "openai", openai_zero_prompt_injection: true });
+    await createButton!.trigger("click");
+    await flushPromises();
+    wrapper.findComponent('[data-tour="group-form-platform"]').vm.$emit("update:modelValue", "openai");
+    await flushPromises();
+    expect(wrapper.get('[data-testid="create-openai-zero-prompt-injection"]').attributes("aria-checked")).toBe("false");
     wrapper.unmount();
   });
 });

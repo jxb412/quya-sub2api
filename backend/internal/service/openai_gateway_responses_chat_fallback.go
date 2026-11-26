@@ -62,6 +62,7 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	s.recacheReasoningItemsFromInput(responsesReq.Input)
 
 	chatReq, err := apicompat.ResponsesToChatCompletionsRequestWithOptions(&responsesReq, &apicompat.ResponsesToChatOptions{
+		ZeroPromptInjection:  openAIZeroPromptInjection(c),
 		ReasoningContentByID: s.reasoningContentByID,
 	})
 	if err != nil {

@@ -287,7 +287,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 		return nil
 	}
 
-	prepared, err := prepareOpenAIInputTokensCountRequest(body, account, defaultMappedModel)
+	prepared, err := prepareOpenAIInputTokensCountRequestWithPromptPolicy(body, account, defaultMappedModel, openAIZeroPromptInjection(c))
 	if err != nil {
 		writeAnthropicCountTokensError(c, http.StatusBadRequest, "invalid_request_error", "Failed to parse request body")
 		return err
@@ -395,6 +395,10 @@ func prepareOpenAIInputTokensCountRequest(
 	account *Account,
 	defaultMappedModel string,
 ) (*openAIInputTokensCountPrepared, error) {
+	return prepareOpenAIInputTokensCountRequestWithPromptPolicy(body, account, defaultMappedModel, false)
+}
+
+func prepareOpenAIInputTokensCountRequestWithPromptPolicy(body []byte, account *Account, defaultMappedModel string, zeroPromptInjection bool) (*openAIInputTokensCountPrepared, error) {
 	var anthropicReq apicompat.AnthropicRequest
 	if err := json.Unmarshal(body, &anthropicReq); err != nil {
 		return nil, fmt.Errorf("parse anthropic count_tokens request: %w", err)
@@ -407,6 +411,7 @@ func prepareOpenAIInputTokensCountRequest(
 	upstreamModel := normalizeOpenAIModelForUpstream(account, billingModel)
 
 	responsesReq, err := apicompat.AnthropicToResponsesWithOptions(&anthropicReq, apicompat.AnthropicToResponsesOptions{
+		ZeroPromptInjection:            zeroPromptInjection,
 		DeferReasoningEffortValidation: true,
 	})
 	if err != nil {
