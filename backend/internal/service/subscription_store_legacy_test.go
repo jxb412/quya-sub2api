@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -23,6 +24,49 @@ func TestStoreLegacyReplacementMarkersDistinguishCurrentAndQueue(t *testing.T) {
 	ordinary, err := parseLegacyStoreReplacement("管理员赠送30天")
 	require.NoError(t, err)
 	require.Nil(t, ordinary)
+	_, err = parseLegacyStoreReplacement("通过兑换码 store_b 兑换\n套餐循环检查自动重开，原订阅ID 123\n通过兑换码 store_c 兑换")
+	require.Error(t, err, "new requests still require an unambiguous current purchase")
+}
+
+func TestStoreLegacyHistoryParentDoesNotParseAppendedPurchases(t *testing.T) {
+	parentID, err := legacyStoreHistoryParent("通过兑换码 store_old 兑换\n套餐循环检查自动重开，原订阅ID 99\n通过兑换码 store_later 兑换")
+	require.NoError(t, err)
+	require.EqualValues(t, 99, parentID)
+	for _, notes := range []string{
+		"套餐循环检查自动重开，原订阅ID 99\n套餐循环检查自动重开，原订阅ID 123",
+		"套餐循环检查自动重开，原订阅ID 99\n套餐循环检查自动重开，原订阅ID broken",
+		"套餐循环检查自动重开，原订阅ID 0",
+		"套餐循环检查自动重开，原订阅ID 999999999999999999999999",
+	} {
+		_, err = legacyStoreHistoryParent(notes)
+		require.Error(t, err, "ambiguous prior grants cannot be skipped")
+	}
+	parentID, err = legacyStoreHistoryParent("管理员赠送30天")
+	require.NoError(t, err)
+	require.Zero(t, parentID)
+}
+
+func TestStoreLegacyHistoricalAppendRequiresPurchaseProof(t *testing.T) {
+	h, now := nativeHistoryFixture()
+	nativeAddReplacement(&h, now)
+	delete(h.Receipts, 2) // The old PHP cron did not create native reset receipts.
+	n := h.Nodes[2]
+	n.Notes = "通过兑换码 store_b 兑换\n套餐循环检查自动重开，原订阅ID 1\n通过兑换码 store_d 兑换"
+	n.ExpiresAt = n.ExpiresAt.AddDate(0, 0, 30)
+	n.DeletedAt = sql.NullTime{Time: now.Add(2 * time.Hour), Valid: true}
+	h.Nodes[2] = n
+	h.Purchases["store_d"] = nativeSubscriptionPurchase{ID: 4, Code: "store_d", UserID: 10, GroupID: 20,
+		Type: "subscription", Status: "used", Days: 30, UsedAt: sql.NullTime{Time: now.Add(time.Hour), Valid: true}, Notes: "store order order_d"}
+	_, err := parseLegacyStoreReplacement(n.Notes)
+	require.Error(t, err, "this historical shape must remain invalid as a new assignment")
+	sources, err := h.resolve(2, map[int64]bool{})
+	require.NoError(t, err)
+	require.Equal(t, "store_b", sources.CurrentCode)
+	require.Equal(t, []string{"store_c", "store_d"}, sources.PendingCodes)
+	n.Notes = "通过兑换码 store_b 兑换\n套餐循环检查自动重开，原订阅ID 1\n通过兑换码 store_c 兑换\n通过兑换码 store_d 兑换"
+	h.Nodes[2] = n
+	_, err = h.resolve(2, map[int64]bool{})
+	require.ErrorContains(t, err, "无法唯一确定", "two parent purchases must not be guessed by grant-line order")
 }
 
 func TestStoreLegacyRefundMatchesPHPHash(t *testing.T) {
@@ -90,12 +134,43 @@ func TestStoreLegacyCronRecognizesRevokedHistoricalSuccessor(t *testing.T) {
 	mock.ExpectBegin()
 	mock.ExpectExec(`SELECT pg_advisory_xact_lock`).WithArgs(int64(10)).WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectQuery(`SELECT user_id,group_id,deleted_at`).WithArgs(int64(123)).WillReturnRows(sqlmock.NewRows([]string{"user_id", "group_id", "deleted_at"}).AddRow(10, 20, now))
-	mock.ExpectQuery(`SELECT id,COALESCE\(notes,''\) FROM user_subscriptions`).WithArgs(int64(10), int64(20), int64(123)).WillReturnRows(sqlmock.NewRows([]string{"id", "notes"}).AddRow(124, notes).AddRow(125, "通过兑换码 store_c 兑换\n套餐当前购买码: store_c\n套餐待启用购买码: \n套餐循环检查自动重开，原订阅ID 124"))
+	mock.ExpectQuery(`SELECT id,COALESCE\(notes,''\) FROM user_subscriptions`).WithArgs(int64(10), int64(20), int64(123)).WillReturnRows(sqlmock.NewRows([]string{"id", "notes"}).
+		AddRow(100, "通过兑换码 store_old 兑换\n套餐循环检查自动重开，原订阅ID 99\n通过兑换码 store_later 兑换").
+		AddRow(124, notes).
+		AddRow(125, "通过兑换码 store_c 兑换\n套餐当前购买码: store_c\n套餐待启用购买码: \n套餐循环检查自动重开，原订阅ID 124"))
 	mock.ExpectCommit()
 	sub, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{UserID: 10, GroupID: 20, ValidityDays: 60, Notes: notes})
 	require.NoError(t, err)
 	require.EqualValues(t, 124, sub.ID)
 	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestStoreLegacyCronStillRejectsAmbiguousTargetSuccessors(t *testing.T) {
+	for _, mode := range []string{"duplicate", "wrong_current", "malformed_current"} {
+		t.Run(mode, func(t *testing.T) {
+			svc, mock, _, now := renewalFixture(t)
+			notes := "通过兑换码 store_b 兑换\n套餐当前购买码: store_b\n套餐待启用购买码: store_c\n套餐循环检查自动重开，原订阅ID 123"
+			prior := notes
+			if mode == "wrong_current" {
+				prior = "通过兑换码 store_other 兑换\n套餐循环检查自动重开，原订阅ID 123"
+			}
+			if mode == "malformed_current" {
+				prior = "通过兑换码 store_b 兑换\n通过兑换码 store_c 兑换\n套餐当前购买码: broken\n套餐循环检查自动重开，原订阅ID 123"
+			}
+			history := sqlmock.NewRows([]string{"id", "notes"}).AddRow(124, prior)
+			if mode == "duplicate" {
+				history.AddRow(125, notes)
+			}
+			mock.ExpectBegin()
+			mock.ExpectExec(`SELECT pg_advisory_xact_lock`).WithArgs(int64(10)).WillReturnResult(sqlmock.NewResult(0, 1))
+			mock.ExpectQuery(`SELECT user_id,group_id,deleted_at`).WithArgs(int64(123)).WillReturnRows(sqlmock.NewRows([]string{"user_id", "group_id", "deleted_at"}).AddRow(10, 20, now))
+			mock.ExpectQuery(`SELECT id,COALESCE\(notes,''\) FROM user_subscriptions`).WithArgs(int64(10), int64(20), int64(123)).WillReturnRows(history)
+			mock.ExpectRollback()
+			_, err := svc.AssignSubscription(context.Background(), &AssignSubscriptionInput{UserID: 10, GroupID: 20, ValidityDays: 60, Notes: notes})
+			require.Error(t, err)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
 }
 
 func TestStoreLegacyRefundRejectedBeforeNewCodeCreation(t *testing.T) {
