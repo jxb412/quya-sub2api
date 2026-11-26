@@ -76,7 +76,7 @@ func TestOpenAIZeroPromptInjection_WSIngressImageBridge(t *testing.T) {
 						serverErr <- err
 						return
 					}
-					defer conn.CloseNow()
+					defer func() { _ = conn.CloseNow() }()
 					ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 					ginCtx.Request = r.Clone(r.Context())
 					ginCtx.Request.Header = r.Header.Clone()
@@ -96,7 +96,7 @@ func TestOpenAIZeroPromptInjection_WSIngressImageBridge(t *testing.T) {
 				defer cancel()
 				client, _, err := coderws.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http"), nil)
 				require.NoError(t, err)
-				defer client.CloseNow()
+				defer func() { _ = client.CloseNow() }()
 				frames := []string{
 					`{"type":"response.create","model":"gpt-5.5","instructions":"client-only-guidance","input":"draw a cat"}`,
 					`{"type":"response.create","model":"gpt-5.5","previous_response_id":"resp_zero_prompt_1","instructions":"client-only-guidance","input":"draw a dog","tools":[{"type":"image_generation","output_format":"png"}],"tool_choice":{"type":"image_generation"}}`,

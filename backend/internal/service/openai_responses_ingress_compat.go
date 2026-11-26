@@ -114,10 +114,6 @@ type convertedLegacyResponsesMessages struct {
 	hasReasoningEffort bool
 }
 
-func convertLegacyResponsesMessages(cfg *config.Config, body []byte) (convertedLegacyResponsesMessages, error) {
-	return convertLegacyResponsesMessagesWithPromptPolicy(cfg, body, false)
-}
-
 func convertLegacyResponsesMessagesWithPromptPolicy(cfg *config.Config, body []byte, zeroPromptInjection bool) (convertedLegacyResponsesMessages, error) {
 	var converted convertedLegacyResponsesMessages
 	var chatRequest apicompat.ChatCompletionsRequest

@@ -75,7 +75,7 @@ func readOwnedResetSubscription(ctx context.Context, client renewalSQLClient, id
 	if err != nil {
 		return nativeSubscriptionNode{}, "", false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var n nativeSubscriptionNode
 	var name string
 	var groupOK bool

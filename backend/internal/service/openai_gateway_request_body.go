@@ -1647,10 +1647,6 @@ func normalizeOpenAIResponsesWebSocketCompatibilityBody(body []byte, account *Ac
 	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{ResponsesLite: responsesLite})
 }
 
-func normalizeOpenAIResponsesWebSocketCompatibilityBodyWithConfig(cfg *config.Config, body []byte, account *Account, responsesLite bool) ([]byte, bool, error) {
-	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{Config: cfg, ResponsesLite: responsesLite})
-}
-
 func normalizeOpenAIResponsesWebSocketCompatibilityBodyWithPromptPolicy(cfg *config.Config, body []byte, account *Account, responsesLite, zeroPromptInjection bool) ([]byte, bool, error) {
 	return normalizeOpenAIResponsesCompatibilityBodyWithOptions(body, account, openAIResponsesCompatibilityOptions{Config: cfg, ResponsesLite: responsesLite, ZeroPromptInjection: zeroPromptInjection})
 }

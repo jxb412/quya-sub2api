@@ -117,12 +117,8 @@ func upstreamRoutingModel(account *Account, body []byte, defaultMappedModel stri
 	return resolveMappedUpstreamModel(account, body, defaultMappedModel)
 }
 
-// convertResponsesShapedChatBody 把发到 /v1/chat/completions 的 Responses 形状
+// convertResponsesShapedChatBodyWithPromptPolicy 把发到 /v1/chat/completions 的 Responses 形状
 // 请求体（Cursor 兼容）转换为 Chat Completions 请求体。
-func (s *OpenAIGatewayService) convertResponsesShapedChatBody(body []byte) ([]byte, error) {
-	return s.convertResponsesShapedChatBodyWithPromptPolicy(body, false)
-}
-
 func (s *OpenAIGatewayService) convertResponsesShapedChatBodyWithPromptPolicy(body []byte, zeroPromptInjection bool) ([]byte, error) {
 	var responsesReq apicompat.ResponsesRequest
 	if err := json.Unmarshal(body, &responsesReq); err != nil {

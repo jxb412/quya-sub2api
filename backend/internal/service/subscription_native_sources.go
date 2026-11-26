@@ -87,7 +87,7 @@ func resolveNativeSubscriptionSources(ctx context.Context, client renewalSQLClie
 	for rows.Next() {
 		var n nativeSubscriptionNode
 		if err = rows.Scan(&n.ID, &n.UserID, &n.GroupID, &n.StartsAt, &n.ExpiresAt, &n.Status, &n.Notes, &n.DeletedAt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		h.Nodes[n.ID] = n
@@ -96,7 +96,7 @@ func resolveNativeSubscriptionSources(ctx context.Context, client renewalSQLClie
 		}
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}
