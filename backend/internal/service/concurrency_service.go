@@ -244,6 +244,10 @@ type cachedAccountLoadBatch struct {
 
 // NewConcurrencyService 创建并发控制服务。
 func NewConcurrencyService(cache ConcurrencyCache) *ConcurrencyService {
+	// 2026-11-28: record the process-owned slot prefix so rollout/rollback can
+	// reclaim only a confirmed stopped process's leases in a shared Redis.
+	// This is a random internal identifier, never a credential or customer ID.
+	logger.L().Info("concurrency.process_started", zap.String("slot_prefix", RequestIDPrefix()))
 	svc := &ConcurrencyService{
 		cache:            cache,
 		accountLoadCache: make(map[string]cachedAccountLoadBatch),
