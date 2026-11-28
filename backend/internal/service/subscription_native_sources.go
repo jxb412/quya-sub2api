@@ -122,7 +122,7 @@ func resolveNativeSubscriptionSources(ctx context.Context, client renewalSQLClie
 		var p nativeSubscriptionPurchase
 		var user, group sql.NullInt64
 		if err = rows.Scan(&p.ID, &p.Code, &p.Type, &p.Status, &user, &group, &p.Days, &p.UsedAt, &p.Notes); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		p.UserID = user.Int64
@@ -134,7 +134,7 @@ func resolveNativeSubscriptionSources(ctx context.Context, client renewalSQLClie
 		h.Purchases[p.Code] = p
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -146,21 +146,21 @@ func resolveNativeSubscriptionSources(ctx context.Context, client renewalSQLClie
 		var raw []byte
 		var receipt SubscriptionRenewalActivationReceipt
 		if err = rows.Scan(&raw); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		if err = json.Unmarshal(raw, &receipt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		if receipt.UserID != userID || receipt.GroupID != groupID {
-			rows.Close()
+			_ = rows.Close()
 			return nil, nativeSourceConflict("重置回执归属异常")
 		}
 		h.Receipts[receipt.NewSubscriptionID] = receipt
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}

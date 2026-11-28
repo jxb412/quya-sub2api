@@ -101,7 +101,7 @@ func recoverOpenAINonStreamingOutput(bodyText, model string) (response []byte, u
 				if eventType == "response.refusal.delta" {
 					part.kind = "refusal"
 				}
-				part.delta.WriteString(event.Get("delta").String())
+				_, _ = part.delta.WriteString(event.Get("delta").String())
 			case "response.output_text.done", "response.refusal.done":
 				part.kind, part.complete = "output_text", event.Get("text").String()
 				if eventType == "response.refusal.done" {
