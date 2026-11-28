@@ -39,9 +39,10 @@ func TestOpenAISyncUpstreamStreamResponses(t *testing.T) {
 						}
 						responseBody = "data: {\"type\":\"response.usage\",\"usage\":{\"input_tokens\":12,\"output_tokens\":7}}\n\ndata: {\"type\":\"response.completed\",\"response\":" + final + "}\n\n"
 					}
-					if kind == "missing_terminal" {
+					switch kind {
+					case "missing_terminal":
 						responseBody = nonstreamMissingTerminalDelta
-					} else if kind == "no_output" {
+					case "no_output":
 						responseBody = ": keepalive\n\n"
 					}
 					upstream.resp = &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(responseBody))}

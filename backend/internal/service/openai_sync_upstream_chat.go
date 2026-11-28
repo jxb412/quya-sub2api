@@ -117,7 +117,7 @@ func aggregateSyncUpstreamChat(body, requestBody []byte, model string) ([]byte, 
 				for key, dst := range map[string]*strings.Builder{"content": &choice.content, "refusal": &choice.refusal, "reasoning_content": &choice.reasoningContent, "reasoning": &choice.reasoning} {
 					v := delta.Get(key)
 					if v.Type == gjson.String {
-						dst.WriteString(v.Str)
+						_, _ = dst.WriteString(v.Str)
 					} else if v.Exists() && v.Type != gjson.Null {
 						parseErr = errors.New("unsupported chat delta content")
 						return
