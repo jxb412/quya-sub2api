@@ -485,7 +485,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 			imageCount = result.imageCount
 			imageOutputSizes = result.imageOutputSizes
 		} else {
-			result, handleErr := s.handleNonStreamingResponsePassthrough(ctx, resp, c, account, reqModel, upstreamPassthroughModel)
+			result, handleErr := s.handleNonStreamingResponsePassthrough(ctx, resp, c, account, reqModel, upstreamPassthroughModel, body)
 			if handleErr != nil {
 				if retryBody, fallbackModel, retry := s.applyOpenAIPassthroughCompactFallbackFromSignal(
 					c, account, requestedModel, body, handleErr, compactModelFallbackRetried, resp,
@@ -2580,6 +2580,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	account *Account,
 	originalModel string,
 	mappedModel string,
+	requestBody ...[]byte,
 ) (*openaiNonStreamingResultPassthrough, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
@@ -2599,11 +2600,11 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 	// Some upstreams (e.g. other sub2api instances) may return SSE even when
 	// stream=false was requested. Without this conversion the client would
 	// receive raw SSE text or a terminal event with empty output.
-	// The ChatGPT OAuth upstream may omit Content-Type while still sending SSE,
-	// so OAuth accounts also fall back to the body framing (same rule as
-	// handleNonStreamingResponse).
-	if isEventStreamResponse(resp.Header) || (account != nil && account.Type == AccountTypeOAuth && bodyHasSSEFraming(body)) {
-		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+	// 2026-11-28: API-key relays can also omit/mislabel Content-Type. Physical
+	// SSE framing is safe to recognize for all accounts (not JSON text literals),
+	// and must not bypass terminal validation or usage extraction.
+	if isEventStreamResponse(resp.Header) || bodyHasSSEFraming(body) {
+		return s.handlePassthroughSSEToJSON(resp, c, account, body, originalModel, mappedModel, requestBody...)
 	}
 
 	usage := &OpenAIUsage{}
@@ -2655,7 +2656,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponsePassthrough(
 // response for the passthrough path. It mirrors handleSSEToJSON while
 // preserving passthrough payloads, except compact-only model remapping may
 // rewrite model fields back to the original requested model.
-func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string) (*openaiNonStreamingResultPassthrough, error) {
+func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel string, mappedModel string, requestBody ...[]byte) (*openaiNonStreamingResultPassthrough, error) {
 	bodyText := string(body)
 	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
 	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
@@ -2677,51 +2678,51 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 	}
 
 	usage := s.parseSSEUsageFromBody(bodyText)
-	if ok {
-		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
-			*usage = parsedUsage
+	recovered := !ok
+	responseID := ""
+	if recovered {
+		finalResponse, responseID, ok = s.recoverOpenAINonStreamingResponse(resp, c, account, true, bodyText, terminalType, mappedModel, usage, requestBody...)
+		if !ok {
+			return nil, s.writeOpenAINonStreamingIncompleteError(resp, c, account, true, bodyText, terminalType, usage)
 		}
-		// When the terminal event has an empty output array, reconstruct
-		// output from accumulated delta events so the client gets full content.
-		if len(gjson.GetBytes(finalResponse, "output").Array()) == 0 {
-			if outputJSON, reconstructed := reconstructResponseOutputFromSSE(bodyText); reconstructed {
-				if patched, err := sjson.SetRawBytes(finalResponse, "output", outputJSON); err == nil {
-					finalResponse = patched
-				}
+	} else if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
+		*usage = parsedUsage
+	}
+	// When the terminal event has an empty output array, reconstruct
+	// output from accumulated delta events so the client gets full content.
+	if len(gjson.GetBytes(finalResponse, "output").Array()) == 0 {
+		if outputJSON, reconstructed := reconstructResponseOutputFromSSE(bodyText); reconstructed {
+			if patched, err := sjson.SetRawBytes(finalResponse, "output", outputJSON); err == nil {
+				finalResponse = patched
 			}
 		}
-		finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
-		body = finalResponse
-		if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
-			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
-		}
-		// Correct tool calls in final response
-		body = s.correctToolCallsInResponseBody(body)
-		restoredBody, restoreErr := restoreOpenAIResponsesNamespacePayload(c, body)
-		if restoreErr != nil {
-			return nil, fmt.Errorf("restore OpenAI passthrough namespace response: %w", restoreErr)
-		}
-		restoredBody = restoreCodexToolNamesFromContext(c, restoredBody)
-		body = restoreOpenAIResponsesInstructionsEchoInResponse(c, restoredBody)
-	} else {
-		if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
-			bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
-		}
-		bodyText = restoreOpenAIResponsesInstructionsEchoInSSEBody(c, bodyText)
-		body = []byte(bodyText)
 	}
+	finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
+	body = finalResponse
+	if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
+		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+	}
+	// Correct tool calls in final response
+	body = s.correctToolCallsInResponseBody(body)
+	restoredBody, restoreErr := restoreOpenAIResponsesNamespacePayload(c, body)
+	if restoreErr != nil {
+		return nil, fmt.Errorf("restore OpenAI passthrough namespace response: %w", restoreErr)
+	}
+	restoredBody = restoreCodexToolNamesFromContext(c, restoredBody)
+	body = restoreOpenAIResponsesInstructionsEchoInResponse(c, restoredBody)
 
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, usage, terminalType, false)
 
 	contentType := "application/json; charset=utf-8"
-	if !ok {
-		contentType = resp.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "text/event-stream"
-		}
+	bridged := false
+	if recovered {
+		bridged = writeOpenAIRecoveredCompactSSE(c, body)
+	} else {
+		responseID = extractOpenAIResponseIDFromJSONBytes(body)
+		bridged = writeOpenAICompactSSEBridge(c, resp.StatusCode, body)
 	}
-	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
+	if !bridged {
 		// 上游的 Content-Type（text/event-stream）已复制到响应头，而 c.Data
 		// 不会覆盖已存在的 Content-Type，这里需显式设置为聚合后的类型。
 		c.Writer.Header().Set("Content-Type", contentType)
@@ -2731,7 +2732,7 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 	return &openaiNonStreamingResultPassthrough{
 		OpenAIUsage:      usage,
 		usage:            usage,
-		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
+		responseID:       responseID,
 		imageCount:       countOpenAIImageOutputsFromSSEBody(bodyText),
 		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
 	}, nil

@@ -44,6 +44,12 @@ jobs:
       - name: Verify risk-control account scope
         working-directory: backend
         run: go test -tags=unit ./internal/service -run 'Test.*ContentModeration.*(Account|Plan|Scope)' -count=1
+      # 2026-11-28: publish only after sync-account routing, interrupted response
+      # recovery, and actual/estimated usage through local billing have passed.
+      - name: Verify synchronous routing and recovered response billing
+        working-directory: backend
+        run: |
+          go test -tags=unit ./internal/service ./internal/repository ./internal/handler -run 'Test.*(DisableSync|InboundPolicySync|NonStreaming|HandleSSEToJSON|HandlePassthroughSSEToJSON|RecoverOpenAINonStreamingOutput|EstimateOpenAINonStreamingRecoveredUsage|Scheduler.*Quya|Snapshot.*Quya)' -count=1 -timeout=240s
       # 2026-11-26: gate publication on the per-group zero-added-prompt policy,
       # including real PostgreSQL persistence and the lightweight auth SELECT.
       - name: Verify zero-added-prompt forwarding and management

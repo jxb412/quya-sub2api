@@ -1774,7 +1774,10 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
-	if !openAIInboundAccountAllowed(ctx, account) {
+	if reason := openAIInboundAccountRestrictionReason(ctx, account); reason != "" {
+		if reason == OpenAIInboundSyncRestrictionReason {
+			return false, string(reason)
+		}
 		return false, "inbound_protocol_or_client_restricted"
 	}
 	if source, ok := CompositeRouteSourceFromContext(ctx); ok && source == CompositeRouteSourceAccount {

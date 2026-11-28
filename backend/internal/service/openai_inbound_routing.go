@@ -10,6 +10,8 @@ import (
 
 const OpenAIInboundProtocolRestrictionReason GatewayFailureReason = "openai_inbound_protocol_restriction"
 
+const OpenAIInboundSyncRestrictionReason GatewayFailureReason = "openai_sync_request_restriction"
+
 // OpenAIInboundProtocol identifies the public protocol used by the client.
 // It is intentionally separate from OpenAIEndpointCapability, which describes
 // what an upstream account can do after the gateway has selected it.
@@ -29,20 +31,22 @@ type OpenAIInboundRequestFilter func(*Account) bool
 type openAIInboundRequestContextKey struct{}
 
 type openAIInboundRequestPolicy struct {
-	Protocol OpenAIInboundProtocol
-	Filter   OpenAIInboundRequestFilter
+	Protocol          OpenAIInboundProtocol
+	Filter            OpenAIInboundRequestFilter
+	ClientRequestType RequestType
 }
 
 // WithOpenAIInboundRequestPolicy carries the public protocol and any
 // account-level client policy into all scheduler paths, including sticky,
 // legacy, and advanced load-aware selection.
-func WithOpenAIInboundRequestPolicy(ctx context.Context, protocol OpenAIInboundProtocol, filter OpenAIInboundRequestFilter) context.Context {
+func WithOpenAIInboundRequestPolicy(ctx context.Context, protocol OpenAIInboundProtocol, filter OpenAIInboundRequestFilter, clientRequestType RequestType) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	return context.WithValue(ctx, openAIInboundRequestContextKey{}, openAIInboundRequestPolicy{
-		Protocol: protocol,
-		Filter:   filter,
+		Protocol:          protocol,
+		Filter:            filter,
+		ClientRequestType: clientRequestType,
 	})
 }
 
@@ -55,17 +59,38 @@ func openAIInboundRequestPolicyFromContext(ctx context.Context) (openAIInboundRe
 }
 
 func openAIInboundAccountAllowed(ctx context.Context, account *Account) bool {
+	return openAIInboundAccountRestrictionReason(ctx, account) == ""
+}
+
+func openAIInboundAccountRestrictionReason(ctx context.Context, account *Account) GatewayFailureReason {
 	policy, ok := openAIInboundRequestPolicyFromContext(ctx)
 	if !ok || account == nil {
-		return true
+		return ""
 	}
 	if !account.SupportsOpenAIInboundProtocol(policy.Protocol) {
-		return false
+		return OpenAIInboundProtocolRestrictionReason
+	}
+	// 2026-11-28: reserve opted-in accounts for streaming clients before sticky,
+	// snapshot and load-aware selection. Use the original client mode: OAuth's
+	// later stream=true rewrite and HTTP-to-WS adaptation must not bypass this.
+	// Unknown is used by auxiliary token-count requests; WS is never HTTP sync.
+	if policy.ClientRequestType == RequestTypeSync && account.IsOpenAISyncDisabled() {
+		return OpenAIInboundSyncRestrictionReason
 	}
 	if policy.Filter != nil && !policy.Filter(account) {
+		return OpenAIInboundProtocolRestrictionReason
+	}
+	return ""
+}
+
+// IsOpenAISyncDisabled is an opt-in client-call restriction (2026-11-28),
+// independent of upstream transport. Missing/false flags preserve old routing.
+func (a *Account) IsOpenAISyncDisabled() bool {
+	if a == nil || !a.IsOpenAI() || a.Extra == nil {
 		return false
 	}
-	return true
+	enabled, ok := a.Extra["openai_disable_sync"].(bool)
+	return ok && enabled
 }
 
 // SupportsOpenAIInboundProtocol applies account-level public protocol routing.
@@ -158,16 +183,21 @@ func openAIInboundProtocolFailover(c *gin.Context, account *Account) *UpstreamFa
 	if c == nil || c.Request == nil || account == nil {
 		return nil
 	}
-	if openAIInboundAccountAllowed(c.Request.Context(), account) {
+	reason := openAIInboundAccountRestrictionReason(c.Request.Context(), account)
+	if reason == "" {
 		return nil
+	}
+	message := "No account in this group accepts the current client protocol"
+	if reason == OpenAIInboundSyncRestrictionReason {
+		message = "No account in this group accepts synchronous client requests"
 	}
 	return &UpstreamFailoverError{
 		StatusCode:             http.StatusForbidden,
 		Scope:                  GatewayFailureScopeRequest,
-		Reason:                 OpenAIInboundProtocolRestrictionReason,
+		Reason:                 reason,
 		RequestScopedTransient: true,
 		NextAccountAction:      NextAccountRetry,
 		ClientStatusCode:       http.StatusForbidden,
-		ClientMessage:          "No account in this group accepts the current client protocol",
+		ClientMessage:          message,
 	}
 }

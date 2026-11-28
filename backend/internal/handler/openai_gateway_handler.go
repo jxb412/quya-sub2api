@@ -57,7 +57,7 @@ type OpenAIGatewayHandler struct {
 // before account selection. The small per-request cache avoids re-running the
 // Codex detector for every restricted account while preserving account-specific
 // app-server/whitelist decisions.
-func (h *OpenAIGatewayHandler) bindOpenAIInboundRequestPolicy(c *gin.Context, protocol service.OpenAIInboundProtocol, body []byte) {
+func (h *OpenAIGatewayHandler) bindOpenAIInboundRequestPolicy(c *gin.Context, protocol service.OpenAIInboundProtocol, body []byte, clientRequestType service.RequestType) {
 	if h == nil || h.gatewayService == nil || c == nil || c.Request == nil {
 		return
 	}
@@ -79,7 +79,7 @@ func (h *OpenAIGatewayHandler) bindOpenAIInboundRequestPolicy(c *gin.Context, pr
 		allowedCacheMu.Unlock()
 		return allowed
 	})
-	c.Request = c.Request.WithContext(service.WithOpenAIInboundRequestPolicy(c.Request.Context(), protocol, filter))
+	c.Request = c.Request.WithContext(service.WithOpenAIInboundRequestPolicy(c.Request.Context(), protocol, filter, clientRequestType))
 }
 
 type openAIWSTurnChannelMappingSnapshot struct {
@@ -476,11 +476,19 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 
 	setOpsRequestContext(c, "", false)
 	sessionHashBody := body
+	// 2026-11-28: capture client stream before compact/OAuth rewrites so an
+	// account's disable-sync policy filters candidates using the actual caller.
+	clientRequestType := service.RequestTypeFromLegacy(gjson.GetBytes(body, "stream").Bool(), false)
 	body, ok = h.normalizeOpenAIResponsesCompactRequest(c, reqLog, body)
 	if !ok {
 		return
 	}
 	legacyCompact := service.IsOpenAIResponsesCompactPath(c)
+	if legacyCompact {
+		// Legacy compact is a unary operation even when its compatibility input
+		// carried stream=true. Native streaming compaction v2 remains streaming.
+		clientRequestType = service.RequestTypeSync
+	}
 	nativeV2 := isBareOpenAIResponsesPath(c) && isOpenAIRemoteCompactionV2Request(body)
 	if nativeV2 {
 		// 原生 v2 压缩出站前补注 x-codex-beta-features: remote_compaction_v2，
@@ -587,7 +595,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	service.EnableOpenAICodexRestrictionFailover(c)
-	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, body)
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, body, clientRequestType)
 
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); decision != nil && !decision.AllowNextStage {
 		h.openAISecurityAuditError(c, decision)
@@ -1306,7 +1314,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, reqStream)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(reqStream, false)))
 	service.EnableOpenAICodexRestrictionFailover(c)
-	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolMessages, body)
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolMessages, body, service.RequestTypeFromLegacy(reqStream, false))
 
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolAnthropicMessages, reqModel, body); decision != nil && !decision.AllowNextStage {
 		h.anthropicSecurityAuditError(c, decision)
@@ -1708,7 +1716,7 @@ func (h *OpenAIGatewayHandler) handleAnthropicFailoverExhausted(c *gin.Context, 
 	if failoverErr != nil {
 		copyFailoverRetryAfter(c, failoverErr.ResponseHeaders)
 	}
-	if failoverErr != nil && (failoverErr.Reason == service.OpenAICodexClientRestrictionReason || failoverErr.Reason == service.OpenAIInboundProtocolRestrictionReason) {
+	if failoverErr != nil && (failoverErr.Reason == service.OpenAICodexClientRestrictionReason || failoverErr.Reason == service.OpenAIInboundProtocolRestrictionReason || failoverErr.Reason == service.OpenAIInboundSyncRestrictionReason) {
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
 			message = "No account in this group accepts the current client"
@@ -2734,7 +2742,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, true)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeWSV2))
 	service.EnableOpenAICodexRestrictionFailover(c)
-	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, firstMessage)
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, firstMessage, service.RequestTypeWSV2)
 	ctx = c.Request.Context()
 
 	if decision := h.checkSecurityAuditStage(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, firstMessage, "first_turn"); decision != nil && !decision.AllowNextStage {
@@ -3758,7 +3766,7 @@ func (h *OpenAIGatewayHandler) handleFailoverExhausted(c *gin.Context, failoverE
 		h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", message, streamStarted)
 		return
 	}
-	if failoverErr.Reason == service.OpenAICodexClientRestrictionReason || failoverErr.Reason == service.OpenAIInboundProtocolRestrictionReason {
+	if failoverErr.Reason == service.OpenAICodexClientRestrictionReason || failoverErr.Reason == service.OpenAIInboundProtocolRestrictionReason || failoverErr.Reason == service.OpenAIInboundSyncRestrictionReason {
 		message := strings.TrimSpace(failoverErr.ClientMessage)
 		if message == "" {
 			message = "No account in this group accepts the current client"

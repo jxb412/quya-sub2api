@@ -104,6 +104,7 @@ func TestOpenAIInboundRequestPolicyFiltersBeforeSchedulerEligibility(t *testing.
 		context.Background(),
 		OpenAIInboundProtocolResponses,
 		func(account *Account) bool { return account == allowed },
+		RequestTypeUnknown,
 	)
 	require.False(t, openAIInboundAccountAllowed(ctx, restricted))
 	require.True(t, openAIInboundAccountAllowed(ctx, allowed))

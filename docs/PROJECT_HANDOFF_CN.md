@@ -8,7 +8,7 @@
 
 | 项目 | 地址或说明 |
 |---|---|
-| 本地目录 | `D:\btc\st\quya-sub2api` |
+| 本地目录 | `<LOCAL_REPOSITORY>` |
 | 个人仓库 | `https://github.com/jxb412/quya-sub2api` |
 | 上游仓库 | `https://github.com/Wei-Shaw/sub2api` |
 | 默认分支 | `main` |
@@ -252,15 +252,15 @@ WebSocket 并发与额度配额等多项修复。
 
 ### 0.4.15 升级执行记录（2026-10-15）
 
-测试机 `154.217.250.100`：备份 `/www/wwwroot/quya-sub2api-dev-runtime/backups/20261014-071145/`
+测试机 `<TEST_SERVER>`：备份 `<BACKUP_DIRECTORY>`
 （compose、`.env`、`sub2api_dev-pre-0.4.15.dump`），手工执行并登记 242–245 后切镜像，
 容器 healthy，健康检查、管理员登录、公开配置接口均正常。
 
-正式机 `142.54.187.42` 与 `107.150.62.202` 使用同一个数据库（142 本机 PostgreSQL 18，
+正式机 `<PRODUCTION_PRIMARY>` 与 `<PRODUCTION_SECONDARY>` 使用同一个数据库（142 本机 PostgreSQL 18，
 库 `sub2api`，两台应用都指向它），因此迁移只执行一次。
 
 - 升级前全量备份：`pg_dump -Fd -j 8 -Z 6` 输出到
-  `/www/wwwroot/sb/backups/0.4.15-20261014T155755Z/sub2api.d`（9.8 GB，rc=0）；两台应用
+  `<BACKUP_DIRECTORY>`（9.8 GB，rc=0）；两台应用
   目录的 compose、`.env`、镜像 ID、容器清单也备份在同前缀目录下。
 - 242–245 在维护步骤中手工执行并登记 `schema_migrations`（校验和与仓库 blob 一致）：
   `groups.i18n`（jsonb NOT NULL DEFAULT `{}`）与 `gemini_cached_contents`（含 5 个索引）
@@ -297,10 +297,10 @@ Anthropic Base URL 修复、可配置最小输出 token、composite OAuth 歧义
 
 - 正式镜像 `ghcr.io/jxb412/sub2api:0.4.16`，两台服务器拉取的镜像 ID 与 digest
   均为 `sha256:a5a03cc2ac42d49bb77b5d0f39c47d6625c5ae4693a3ba46ad1da7e473b55edb`。
-- 142 备份目录：`/www/wwwroot/sb/backups/0.4.16-20261017T105247Z/`，包含 compose、
+- 主生产节点备份目录：`<BACKUP_DIRECTORY>`，包含 compose、
   `.env`、旧容器 inspect、旧镜像 inspect 和 9.8 GB 的 PostgreSQL 目录格式全量备份
   （`pg_dump -Fd -j 8 -Z 6`，rc=0）。
-- 107 备份目录：`/www/wwwroot/sb/backups/0.4.16-20261017T105249Z/`，包含 compose、
+- 备用生产节点备份目录：`<BACKUP_DIRECTORY>`，包含 compose、
   `.env`、旧容器 inspect 和旧镜像 inspect。
 - 两台在同一维护窗口更新 compose 标签并执行
   `docker compose up -d --no-deps sub2api`，只重建 `sub2api-sb`，未重启 PostgreSQL、
@@ -339,15 +339,15 @@ OpenAI API Key 客户端限制开关、`database.initialization_enabled=false`�
 
 ### 号池 vm2api 升级记录（2026-10-15）
 
-生产 `107.150.62.202` 的 `vm2api`（`/opt/vm2api`，host 网络 8787）从 v1.3.159 升到上游最新
+生产 `<PRODUCTION_SECONDARY>` 的 `vm2api`（`<VM_DEPLOY_DIRECTORY>`，host 网络 8787）从 v1.3.159 升到上游最新
 `v1.3.169`。
 
 - 补丁现状：#371 / #384 / #386 / #389 早已进上游，**#412（批量 pool-policy + 可 PATCH 权重）
   从 v1.3.168 起也在上游**；只剩 `POST /api/panel/vms/:id/credential/clear` 需要本地补丁。
-  已按 v1.3.169 上游 `panel-routes.mjs` 重打（+84 行），放 `/opt/vm2api/patches/v1.3.169/`，
+  已按 v1.3.169 上游 `panel-routes.mjs` 重打（+84 行），放 `<VM_DEPLOY_DIRECTORY>/patches/v1.3.169/`，
   compose 只读挂载覆盖。
-- 备份：`/opt/vm2api/backups/pre-v1.3.169-<stamp>/`（compose、`.env`、`src/config`、`patches`），
-  数据库一致快照 `/root/vm2api-db-snapshots/kin-pre169-20261014T165749Z.db`（2.9 GB，`VACUUM INTO`）。
+- 备份：`<BACKUP_DIRECTORY>`（compose、`.env`、`src/config`、`patches`），
+  数据库一致快照 `<DEPLOY_DIRECTORY>`（2.9 GB，`VACUUM INTO`）。
 - `docker compose up -d --no-deps vm2api` 只重建控制面容器。`src/config/distill-rules.json`
   需要手工换成新版默认：旧文件是 159 版默认 + 一句 `<think>` 针，159 代码加载时会丢弃这句，
   169 会保留，直接沿用会让 NewAPI 类转发误 403。`bin/` 与 `share/wrap-cli` 由镜像入口自动刷新，
@@ -375,18 +375,18 @@ OpenAI API Key 客户端限制开关、`database.initialization_enabled=false`�
 - sub2api 侧副作用如预期：重启瞬间 8787 refused，`vm2api号池` / `VM2号池 LUNA` 被
   `openai.account_temp_unscheduled_transport` 临时停调度（until 17:01 UTC），`16:56` 已自动清空；
   恢复后 15 分钟内两账号分别接到 755 / 29 条请求，共 3804 条系统请求。20 分钟窗口内
-  `107.150.62.202:8787` 的传输错误 23 次，分布在重启窗口与重启前（16:36 / 16:40 各有一批，
+  `<PRODUCTION_SECONDARY>:<VM_HTTP_PORT>` 的传输错误 23 次，分布在重启窗口与重启前（16:36 / 16:40 各有一批，
   属既有的代理偶发超时），重启后最近 5 分钟无新增。
-- 备份：`/opt/vm2api/backups/pre-v1.3.174-20261015T112515Z/`（compose、`.env`、`vms-json/` 103 个槽记录）。
+- 备份：`<BACKUP_DIRECTORY>`（compose、`.env`、`vms-json/` 103 个槽记录）。
 - 配置核对：v1.3.174 镜像 `src/config` 默认值与现网逐文件比对，`distill-rules.json`
   （169 时手工换过的那份）、`intercept-rules.json`、`gateway-v2.example.json` 哈希一致，无需再动；
   `routing.json` 是运行态文件，按上游要求不覆盖（缺 `notify.wecom` 块，企业微信通道默认关，面板保存一次即可）。
 - v1.3.170–v1.3.174 无数据库迁移、无新依赖；v1.3.170 首次启动会把挂在 `px-local` 上的节点槽
   迁到 `px-local-<节点>` 并改写 `vms/<id>.json` 的 `proxy.id`。
-- 生效命令（待用户放行后再执行）：`cd /opt/vm2api && docker compose up -d --no-deps vm2api`。
+- 生效命令（待用户放行后再执行）：`cd "<VM_DEPLOY_DIRECTORY>" && docker compose up -d --no-deps vm2api`。
   副作用同前：8787 短暂 refused，sub2api 会把 `vm2api号池` / `VM2号池 LUNA` 临时停调度 10 分钟。
 - 仓库：`jxb412/vm2api` 的 `main` 已快进到上游 `38c7fb9`（v1.3.174）并推送；本地工作树
-  `D:\btc\st\.tmp\vm2api-pr` 的 `main` 同点，PR 分支 `feat/slot-credential-clear` 保留备查。
+  `<LOCAL_VM_WORKTREE>` 的 `main` 同点，PR 分支 `feat/slot-credential-clear` 保留备查。
 
 ### 号池 vm2api 升到 v1.3.175（2026-10-16）
 
@@ -397,10 +397,10 @@ OpenAI API Key 客户端限制开关、`database.initialization_enabled=false`�
   - 模型测试失败时突出错误码与 HTTP 状态，5xx 自动诊断并给出恢复入口。
   - 看门狗补缺：容器缺失或已退出时整槽开机；每轮检查本机 kin-egress 与集群 docker 桥 / 槽位中继并拉起；
     控制面启动后对「记录为运行中但容器不存在或未运行」的槽补开机一次（`kernel_watchdog.enabled=false` 时不做）。
-- 107 生产机升级：只重建 `vm2api` 控制面（`cd /opt/vm2api && docker compose up -d --no-deps vm2api`），
+- 备用生产节点生产机升级：只重建 `vm2api` 控制面（`cd "<VM_DEPLOY_DIRECTORY>" && docker compose up -d --no-deps vm2api`），
   槽位容器全部保留、未重建；`.env` → `VM2API_IMAGE_TAG=v1.3.175`，镜像 digest
   `sha256:47aea38e5cbe918a0bb9e0172c4c31561455553023501b40db43cc8a97693806`。
-- 备份：`/opt/vm2api/backups/pre-v1.3.175-20261015T170841Z/`（compose、`.env`、`vms-json/` 103 个槽记录）。
+- 备份：`<BACKUP_DIRECTORY>`（compose、`.env`、`vms-json/` 103 个槽记录）。
 - 配置核对：v1.3.174→v1.3.175 的 `src/config` 四个文件（`distill-rules.json`、`intercept-rules.json`、
   `gateway-v2.example.json`、`routing.json`）零差异，镜像内哈希与现网一致，未手改配置；
   `routing.json`、`vms/`、`data/`、`.env` 全部保留。
@@ -414,7 +414,7 @@ OpenAI API Key 客户端限制开关、`database.initialization_enabled=false`�
   实际 17:14:30 就被一次成功请求清空并恢复调度（中断 5 分 18 秒）。`VM2号池 LUNA`(48044) 只断了 35 秒，
   17:09:47 即恢复。17:22 复查两侧 `temp_unschedulable_until` 均为空、`last_used` 实时更新，号池调度正常。
 - 回滚：`.env` 改回 `VM2API_IMAGE_TAG=v1.3.174`，重复同一条 `docker compose up -d --no-deps vm2api`。
-- 仓库：本地工作树 `D:\btc\st\.tmp\vm2api-pr` 的 `main` 已快进到上游 `60747c7`（含 v1.3.175 提交 `743652a`）。
+- 仓库：本地工作树 `<LOCAL_VM_WORKTREE>` 的 `main` 已快进到上游 `60747c7`（含 v1.3.175 提交 `743652a`）。
 
 ## 上游同步
 

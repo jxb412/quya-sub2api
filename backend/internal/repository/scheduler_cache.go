@@ -1557,6 +1557,8 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		// 缺少这些字段会让精简快照放行不兼容账号，消耗后续 failover 次数。
 		"openai_inbound_capabilities",
 		"openai_responses_only",
+		// 2026-11-28: preserve the account's client sync restriction in snapshots.
+		"openai_disable_sync",
 		"codex_cli_only",
 		"codex_cli_only_allow_app_server",
 		// 透传开关必须进投影：候选过滤(ListSchedulableAccounts)读的是本投影，

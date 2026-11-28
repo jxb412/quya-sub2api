@@ -414,8 +414,8 @@ func openAICompatibleAccountEligibilityFailureReasonBeforeProfit(ctx context.Con
 	// before sticky or load-aware scoring. This keeps incompatible accounts out
 	// of the candidate pool instead of selecting them and discovering the policy
 	// only during forwarding.
-	if !openAIInboundAccountAllowed(ctx, account) {
-		return string(OpenAIInboundProtocolRestrictionReason)
+	if reason := openAIInboundAccountRestrictionReason(ctx, account); reason != "" {
+		return string(reason)
 	}
 	if account.IsOpenAI() {
 		if paused, reason := shouldAutoPauseOpenAIAccountByQuota(ctx, account); paused {

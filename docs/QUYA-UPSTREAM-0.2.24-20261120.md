@@ -43,7 +43,7 @@
 `backend/cmd/server/VERSION` 读取 `0.4.28-quya.1`，添加提交对应的 ctxpool 后缀，
 避免镜像沿用旧版本标签。
 
-只部署测试服务 `154.217.250.100:18081`，沿用独立数据库
+只部署测试服务 `<TEST_SERVER>:<TEST_HTTP_PORT>`，沿用独立数据库
 `sub2api_ctxpool_test` 与 Redis DB2；不得因此更新正式服务器或切换 Redis。
 测试部署前确认实际运行基线及备份原 Compose，失败时使用原镜像恢复。
 

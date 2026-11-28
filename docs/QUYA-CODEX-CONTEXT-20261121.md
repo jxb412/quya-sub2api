@@ -26,7 +26,7 @@ Unicode-escaped names, strict matching, malformed inputs, real and ambiguous too
 history, idempotence, large numeric metadata, and Chat/Anthropic conversion. The
 image workflow runs the Codex context regressions before publishing the image.
 
-Deployment scope: 154.217.250.100:18081 test instance only. Production promotion
+Deployment scope: <TEST_SERVER>:<TEST_HTTP_PORT> test instance only. Production promotion
 is deferred as requested. Deployment and live verification evidence is retained
 outside the repository under the task artifacts directory; credentials must not
 be committed.

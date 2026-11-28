@@ -48,6 +48,25 @@ coverage/
 .env
 .env.*
 !.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# 2026-11-28: never include local operations evidence or credentials in builds.
+/docs-local/
+/artifacts/
+/.codex/
+/.tmp/
+/output/
+/exports/
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+backend/.installed
+backend/data/
+backend/config.yaml
+deploy/config.yaml
 
 # 本地闭源插件目录可能包含发布签名私钥，绝不能进入 Docker 构建上下文。
 /plugins/

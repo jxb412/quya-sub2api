@@ -1708,7 +1708,7 @@ func openAICacheCreationTTLTokensFromUsage(value gjson.Result, aggregate int) (i
 	return 0, 0
 }
 
-func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {
+func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, resp *http.Response, c *gin.Context, account *Account, originalModel, mappedModel string, requestBody ...[]byte) (*openaiNonStreamingResult, error) {
 	body, err := ReadUpstreamResponseBody(resp.Body, s.cfg, c, openAITooLargeError)
 	if err != nil {
 		return nil, err
@@ -1727,7 +1727,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	// Some OpenAI-compatible upstreams (including other sub2api instances)
 	// may return SSE even when stream=false was requested.
 	if isEventStreamResponse(resp.Header) {
-		return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+		return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel, requestBody...)
 	}
 	// bodyLooksLikeSSE is a line-level heuristic: real SSE framing requires
 	// "data:"/"event:" field names at the very start of a physical line. A
@@ -1743,7 +1743,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	// positives on JSON responses that coincidentally contain "data:" or
 	// "event:" in their text content.
 	if account.Type == AccountTypeOAuth && bodyLooksLikeSSE {
-		return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+		return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel, requestBody...)
 	}
 	if account != nil && account.IsGrok() && isOpenAIResponsesCompactPath(c) {
 		body, err = convertGrokResponseToOpenAICompact(body)
@@ -1755,7 +1755,7 @@ func (s *OpenAIGatewayService) handleNonStreamingResponse(ctx context.Context, r
 	usageValue, usageOK := extractOpenAIUsageFromJSONBytes(body)
 	if !usageOK {
 		if bodyLooksLikeSSE {
-			return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel)
+			return s.handleSSEToJSON(resp, c, account, body, originalModel, mappedModel, requestBody...)
 		}
 		return nil, fmt.Errorf("parse response: invalid json response")
 	}
@@ -1828,7 +1828,7 @@ func bodyHasSSEFraming(body []byte) bool {
 	return false
 }
 
-func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel, mappedModel string) (*openaiNonStreamingResult, error) {
+func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Context, account *Account, body []byte, originalModel, mappedModel string, requestBody ...[]byte) (*openaiNonStreamingResult, error) {
 	bodyText := string(body)
 	terminalType, terminalPayload, terminalOK := extractOpenAISSETerminalEvent(bodyText)
 	if terminalOK && (terminalType == "response.failed" || terminalType == "error") {
@@ -1850,62 +1850,65 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 	}
 
 	usage := s.parseSSEUsageFromBody(bodyText)
-	if ok {
-		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
-			*usage = parsedUsage
+	// 2026-11-28: a clean EOF is not a completed turn. Preserve usable output
+	// as an incomplete JSON response and retain/estimate usage for normal billing.
+	// A stream with no deliverable output still fails instead of leaking raw SSE.
+	recovered := !ok
+	responseID := ""
+	if recovered {
+		finalResponse, responseID, ok = s.recoverOpenAINonStreamingResponse(resp, c, account, false, bodyText, terminalType, mappedModel, usage, requestBody...)
+		if !ok {
+			return nil, s.writeOpenAINonStreamingIncompleteError(resp, c, account, false, bodyText, terminalType, usage)
 		}
-		// When the terminal event has an empty output array, reconstruct
-		// output from accumulated delta events so the client gets full content.
-		// gjson Array() returns empty slice for null, missing, or empty arrays.
-		if len(gjson.GetBytes(finalResponse, "output").Array()) == 0 {
-			if outputJSON, reconstructed := reconstructResponseOutputFromSSE(bodyText); reconstructed {
-				if patched, err := sjson.SetRawBytes(finalResponse, "output", outputJSON); err == nil {
-					finalResponse = patched
-				}
+	} else if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
+		*usage = parsedUsage
+	}
+	// When the terminal event has an empty output array, reconstruct
+	// output from accumulated delta events so the client gets full content.
+	// gjson Array() returns empty slice for null, missing, or empty arrays.
+	if len(gjson.GetBytes(finalResponse, "output").Array()) == 0 {
+		if outputJSON, reconstructed := reconstructResponseOutputFromSSE(bodyText); reconstructed {
+			if patched, err := sjson.SetRawBytes(finalResponse, "output", outputJSON); err == nil {
+				finalResponse = patched
 			}
 		}
-		finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
-		body = finalResponse
-		if originalModel != mappedModel {
-			body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
-		}
-		// Correct tool calls in final response
-		body = s.correctToolCallsInResponseBody(body)
-		restoredBody, restoreErr := restoreGrokResponsesClientToolPayload(c, body)
-		if restoreErr != nil {
-			return nil, fmt.Errorf("restore Grok Responses client tool response: %w", restoreErr)
-		}
-		restoredBody, restoreErr = restoreOpenAIResponsesClientToolPayload(c, restoredBody)
-		if restoreErr != nil {
-			return nil, fmt.Errorf("restore OpenAI Responses client tool response: %w", restoreErr)
-		}
-		restoredBody, restoreErr = restoreOpenAIResponsesNamespacePayload(c, restoredBody)
-		if restoreErr != nil {
-			return nil, fmt.Errorf("restore OpenAI namespace response: %w", restoreErr)
-		}
-		restoredBody = restoreCodexToolNamesFromContext(c, restoredBody)
-		restoredBody = restoreOpenAIResponsesInstructionsEchoInResponse(c, restoredBody)
-		body = ensureOpenAIResponseObjectCreatedAt(restoredBody)
-	} else {
-		if originalModel != mappedModel {
-			bodyText = s.replaceModelInSSEBody(bodyText, mappedModel, originalModel)
-		}
-		bodyText = restoreOpenAIResponsesInstructionsEchoInSSEBody(c, bodyText)
-		body = []byte(bodyText)
 	}
+	finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
+	body = finalResponse
+	if originalModel != mappedModel {
+		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)
+	}
+	// Correct tool calls in final response
+	body = s.correctToolCallsInResponseBody(body)
+	restoredBody, restoreErr := restoreGrokResponsesClientToolPayload(c, body)
+	if restoreErr != nil {
+		return nil, fmt.Errorf("restore Grok Responses client tool response: %w", restoreErr)
+	}
+	restoredBody, restoreErr = restoreOpenAIResponsesClientToolPayload(c, restoredBody)
+	if restoreErr != nil {
+		return nil, fmt.Errorf("restore OpenAI Responses client tool response: %w", restoreErr)
+	}
+	restoredBody, restoreErr = restoreOpenAIResponsesNamespacePayload(c, restoredBody)
+	if restoreErr != nil {
+		return nil, fmt.Errorf("restore OpenAI namespace response: %w", restoreErr)
+	}
+	restoredBody = restoreCodexToolNamesFromContext(c, restoredBody)
+	restoredBody = restoreOpenAIResponsesInstructionsEchoInResponse(c, restoredBody)
+	body = ensureOpenAIResponseObjectCreatedAt(restoredBody)
 
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	logOpenAISuccessMissingUsage(c.Request.Context(), c, account, resp, usage, terminalType, false)
 	s.relayOpenAICodexTurnState(c, account, resp.Header)
 
 	contentType := "application/json; charset=utf-8"
-	if !ok {
-		contentType = resp.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "text/event-stream"
-		}
+	bridged := false
+	if recovered {
+		bridged = writeOpenAIRecoveredCompactSSE(c, body)
+	} else {
+		responseID = extractOpenAIResponseIDFromJSONBytes(body)
+		bridged = writeOpenAICompactSSEBridge(c, resp.StatusCode, body)
 	}
-	if !writeOpenAICompactSSEBridge(c, resp.StatusCode, body) {
+	if !bridged {
 		// 上游的 Content-Type（text/event-stream）已复制到响应头，而 c.Data
 		// 不会覆盖已存在的 Content-Type，这里需显式设置为聚合后的类型。
 		c.Writer.Header().Set("Content-Type", contentType)
@@ -1915,7 +1918,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 	return &openaiNonStreamingResult{
 		OpenAIUsage:      usage,
 		usage:            usage,
-		responseID:       extractOpenAIResponseIDFromJSONBytes(body),
+		responseID:       responseID,
 		imageCount:       countOpenAIImageOutputsFromSSEBody(bodyText),
 		imageOutputSizes: collectOpenAIImageOutputSizesFromSSEBody(bodyText),
 		searchCount:      countGrokNativeSearchCallsFromSSEBody(bodyText),
@@ -2073,6 +2076,20 @@ func sanitizeOpenAIResponseFailedEventForClient(payload []byte, eventType string
 }
 
 func (s *OpenAIGatewayService) writeOpenAINonStreamingProtocolError(resp *http.Response, c *gin.Context, message string) error {
+	return s.writeOpenAINonStreamingProtocolErrorWithCode(resp, c, message, "")
+}
+
+// 2026-11-28: no usable output can be recovered, so fail explicitly rather
+// than returning a successful raw SSE body with zero usage.
+func (s *OpenAIGatewayService) writeOpenAINonStreamingIncompleteError(resp *http.Response, c *gin.Context, account *Account, passthrough bool, body, terminalType string, usage *OpenAIUsage) error {
+	recordOpenAINonStreamingIncomplete(resp, c, account, passthrough, body, terminalType, usage, false)
+	message := "Upstream stream ended without a valid final response"
+	err := s.writeOpenAINonStreamingProtocolErrorWithCode(resp, c, message, openAINonStreamingIncompleteCode)
+	setOpsUpstreamError(c, resp.StatusCode, message, "")
+	return err
+}
+
+func (s *OpenAIGatewayService) writeOpenAINonStreamingProtocolErrorWithCode(resp *http.Response, c *gin.Context, message, code string) error {
 	message = sanitizeUpstreamErrorMessage(strings.TrimSpace(message))
 	if message == "" {
 		message = "Upstream returned an invalid non-streaming response"
@@ -2081,17 +2098,16 @@ func (s *OpenAIGatewayService) writeOpenAINonStreamingProtocolError(resp *http.R
 	// body-signal compact 心跳可能已把响应头提交为 200，此时只能以
 	// response.failed 终止事件回传错误，不能再写 JSON+状态码。
 	if openAICompactClientWantsStream(c) && StopOpenAICompactSSEKeepaliveCommitted(c) {
-		writeOpenAICompactSSEFailureMessage(c, http.StatusBadGateway, "upstream_error", message)
+		writeOpenAICompactSSEFailureWithCode(c, http.StatusBadGateway, code, message)
 		return fmt.Errorf("non-streaming openai protocol error: %s", message)
 	}
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	c.Writer.Header().Set("Content-Type", "application/json; charset=utf-8")
-	c.JSON(http.StatusBadGateway, gin.H{
-		"error": gin.H{
-			"type":    "upstream_error",
-			"message": message,
-		},
-	})
+	errorBody := gin.H{"type": "upstream_error", "message": message}
+	if code != "" {
+		errorBody["code"] = code
+	}
+	c.JSON(http.StatusBadGateway, gin.H{"error": errorBody})
 	return fmt.Errorf("non-streaming openai protocol error: %s", message)
 }
 
@@ -2104,7 +2120,7 @@ func extractOpenAINonCompletedTerminalResponse(terminalType string, payload []by
 	default:
 		return nil, false
 	}
-	if response := gjson.GetBytes(payload, "response"); response.Exists() && response.IsObject() {
+	if response := gjson.GetBytes(payload, "response"); gjson.ValidBytes(payload) && response.IsObject() {
 		return []byte(response.Raw), true
 	}
 	return nil, false
@@ -2120,7 +2136,7 @@ func extractCodexFinalResponse(body string) ([]byte, bool) {
 			data = normalized
 		}
 		if eventType == "response.done" || eventType == "response.completed" {
-			if response := gjson.GetBytes(data, "response"); response.Exists() && response.Type == gjson.JSON && response.Raw != "" {
+			if response := gjson.GetBytes(data, "response"); gjson.ValidBytes(data) && response.IsObject() {
 				finalResponse = []byte(response.Raw)
 			}
 		}

@@ -27,6 +27,7 @@ func TestSchedulerCacheSnapshotPreservesQuyaInboundAndCodexPolicies(t *testing.T
 				},
 				Extra: map[string]any{
 					"openai_responses_only":           true,
+					"openai_disable_sync":             true,
 					"codex_cli_only":                  true,
 					"codex_cli_only_allow_app_server": true,
 					"openai_passthrough":              true,
@@ -59,6 +60,7 @@ func TestSchedulerCacheSnapshotPreservesQuyaInboundAndCodexPolicies(t *testing.T
 			}
 
 			before := read()
+			require.True(t, before.IsOpenAISyncDisabled())
 			require.True(t, before.IsCodexCLIOnlyEnabled())
 			require.True(t, before.IsCodexCLIOnlyAppServerAllowed())
 			require.True(t, before.SupportsOpenAIInboundProtocol(service.OpenAIInboundProtocolResponses))
@@ -70,6 +72,7 @@ func TestSchedulerCacheSnapshotPreservesQuyaInboundAndCodexPolicies(t *testing.T
 			account.Extra = map[string]any{
 				"openai_inbound_capabilities":     []string{"chat_completions"},
 				"openai_responses_only":           false,
+				"openai_disable_sync":             false,
 				"codex_cli_only":                  false,
 				"codex_cli_only_allow_app_server": false,
 				"openai_passthrough":              true,
@@ -78,6 +81,8 @@ func TestSchedulerCacheSnapshotPreservesQuyaInboundAndCodexPolicies(t *testing.T
 			}
 			require.NoError(t, cache.SetAccount(ctx, &account))
 			after := read()
+			require.False(t, after.IsOpenAISyncDisabled())
+			require.True(t, before.IsOpenAISyncDisabled(), "refresh must not mutate a previous snapshot")
 			require.False(t, after.IsCodexCLIOnlyEnabled())
 			require.False(t, after.IsCodexCLIOnlyAppServerAllowed())
 			require.False(t, after.SupportsOpenAIInboundProtocol(service.OpenAIInboundProtocolResponses))

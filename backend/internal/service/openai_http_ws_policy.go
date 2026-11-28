@@ -53,6 +53,12 @@ func explicitOpenAIHTTPWSCtxPool(account *Account) bool {
 }
 
 func (s *OpenAIGatewayService) withOpenAIHTTPWSPolicy(ctx context.Context, c *gin.Context, account *Account, body []byte, inbound, defaultModel string, forward func(context.Context) (*OpenAIForwardResult, error)) (*OpenAIForwardResult, error) {
+	// 2026-11-28: enforce client routing before ctx_pool configuration, protocol
+	// conversion or any upstream dispatch. A sync client must not consume a
+	// streaming-only account merely because the transport later becomes WS/SSE.
+	if inboundErr := openAIInboundProtocolFailover(c, account); inboundErr != nil {
+		return nil, inboundErr
+	}
 	if openAIHTTPWSAttemptFromContext(ctx) != nil || GetOpenAIClientTransport(c) != OpenAIClientTransportHTTP || !explicitOpenAIHTTPWSCtxPool(account) || isOpenAIResponsesCompactPath(c) {
 		return forward(ctx)
 	}

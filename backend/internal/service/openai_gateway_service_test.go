@@ -3937,7 +3937,9 @@ func TestHandleSSEToJSON_ReconstructsImageGenerationOutputItemDone(t *testing.T)
 	require.Equal(t, "draw a cat", gjson.Get(rec.Body.String(), "output.0.revised_prompt").String())
 }
 
-func TestHandleSSEToJSON_NoFinalResponseKeepsSSEBody(t *testing.T) {
+// 2026-11-28: a non-streaming request without a terminal Responses object or
+// usable output must fail as JSON, without returning a billable result.
+func TestHandleSSEToJSON_NoFinalResponseReturnsJSONError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -3954,11 +3956,15 @@ func TestHandleSSEToJSON_NoFinalResponseKeepsSSEBody(t *testing.T) {
 	}, "\n"))
 
 	usage, err := svc.handleSSEToJSON(resp, c, nil, body, "gpt-4o", "gpt-4o")
-	require.NoError(t, err)
-	require.NotNil(t, usage)
-	require.Equal(t, 0, usage.InputTokens)
-	require.Contains(t, rec.Header().Get("Content-Type"), "text/event-stream")
-	require.Contains(t, rec.Body.String(), `data: {"type":"response.in_progress"`)
+	require.Error(t, err)
+	require.Nil(t, usage)
+	var failoverErr *UpstreamFailoverError
+	require.False(t, errors.As(err, &failoverErr))
+	require.Equal(t, http.StatusBadGateway, rec.Code)
+	require.Contains(t, rec.Header().Get("Content-Type"), "application/json")
+	require.True(t, gjson.ValidBytes(rec.Body.Bytes()))
+	require.Equal(t, "upstream_incomplete_response", gjson.GetBytes(rec.Body.Bytes(), "error.code").String())
+	require.NotContains(t, rec.Body.String(), "data:")
 }
 
 // 无账号时没有可换的对象：newOpenAIStreamFailoverError 要拿 account 记录 ops 归属与

@@ -67,7 +67,9 @@ func (h *OpenAIGatewayHandler) ResponsesInputTokens(c *gin.Context) {
 
 	setOpsRequestContext(c, reqModel, false)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(false, false)))
-	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, body)
+	// 2026-11-28: auxiliary counting is not synchronous generation; retain only
+	// existing protocol/client restrictions, independently of disable-sync.
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolResponses, body, service.RequestTypeUnknown)
 	if decision := h.checkSecurityAudit(c, reqLog, apiKey, subject, service.ContentModerationProtocolOpenAIResponses, reqModel, body); decision != nil && !decision.AllowNextStage {
 		h.openAISecurityAuditError(c, decision)
 		return
@@ -247,7 +249,7 @@ func (h *OpenAIGatewayHandler) CountTokens(c *gin.Context) {
 	setOpsRequestContext(c, reqModel, false)
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(false, false)))
 	service.EnableOpenAICodexRestrictionFailover(c)
-	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolMessages, body)
+	h.bindOpenAIInboundRequestPolicy(c, service.OpenAIInboundProtocolMessages, body, service.RequestTypeUnknown)
 
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, reqModel)
 	mappedBodyForMessages := newOpenAIModelMappedBodyCache(body, h.gatewayService.ReplaceModelInBody)

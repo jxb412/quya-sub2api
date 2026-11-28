@@ -50,10 +50,17 @@ pnpm-debug.log*
 # 环境配置
 # ===================
 .env
+.env.*
 .env.local
 .env.*.local
 *.env
 !.env.example
+# 2026-11-28: private operational artifacts and credentials stay outside Git.
+/artifacts/
+*.key
+*.pem
+*.p12
+*.pfx
 docker-compose.override.yml
 
 # ===================
@@ -149,6 +156,7 @@ docs/*
 !docs/PROJECT_HANDOFF_CN.md
 !docs/codex-credits.md
 !docs/quya-zero-added-prompts.md
+!docs/QUYA-CUSTOMIZATIONS.md
 !docs/legal/
 !docs/legal/*.md
 !docs/screenshots/

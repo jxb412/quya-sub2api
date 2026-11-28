@@ -728,6 +728,9 @@ export default {
         responsesOnly: 'Responses endpoint only',
         responsesOnlyDesc:
           'This account only accepts /v1/responses (including compact and WebSocket). /v1/chat/completions and /v1/messages exclude it before scheduling. This setting does not inspect client identity.',
+        disableSync: 'Disable non-streaming requests',
+        disableSyncDesc:
+          'Non-streaming Responses, Chat Completions, and Messages requests (stream=false or omitted, including non-streaming compact requests) skip this account and use another eligible account in the same group. Streaming and WebSocket requests are unaffected.',
         codexCLIOnlyAppServer: 'Allow Codex app-server clients',
         codexCLIOnlyAppServerDesc:
           "Effective only when the switch above is on. When enabled, this account also allows third-party clients that embed the Codex engine over the app-server protocol (e.g. Claude Code's codex plugin); they still pass the global engine-fingerprint gate. OR-combined with the global app-server toggle.",
