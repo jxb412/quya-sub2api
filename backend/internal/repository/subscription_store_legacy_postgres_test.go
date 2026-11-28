@@ -28,7 +28,7 @@ func (r *legacyStorePostgresUserRepo) GetByID(ctx context.Context, id int64) (*s
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		return nil, service.ErrUserNotFound
 	}
@@ -57,11 +57,11 @@ func (r *legacyStorePostgresSubRepo) GetByUserIDAndGroupID(ctx context.Context, 
 	}
 	var id int64
 	if !rows.Next() {
-		rows.Close()
+		_ = rows.Close()
 		return nil, service.ErrSubscriptionNotFound
 	}
 	err = rows.Scan(&id)
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func (r *legacyStorePostgresSubRepo) GetByID(ctx context.Context, id int64) (*se
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		return nil, service.ErrSubscriptionNotFound
 	}
