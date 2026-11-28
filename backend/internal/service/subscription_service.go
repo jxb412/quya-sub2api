@@ -430,7 +430,7 @@ func (s *SubscriptionService) createSubscription(ctx context.Context, input *Ass
 		}
 		exists := rows.Next()
 		err = rows.Err()
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
@@ -679,7 +679,7 @@ func (s *SubscriptionService) RestoreSubscription(ctx context.Context, subscript
 			}
 			exists := rows.Next()
 			readErr := rows.Err()
-			rows.Close()
+			_ = rows.Close()
 			if readErr != nil {
 				return readErr
 			}

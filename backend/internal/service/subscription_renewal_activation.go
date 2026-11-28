@@ -103,7 +103,7 @@ func readRenewalActivation(ctx context.Context, client renewalSQLClient, id int6
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		return nil, "", rows.Err()
 	}
@@ -203,11 +203,11 @@ func (s *SubscriptionService) activateSubscriptionRenewalLocked(ctx context.Cont
 	var sub UserSubscription
 	var deleted sql.NullTime
 	if !rows.Next() {
-		rows.Close()
+		_ = rows.Close()
 		return nil, ErrSubscriptionNotFound
 	}
 	err = rows.Scan(&sub.UserID, &sub.GroupID, &sub.Status, &sub.StartsAt, &sub.ExpiresAt, &sub.Notes, &deleted)
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +255,7 @@ func (s *SubscriptionService) activateSubscriptionRenewalLocked(ctx context.Cont
 		return nil, err
 	}
 	groupOK := rows.Next()
-	rows.Close()
+	_ = rows.Close()
 	if !groupOK {
 		return nil, ErrGroupNotSubscriptionType
 	}
@@ -271,21 +271,21 @@ func (s *SubscriptionService) activateSubscriptionRenewalLocked(ctx context.Cont
 		var days int
 		var used sql.NullTime
 		if err := rows.Scan(&code, &typ, &status, &user, &group, &days, &used); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		if typ != "subscription" || status != "used" || !used.Valid || !user.Valid || user.Int64 != in.UserID || !group.Valid || group.Int64 != in.GroupID || days < 1 || days > MaxValidityDays {
-			rows.Close()
+			_ = rows.Close()
 			return nil, renewalConflict("purchase code does not match this subscription")
 		}
 		if code != in.CurrentCode && days != 30 && days != 31 {
-			rows.Close()
+			_ = rows.Close()
 			return nil, renewalConflict("renewal must be a 30 or 31 day purchase")
 		}
 		daysByCode[code] = days
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +298,7 @@ func (s *SubscriptionService) activateSubscriptionRenewalLocked(ctx context.Cont
 		return nil, err
 	}
 	alreadyUsed := rows.Next()
-	rows.Close()
+	_ = rows.Close()
 	if alreadyUsed {
 		return nil, renewalConflict("a queued purchase has already been activated")
 	}
@@ -322,11 +322,11 @@ func (s *SubscriptionService) activateSubscriptionRenewalLocked(ctx context.Cont
 	}
 	var newID int64
 	if !rows.Next() {
-		rows.Close()
+		_ = rows.Close()
 		return nil, fmt.Errorf("renewal insert returned no subscription")
 	}
 	err = rows.Scan(&newID)
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return nil, err
 	}

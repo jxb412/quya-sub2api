@@ -39,14 +39,14 @@ func lockStoreSubscriptionUserForID(ctx context.Context, client storeSubscriptio
 	var userID int64
 	if !rows.Next() {
 		err = rows.Err()
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
 		return ErrSubscriptionNotFound
 	}
 	err = rows.Scan(&userID)
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return err
 	}
@@ -193,11 +193,11 @@ func validateLegacyStoreRefund(ctx context.Context, client storeSubscriptionSQLC
 		var notes string
 		var deleted sql.NullTime
 		if !rows.Next() {
-			rows.Close()
+			_ = rows.Close()
 			return deny("手动套餐撤销记录缺失")
 		}
 		err = rows.Scan(&notes, &deleted)
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
@@ -218,19 +218,19 @@ func validateLegacyStoreRefund(ctx context.Context, client storeSubscriptionSQLC
 		var group sql.NullInt64
 		var usedAt time.Time
 		if err := rows.Scan(&code, &group, &usedAt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		if renewalCodePattern.MatchString(code) && refund.Code == storeRefundCode(userID, code) && group.Valid {
 			if purchase != "" {
-				rows.Close()
+				_ = rows.Close()
 				return deny("购买来源重复")
 			}
 			purchase, groupID, purchasedAt = code, group.Int64, usedAt
 		}
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return err
 	}
@@ -248,16 +248,16 @@ func validateLegacyStoreRefund(ctx context.Context, client storeSubscriptionSQLC
 		var next, previous, notes string
 		var startsAt time.Time
 		if err := rows.Scan(&next, &previous, &notes, &startsAt); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		if next == purchase {
-			rows.Close()
+			_ = rows.Close()
 			return deny("该购买已启用新一期，旧版退款请求无法核对原订阅及应退金额")
 		}
 		if previous != "" {
 			if previous == purchase {
-				rows.Close()
+				_ = rows.Close()
 				return deny("该购买的剩余权益已在重置时放弃，不能重复转换余额")
 			}
 			continue
@@ -270,16 +270,16 @@ func validateLegacyStoreRefund(ctx context.Context, client storeSubscriptionSQLC
 		current := storeCurrentMarker.FindAllStringSubmatch(notes, -1)
 		if len(current) == 1 {
 			if current[0][1] == purchase {
-				rows.Close()
+				_ = rows.Close()
 				return deny("该购买的剩余权益已在重置时放弃，不能重复转换余额")
 			}
 		} else if strings.Contains(notes, "套餐当前购买码") || !purchasedAt.After(startsAt.Add(2*time.Second)) {
-			rows.Close()
+			_ = rows.Close()
 			return deny("已重置套餐的历史当前购买记录无法核对")
 		}
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return err
 	}
@@ -293,7 +293,7 @@ func validateLegacyStoreRefund(ctx context.Context, client storeSubscriptionSQLC
 		var notes string
 		var deleted sql.NullTime
 		if err := rows.Scan(&id, &notes, &deleted); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		for _, code := range storeCodeToken.FindAllString(notes, -1) {
@@ -302,13 +302,13 @@ func validateLegacyStoreRefund(ctx context.Context, client storeSubscriptionSQLC
 			}
 			found = true
 			if !deleted.Valid {
-				rows.Close()
+				_ = rows.Close()
 				return deny("该购买仍属于有效套餐或待启用队列，不能由旧退款请求转换余额")
 			}
 		}
 	}
 	err = rows.Err()
-	rows.Close()
+	_ = rows.Close()
 	if err != nil {
 		return err
 	}
@@ -338,11 +338,11 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 		var owner, group int64
 		var deleted sql.NullTime
 		if !rows.Next() {
-			rows.Close()
+			_ = rows.Close()
 			return renewalConflict("原套餐历史缺失，请管理员核对自动重开记录")
 		}
 		err = rows.Scan(&owner, &group, &deleted)
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
@@ -360,26 +360,26 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 			var id int64
 			var notes string
 			if err := rows.Scan(&id, &notes); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return err
 			}
 			historyNotes[id] = notes
 			prior, parseErr := parseLegacyStoreReplacement(notes)
 			if parseErr != nil {
-				rows.Close()
+				_ = rows.Close()
 				return parseErr
 			}
 			if prior == nil || prior.parentID != marker.parentID {
 				continue
 			}
 			if prior.current != marker.current || successorID != 0 {
-				rows.Close()
+				_ = rows.Close()
 				return renewalConflict("原套餐已有其他重开记录，请管理员核对；不会再次发放")
 			}
 			successorID = id
 		}
 		err = rows.Err()
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
@@ -406,7 +406,7 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 		}
 		hasLiveSubscription := rows.Next()
 		err = rows.Err()
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
@@ -461,11 +461,11 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 			}
 			var days int
 			if !rows.Next() {
-				rows.Close()
+				_ = rows.Close()
 				return renewalConflict("购买记录已退款或无法核对，请管理员处理自动重开")
 			}
 			err = rows.Scan(&days)
-			rows.Close()
+			_ = rows.Close()
 			if err != nil {
 				return err
 			}
@@ -483,7 +483,7 @@ func (s *SubscriptionService) assignLegacyStoreReplacement(ctx context.Context, 
 		}
 		groupOK := rows.Next()
 		err = rows.Err()
-		rows.Close()
+		_ = rows.Close()
 		if err != nil {
 			return err
 		}
