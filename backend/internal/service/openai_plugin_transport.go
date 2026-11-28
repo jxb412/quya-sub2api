@@ -9,7 +9,8 @@ func (s *OpenAIGatewayService) SetPluginManager(manager *PluginManager) {
 // doOpenAIUpstream applies the explicit HTTP ctx_pool policy before dispatch.
 // Otherwise, enabled OAuth plugins and the normal HTTP transport retain their
 // existing routing. Every transport returns the same response parsing contract.
-func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL string, account *Account) (response *http.Response, err error) {
+	defer func() { logOpenAISyncUpstreamStreamResponse(request.Context(), account, response, err) }()
 	if attempt := openAIHTTPWSAttemptFromContext(request.Context()); attempt != nil {
 		response, handled, err := s.connectOpenAIHTTPWSPool(request, proxyURL, account, attempt)
 		if handled {

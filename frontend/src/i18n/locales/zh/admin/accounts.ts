@@ -848,6 +848,8 @@ export default {
         codexCLIOnlyDesc: '对 OpenAI OAuth / Setup Token / API Key 账号生效。开启后仅允许 Codex 官方客户端家族访问；关闭后绕过客户端身份限制。它与“仅允许 Responses 入口”是两个独立设置。',
         responsesOnly: '仅允许 Responses 入口',
         responsesOnlyDesc: '开启后本账号只承接 /v1/responses（包括 compact 和 WebSocket），/v1/chat/completions 与 /v1/messages 会在调度前排除。它不判断客户端身份。',
+        syncUpstreamStream: '同步请求使用上游流式',
+        syncUpstreamStreamDesc: '开启后，客户的非流式文本请求使用上游 HTTP SSE，网关汇总后仍向客户返回完整 JSON。默认关闭，不改变流式客户端、WebSocket、compact、独立图片或视频请求。若同时开启“禁用同步调用”，会优先跳过本账号。',
         disableSync: '禁用同步调用',
         disableSyncDesc: '开启后，Responses、Chat Completions、Messages 的非流式请求（stream=false 或省略；含非流式 compact）会跳过本账号，由同组其他允许同步调用的账号处理。流式及 WebSocket 不受影响。',
         codexCLIOnlyAppServer: '允许 Codex app-server 客户端',

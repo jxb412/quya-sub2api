@@ -338,6 +338,35 @@ describe('EditAccountModal', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it.each([false, true])('persists synchronous upstream streaming=%s while preserving unrelated extra', async (enabled) => {
+    const account = buildAccount()
+    account.extra = { openai_sync_upstream_stream: !enabled, custom_metadata: 'keep-me' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="openai-sync-upstream-stream-toggle"]')
+    expect(toggle.attributes('aria-checked')).toBe(String(!enabled))
+    await toggle.trigger('click')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra.custom_metadata).toBe('keep-me')
+    if (enabled) {
+      expect(extra.openai_sync_upstream_stream).toBe(true)
+    } else {
+      expect(extra).not.toHaveProperty('openai_sync_upstream_stream')
+    }
+    wrapper.unmount()
+  })
+
+  it('hides synchronous upstream streaming outside OpenAI API key accounts', () => {
+    for (const account of [buildOpenAIOAuthParentAccount(), buildOpenAISetupTokenAccount(), buildGrokAPIKeyAccount()]) {
+      const wrapper = mountModal(account)
+      expect(wrapper.find('[data-testid="openai-sync-upstream-stream-toggle"]').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  })
+
   it('uses the saved connection until the administrator changes the upstream', async () => {
     const account = buildAccount()
     account.notes = 'local notes'

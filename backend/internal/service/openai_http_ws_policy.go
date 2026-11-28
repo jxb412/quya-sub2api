@@ -59,6 +59,23 @@ func (s *OpenAIGatewayService) withOpenAIHTTPWSPolicy(ctx context.Context, c *gi
 	if inboundErr := openAIInboundProtocolFailover(c, account); inboundErr != nil {
 		return nil, inboundErr
 	}
+	// 2026-11-28: this explicit HTTP SSE setting takes precedence over ctx_pool
+	// for synchronous API-key requests. Native client WS and streaming clients
+	// keep their existing transport; the sync-account restriction above wins.
+	eligible, bound := ctx.Value(openAISyncUpstreamStreamContextKey{}).(bool)
+	if !bound {
+		if c != nil {
+			c.Set(openAISyncUpstreamStreamEligibilityKey, nil)
+		}
+		eligible = shouldForceOpenAISyncUpstreamStream(c, account, body)
+		ctx = context.WithValue(ctx, openAISyncUpstreamStreamContextKey{}, eligible)
+	}
+	if c != nil {
+		c.Set(openAISyncUpstreamStreamEligibilityKey, eligible)
+	}
+	if eligible {
+		return forward(ctx)
+	}
 	if openAIHTTPWSAttemptFromContext(ctx) != nil || GetOpenAIClientTransport(c) != OpenAIClientTransportHTTP || !explicitOpenAIHTTPWSCtxPool(account) || isOpenAIResponsesCompactPath(c) {
 		return forward(ctx)
 	}

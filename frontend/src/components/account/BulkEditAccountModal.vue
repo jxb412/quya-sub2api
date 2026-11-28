@@ -1149,6 +1149,54 @@
         </div>
       </div>
 
+      <!-- 2026-11-28: API-key upstream SSE preserves the client synchronous response -->
+      <div v-if="allOpenAIAPIKey" class="border-t border-gray-200 pt-4 dark:border-dark-600">
+        <div class="mb-3 flex items-center justify-between">
+          <label
+            id="bulk-edit-openai-sync-upstream-stream-label"
+            class="input-label mb-0"
+            for="bulk-edit-openai-sync-upstream-stream-enabled"
+          >
+            {{ t('admin.accounts.openai.syncUpstreamStream') }}
+          </label>
+          <input
+            v-model="enableOpenAISyncUpstreamStream"
+            id="bulk-edit-openai-sync-upstream-stream-enabled"
+            type="checkbox"
+            aria-controls="bulk-edit-openai-sync-upstream-stream"
+            class="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+        </div>
+        <div
+          id="bulk-edit-openai-sync-upstream-stream"
+          :class="!enableOpenAISyncUpstreamStream && 'pointer-events-none opacity-50'"
+        >
+          <p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.openai.syncUpstreamStreamDesc') }}
+          </p>
+          <button
+            id="bulk-edit-openai-sync-upstream-stream-toggle"
+            type="button"
+            role="switch"
+            :aria-checked="openAISyncUpstreamStreamEnabled"
+            :disabled="!enableOpenAISyncUpstreamStream"
+            aria-labelledby="bulk-edit-openai-sync-upstream-stream-label"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              openAISyncUpstreamStreamEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+            @click="openAISyncUpstreamStreamEnabled = !openAISyncUpstreamStreamEnabled"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                openAISyncUpstreamStreamEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div v-if="allOpenAIOAuth" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <div class="mb-3 flex items-center justify-between">
@@ -1914,6 +1962,8 @@ const enableOpenAIResponsesOnly = ref(false)
 const openAIResponsesOnlyEnabled = ref(false)
 const enableOpenAIDisableSync = ref(false)
 const openAIDisableSyncEnabled = ref(false)
+const enableOpenAISyncUpstreamStream = ref(false)
+const openAISyncUpstreamStreamEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const enableCodexFingerprintMode = ref(false)
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
@@ -2313,6 +2363,12 @@ const buildUpdatePayload = (): Record<string, unknown> | null => {
     extra.openai_disable_sync = openAIDisableSyncEnabled.value
   }
 
+  // Explicit false clears this opt-in flag through the JSONB merge endpoint.
+  if (enableOpenAISyncUpstreamStream.value && allOpenAIAPIKey.value) {
+    const extra = ensureExtra()
+    extra.openai_sync_upstream_stream = openAISyncUpstreamStreamEnabled.value
+  }
+
   // 子开关从属于 codex_cli_only：仅当同一次批量编辑也把父开关设为开启时才写入，
   // 与 Create/Edit 语义对齐，避免在父开关关闭的账号上写入无意义的孤立字段。
   if (
@@ -2460,6 +2516,7 @@ const handleSubmit = async () => {
     enableUpstreamBillingAutoProbe.value ||
     enableCodexCLIOnly.value ||
     (enableOpenAIDisableSync.value && allOpenAICodexRestrictable.value) ||
+    (enableOpenAISyncUpstreamStream.value && allOpenAIAPIKey.value) ||
     enableCodexCLIOnlyAppServer.value ||
     enableCodexFingerprintMode.value ||
     enableOpenAICompactMode.value ||
@@ -2653,6 +2710,8 @@ watch(
       codexCLIOnlyAppServerEnabled.value = false
       enableOpenAIResponsesOnly.value = false
       openAIResponsesOnlyEnabled.value = false
+      enableOpenAISyncUpstreamStream.value = false
+      openAISyncUpstreamStreamEnabled.value = false
       enableOpenAIDisableSync.value = false
       openAIDisableSyncEnabled.value = false
       openAICompactMode.value = 'auto'

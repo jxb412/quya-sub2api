@@ -1860,7 +1860,7 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if !ok {
 			return nil, s.writeOpenAINonStreamingIncompleteError(resp, c, account, false, bodyText, terminalType, usage)
 		}
-	} else if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
+	} else if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed && hasOpenAINumericUsage(finalResponse) {
 		*usage = parsedUsage
 	}
 	// When the terminal event has an empty output array, reconstruct
@@ -1874,6 +1874,13 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		}
 	}
 	finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
+	if !recovered {
+		var usageErr error
+		finalResponse, usageErr = ensureOpenAISyncUpstreamUsage(c, account, finalResponse, bodyText, mappedModel, usage, requestBody...)
+		if usageErr != nil {
+			return nil, usageErr
+		}
+	}
 	body = finalResponse
 	if originalModel != mappedModel {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)

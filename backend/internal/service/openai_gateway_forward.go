@@ -1454,6 +1454,11 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现：强制 store=false、清除
 	// previous_response_id，避免携带状态字段被上游拒绝。
 	body = normalizeDeepSeekResponsesRequestBodyWithPromptPolicy(account, body, openAIZeroPromptInjection(c))
+	// Patch only the outbound copy: reqStream continues to describe the client.
+	body, forceUpstreamStream, err := prepareOpenAISyncUpstreamStream(c, account, body, false)
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -1577,6 +1582,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequest(ctx context.Context, c *gin.
 
 	if err := applyMappedGPT55LiteCompatibility(req, account, body); err != nil {
 		return nil, err
+	}
+	if forceUpstreamStream {
+		req.Header.Set("Accept", "text/event-stream")
 	}
 	return req, nil
 }

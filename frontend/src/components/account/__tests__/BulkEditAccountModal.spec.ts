@@ -98,6 +98,42 @@ describe('BulkEditAccountModal', () => {
     } as any)
   })
 
+  it.each([false, true])('submits an explicit synchronous upstream streaming=%s only after opt-in', async (enabled) => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['apikey'] })
+    const toggle = wrapper.get('#bulk-edit-openai-sync-upstream-stream-toggle')
+    expect(toggle.attributes('disabled')).toBeDefined()
+    await wrapper.get('#bulk-edit-openai-sync-upstream-stream-enabled').setValue(true)
+    if (enabled) await toggle.trigger('click')
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(adminAPI.accounts.bulkUpdate).toHaveBeenCalledWith([1, 2], {
+      extra: { openai_sync_upstream_stream: enabled }
+    })
+    wrapper.unmount()
+  })
+
+  it('does not include synchronous upstream streaming when editing other settings', async () => {
+    const wrapper = mountModal({ selectedPlatforms: ['openai'], selectedTypes: ['apikey'] })
+    await wrapper.get('#bulk-edit-rate-multiplier-enabled').setValue(true)
+    await wrapper.get('#bulk-edit-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(vi.mocked(adminAPI.accounts.bulkUpdate).mock.calls[0]?.[1]?.extra)
+      .toBeUndefined()
+    wrapper.unmount()
+  })
+
+  it('hides synchronous upstream streaming for OAuth and mixed selections', () => {
+    for (const props of [
+      { selectedPlatforms: ['openai'], selectedTypes: ['oauth'] },
+      { selectedPlatforms: ['openai'], selectedTypes: ['apikey', 'oauth'] },
+      { selectedPlatforms: ['openai', 'anthropic'], selectedTypes: ['apikey'] }
+    ]) {
+      const wrapper = mountModal(props)
+      expect(wrapper.find('#bulk-edit-openai-sync-upstream-stream-enabled').exists()).toBe(false)
+      wrapper.unmount()
+    }
+  })
+
   it('批量修改倍率时提示自动同步账号需要先关闭同步', async () => {
     const wrapper = mountModal()
 

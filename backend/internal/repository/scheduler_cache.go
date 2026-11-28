@@ -1559,6 +1559,8 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		"openai_responses_only",
 		// 2026-11-28: preserve the account's client sync restriction in snapshots.
 		"openai_disable_sync",
+		// 2026-11-28: forwarding must retain the opt-in upstream SSE policy.
+		"openai_sync_upstream_stream",
 		"codex_cli_only",
 		"codex_cli_only_allow_app_server",
 		// 透传开关必须进投影：候选过滤(ListSchedulableAccounts)读的是本投影，

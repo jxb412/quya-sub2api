@@ -126,7 +126,16 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream, apiKey, account.GetOpenAIUserAgent(), "")
+	// 2026-11-28: the same API-key switch covers Responses clients routed to
+	// a Chat-Completions-only upstream; client JSON remains Responses-shaped.
+	forcedStream := false
+	if !gjson.GetBytes(body, "background").Bool() {
+		chatBody, forcedStream, err = prepareOpenAISyncUpstreamStream(c, account, chatBody, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, chatBody, clientStream || forcedStream, apiKey, account.GetOpenAIUserAgent(), "")
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +151,11 @@ func (s *OpenAIGatewayService) forwardResponsesViaRawChatCompletions(
 
 	if clientStream {
 		return s.streamChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
+	}
+	if forcedStream {
+		if err := s.bufferSyncUpstreamChatJSON(c, resp, account, chatBody, upstreamModel); err != nil {
+			return nil, err
+		}
 	}
 	return s.bufferChatCompletionsAsResponses(c, resp, originalModel, customTools, functionTools, toolSearch, namespaceTools, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 }

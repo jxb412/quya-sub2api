@@ -589,6 +589,12 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 
 	// DeepSeek / Kimi 原生 Responses 端点为无状态实现（见 normalizeDeepSeekResponsesRequestBody）。
 	body = normalizeDeepSeekResponsesRequestBodyWithPromptPolicy(account, body, openAIZeroPromptInjection(c))
+	// 2026-11-28: explicit account opt-in overrides only upstream streaming,
+	// including passthrough; the caller still aggregates for a sync client.
+	body, forceUpstreamStream, err := prepareOpenAISyncUpstreamStream(c, account, body, false)
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -716,6 +722,9 @@ func (s *OpenAIGatewayService) buildUpstreamRequestOpenAIPassthrough(
 
 	if err := applyMappedGPT55LiteCompatibility(req, account, body); err != nil {
 		return nil, err
+	}
+	if forceUpstreamStream {
+		req.Header.Set("Accept", "text/event-stream")
 	}
 	return req, nil
 }
@@ -2685,7 +2694,7 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		if !ok {
 			return nil, s.writeOpenAINonStreamingIncompleteError(resp, c, account, true, bodyText, terminalType, usage)
 		}
-	} else if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
+	} else if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed && hasOpenAINumericUsage(finalResponse) {
 		*usage = parsedUsage
 	}
 	// When the terminal event has an empty output array, reconstruct
@@ -2698,6 +2707,13 @@ func (s *OpenAIGatewayService) handlePassthroughSSEToJSON(resp *http.Response, c
 		}
 	}
 	finalResponse = supplementCompactionItemFromSSE(c, finalResponse, bodyText)
+	if !recovered {
+		var usageErr error
+		finalResponse, usageErr = ensureOpenAISyncUpstreamUsage(c, account, finalResponse, bodyText, mappedModel, usage, requestBody...)
+		if usageErr != nil {
+			return nil, usageErr
+		}
+	}
 	body = finalResponse
 	if originalModel != "" && mappedModel != "" && originalModel != mappedModel {
 		body = s.replaceModelInResponseBody(body, mappedModel, originalModel)

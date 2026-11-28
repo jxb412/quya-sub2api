@@ -11,6 +11,18 @@ import (
 
 const openAINonStreamingIncompleteCode = "upstream_incomplete_response"
 
+func hasOpenAINumericUsage(data []byte) bool {
+	for _, path := range []string{"usage", "response.usage", "data.usage", "data.response.usage"} {
+		value := gjson.GetBytes(data, path)
+		for _, field := range []string{"input_tokens", "output_tokens", "prompt_tokens", "completion_tokens"} {
+			if value.Get(field).Type == gjson.Number {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func hasOpenAISSEUsage(body string) bool {
 	observed := false
 	forEachOpenAISSEFrame(body, func(_ string, data []byte) {
@@ -19,15 +31,7 @@ func hasOpenAISSEUsage(body string) bool {
 		}
 		// An empty usage object is not a report of zero tokens. Explicit
 		// numeric zero remains authoritative and must never trigger estimation.
-		for _, path := range []string{"usage", "response.usage", "data.usage", "data.response.usage"} {
-			value := gjson.GetBytes(data, path)
-			for _, field := range []string{"input_tokens", "output_tokens", "prompt_tokens", "completion_tokens"} {
-				if value.Get(field).Type == gjson.Number {
-					observed = true
-					return
-				}
-			}
-		}
+		observed = hasOpenAINumericUsage(data)
 	})
 	return observed
 }

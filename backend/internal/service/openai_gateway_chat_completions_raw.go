@@ -213,7 +213,12 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	// the outbound request (for example GLM xhigh is forwarded as max).
 	reasoningEffort := extractOpenAIReasoningEffortFromBody(upstreamBody, upstreamModel, billingModel, originalModel)
 	reasoningEffort = ApplyThinkingEnabledFallback(reasoningEffort, upstreamBody, upstreamModel)
-	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream, token, customUA, grokCacheIdentity)
+	// 2026-11-28: opt-in upstream SSE is independent of the client protocol.
+	upstreamBody, forcedStream, err := prepareOpenAISyncUpstreamStream(c, account, upstreamBody, true)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := s.sendCCUpstreamRequest(ctx, c, account, targetURL, upstreamBody, clientStream || forcedStream, token, customUA, grokCacheIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +275,11 @@ func (s *OpenAIGatewayService) forwardAsRawChatCompletionsWithStartTime(
 	if clientStream {
 		result, forwardErr = s.streamRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime, len(body))
 	} else {
+		if forcedStream {
+			if err := s.bufferSyncUpstreamChatJSON(c, resp, account, upstreamBody, upstreamModel); err != nil {
+				return nil, err
+			}
+		}
 		result, forwardErr = s.bufferRawChatCompletions(c, resp, account, originalModel, billingModel, upstreamModel, reasoningEffort, serviceTier, startTime)
 	}
 	if result != nil {

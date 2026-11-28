@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -383,6 +384,10 @@ func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 		return nil, policyErr
 	}
 	responsesBody = updatedBody
+	responsesBody, _, err = prepareOpenAISyncUpstreamStream(c, account, responsesBody, false)
+	if err != nil {
+		return nil, err
+	}
 	responsesReq.ServiceTier = normalizedOpenAIServiceTierValue(gjson.GetBytes(responsesBody, "service_tier").String())
 
 	// 5. Get access token
@@ -477,7 +482,7 @@ func (s *OpenAIGatewayService) forwardAsChatCompletionsPrepared(
 	if clientStream {
 		result, handleErr = s.handleChatStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime, len(body))
 	} else {
-		result, handleErr = s.handleChatBufferedStreamingResponse(resp, c, account, originalModel, billingModel, upstreamModel, startTime)
+		result, handleErr = s.handleChatBufferedStreamingResponseWithRequest(resp, c, account, originalModel, billingModel, upstreamModel, startTime, responsesBody)
 	}
 	stampOpenAIResponsesUpstreamEndpoint(c, result)
 
@@ -731,13 +736,69 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	upstreamModel string,
 	startTime time.Time,
 ) (*OpenAIForwardResult, error) {
+	return s.handleChatBufferedStreamingResponseWithRequest(resp, c, account, originalModel, billingModel, upstreamModel, startTime, nil)
+}
+
+func (s *OpenAIGatewayService) handleChatBufferedStreamingResponseWithRequest(
+	resp *http.Response,
+	c *gin.Context,
+	account *Account,
+	originalModel string,
+	billingModel string,
+	upstreamModel string,
+	startTime time.Time,
+	requestBody []byte,
+) (*OpenAIForwardResult, error) {
 	requestID := resp.Header.Get("x-request-id")
+	// 2026-11-28: only the opt-in API-key path captures incomplete upstream
+	// streams for local recovery. Keep OAuth and existing stream routing intact.
+	var capture *syncOpenAIBoundedCapture
+	captureEnabled := account.IsOpenAISyncUpstreamStreamEnabled() && GetOpenAIClientTransport(c) == OpenAIClientTransportHTTP && !gjson.GetBytes(requestBody, "background").Bool()
+	if c != nil {
+		if value, exists := c.Get(openAISyncUpstreamStreamEligibilityKey); exists {
+			if eligible, ok := value.(bool); ok && !eligible {
+				captureEnabled = false
+			}
+		}
+	}
+	if captureEnabled {
+		capture = &syncOpenAIBoundedCapture{limit: resolveUpstreamResponseReadLimit(s.cfg)}
+		resp.Body = &syncOpenAICaptureBody{Reader: io.TeeReader(resp.Body, capture), Closer: resp.Body}
+	}
 
 	finalResponse, usage, acc, priorModels, err := s.readOpenAICompatBufferedTerminal(resp, c, account, "openai chat_completions buffered", requestID)
 	if err != nil {
 		return nil, s.newOpenAICompatBufferedReadFailoverError(c, account, resp, requestID, err)
 	}
+	var capturedSSE []byte
+	if capture != nil {
+		var withinLimit bool
+		capturedSSE, withinLimit = capture.snapshot()
+		if !withinLimit {
+			openAITooLargeError(c)
+			return nil, ErrUpstreamResponseBodyTooLarge
+		}
+		if actual, reported := lastSyncOpenAIResponsesUsage(capturedSSE); reported != nil {
+			usage = actual
+			if finalResponse != nil {
+				finalResponse.Usage = reported
+			}
+		}
+	}
 
+	recovered := false
+	if finalResponse == nil && capture != nil {
+		if body, _, ok := s.recoverOpenAINonStreamingResponse(resp, c, account, false, string(capturedSSE), "", upstreamModel, &usage, requestBody); ok {
+			var decoded apicompat.ResponsesResponse
+			if json.Unmarshal(body, &decoded) == nil {
+				finalResponse, recovered = &decoded, true
+			}
+		}
+		if finalResponse == nil {
+			writeSyncUpstreamIncompleteError(c)
+			return nil, fmt.Errorf("upstream stream ended without usable completion output")
+		}
+	}
 	if finalResponse == nil {
 		writeChatCompletionsError(c, http.StatusBadGateway, "api_error", "Upstream stream ended without a terminal response event")
 		return nil, fmt.Errorf("upstream stream ended without terminal event")
@@ -800,9 +861,30 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 
 	// When the terminal event has an empty output array, reconstruct from
 	// accumulated delta events so the client receives the full content.
-	acc.SupplementResponseOutput(finalResponse)
+	if !recovered {
+		acc.SupplementResponseOutput(finalResponse)
+	}
+	if capture != nil && !recovered {
+		encoded, marshalErr := json.Marshal(finalResponse)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		encoded, usageErr := ensureOpenAISyncUpstreamUsage(c, account, encoded, string(capturedSSE), upstreamModel, &usage, requestBody)
+		if usageErr != nil {
+			writeChatCompletionsError(c, http.StatusBadGateway, "upstream_error", "Unable to determine upstream completion usage")
+			return nil, usageErr
+		}
+		if err := json.Unmarshal(encoded, finalResponse); err != nil {
+			return nil, err
+		}
+	}
 
 	chatResp := apicompat.ResponsesToChatCompletions(finalResponse, originalModel)
+	if recovered {
+		for i := range chatResp.Choices {
+			chatResp.Choices[i].FinishReason = "length"
+		}
+	}
 
 	if s.responseHeaderFilter != nil {
 		responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)

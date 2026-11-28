@@ -3619,6 +3619,40 @@
         </div>
       </div>
 
+      <!-- 2026-11-28: API-key sync clients keep JSON while the upstream uses HTTP SSE. -->
+      <div
+        v-if="form.platform === 'openai' && accountCategory === 'apikey'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600"
+      >
+        <div class="flex items-center justify-between gap-4">
+          <div>
+            <label class="input-label mb-0">{{ t('admin.accounts.openai.syncUpstreamStream') }}</label>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.openai.syncUpstreamStreamDesc') }}
+            </p>
+          </div>
+          <button
+            type="button"
+            data-testid="openai-sync-upstream-stream-toggle"
+            role="switch"
+            :aria-label="t('admin.accounts.openai.syncUpstreamStream')"
+            :aria-checked="openAISyncUpstreamStreamEnabled"
+            @click="openAISyncUpstreamStreamEnabled = !openAISyncUpstreamStreamEnabled"
+            :class="[
+              'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+              openAISyncUpstreamStreamEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+            ]"
+          >
+            <span
+              :class="[
+                'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                openAISyncUpstreamStreamEnabled ? 'translate-x-5' : 'translate-x-0'
+              ]"
+            />
+          </button>
+        </div>
+      </div>
+
       <!-- Codex 指纹收敛模式（仅 OpenAI OAuth） -->
       <div
         v-if="form.platform === 'openai' && accountCategory === 'oauth-based'"
@@ -4851,6 +4885,7 @@ const codexCLIOnlyAppServerEnabled = ref(false)
 const openAIResponsesOnlyEnabled = ref(false)
 // 2026-11-28: Route client non-streaming requests away from opted-in accounts.
 const openAIDisableSyncEnabled = ref(false)
+const openAISyncUpstreamStreamEnabled = ref(false)
 type CodexFingerprintMode = 'off' | 'device' | 'session' | 'full'
 const codexFingerprintMode = ref<CodexFingerprintMode>('off')
 const codexFingerprintModeOptions = computed(() => [
@@ -5356,6 +5391,7 @@ watch(
       codexCLIOnlyAppServerEnabled.value = false
       openAIResponsesOnlyEnabled.value = false
       openAIDisableSyncEnabled.value = false
+      openAISyncUpstreamStreamEnabled.value = false
     }
     if (newPlatform !== 'anthropic') {
       anthropicPassthroughEnabled.value = false
@@ -5389,6 +5425,9 @@ watch(
       codexCLIOnlyAppServerEnabled.value = false
       openAIResponsesOnlyEnabled.value = false
       openAIDisableSyncEnabled.value = false
+    }
+    if (platform !== 'openai' || category !== 'apikey') {
+      openAISyncUpstreamStreamEnabled.value = false
     }
     if (platform !== 'anthropic' || category !== 'apikey') {
       anthropicPassthroughEnabled.value = false
@@ -5826,6 +5865,7 @@ const resetForm = () => {
   codexCLIOnlyAppServerEnabled.value = false
   openAIResponsesOnlyEnabled.value = false
   openAIDisableSyncEnabled.value = false
+  openAISyncUpstreamStreamEnabled.value = false
   codexFingerprintMode.value = 'off'
   anthropicPassthroughEnabled.value = false
   anthropicAPIKeyAuthScheme.value = 'x_api_key'
@@ -5942,6 +5982,11 @@ const buildOpenAIExtra = (base?: Record<string, unknown>): Record<string, unknow
     extra.openai_disable_sync = true
   } else {
     delete extra.openai_disable_sync
+  }
+  if (accountCategory.value === 'apikey' && openAISyncUpstreamStreamEnabled.value) {
+    extra.openai_sync_upstream_stream = true
+  } else {
+    delete extra.openai_sync_upstream_stream
   }
   // 收敛是显式 opt-in：off 即默认值，不落键；device/session/full 必须显式写入，
   // 否则管理员的选择会被当成默认而丢失（#5610）。

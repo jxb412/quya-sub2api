@@ -222,6 +222,53 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
 
   afterEach(() => vi.useRealTimers())
 
+  it('keeps synchronous upstream streaming off unless explicitly enabled', async () => {
+    const wrapper = await submitApiKeyAccount('openai')
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra).not.toHaveProperty('openai_sync_upstream_stream')
+    wrapper.unmount()
+  })
+
+  it('creates an OpenAI API key account with synchronous upstream streaming enabled', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    expect(wrapper.find('[data-testid="openai-sync-upstream-stream-toggle"]').exists()).toBe(false)
+    await selectButtonByText(wrapper, 'API Key')
+    const toggle = wrapper.get('[data-testid="openai-sync-upstream-stream-toggle"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    await wrapper.get('form#create-account-form input[type="text"]').setValue('streaming upstream')
+    await wrapper.get('form#create-account-form input[type="password"]').setValue('synthetic-key')
+    await wrapper.get('form#create-account-form').trigger('submit.prevent')
+    await flushPromises()
+    expect(createAccountMock.mock.calls[0]?.[0]?.extra?.openai_sync_upstream_stream).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('does not carry synchronous upstream streaming across platform changes', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('[data-testid="openai-sync-upstream-stream-toggle"]').trigger('click')
+    await selectButtonByText(wrapper, 'Kimi')
+    expect(wrapper.find('[data-testid="openai-sync-upstream-stream-toggle"]').exists()).toBe(false)
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    expect(wrapper.get('[data-testid="openai-sync-upstream-stream-toggle"]').attributes('aria-checked')).toBe('false')
+    wrapper.unmount()
+  })
+
+  it('clears synchronous upstream streaming when switching to OAuth', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'OpenAI')
+    await selectButtonByText(wrapper, 'API Key')
+    await wrapper.get('[data-testid="openai-sync-upstream-stream-toggle"]').trigger('click')
+    await selectButtonByText(wrapper, 'OAuth')
+    expect(wrapper.find('[data-testid="openai-sync-upstream-stream-toggle"]').exists()).toBe(false)
+    await selectButtonByText(wrapper, 'API Key')
+    expect(wrapper.get('[data-testid="openai-sync-upstream-stream-toggle"]').attributes('aria-checked')).toBe('false')
+    wrapper.unmount()
+  })
+
   it('fills the name and notes from the unsaved API key and its adaptive Chat URL', async () => {
     const wrapper = mountModal()
     await selectButtonByText(wrapper, 'Kimi')

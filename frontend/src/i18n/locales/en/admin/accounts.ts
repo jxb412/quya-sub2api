@@ -728,6 +728,8 @@ export default {
         responsesOnly: 'Responses endpoint only',
         responsesOnlyDesc:
           'This account only accepts /v1/responses (including compact and WebSocket). /v1/chat/completions and /v1/messages exclude it before scheduling. This setting does not inspect client identity.',
+        syncUpstreamStream: 'Use upstream streaming for synchronous requests',
+        syncUpstreamStreamDesc: 'For non-streaming text requests, use upstream HTTP SSE and aggregate the result into one JSON response for the client. Off by default. Streaming clients, WebSocket, compact, standalone images and video are unchanged. Disable non-streaming requests takes precedence and skips this account when both options are enabled.',
         disableSync: 'Disable non-streaming requests',
         disableSyncDesc:
           'Non-streaming Responses, Chat Completions, and Messages requests (stream=false or omitted, including non-streaming compact requests) skip this account and use another eligible account in the same group. Streaming and WebSocket requests are unaffected.',
